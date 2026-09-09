@@ -349,7 +349,7 @@ rank dies mid-allocation, the rest wait on the NCCL clique; `WATCHDOG_FUSE` seco
 log growth → `kill -9`, exit 124). tmux is optional convenience (`apt-get install -y tmux;
 tmux new -s pd` / `tmux attach -t pd`); the runs do not depend on it.
 
-### 6a. Probe ladder (~1.5–2 h; unattended)
+### 6a. Probe ladder (several hours, dominated by cold compiles; unattended)
 
 ```bash
 source /workspace/spd/notes/dual_objective/addsub-all-layers/env.sh
@@ -389,10 +389,20 @@ trial, DERIVED FROM ITS NAME so the set can change without remapping, in `trials
 to redo one, delete that file AND its run dir (fixed run ids: a leftover dir would resume
 or refuse on the pinned config).
 
-Cold compiles are silent: the log shows `targeted run addsub-all-layers-trial-... | 8 GPU`
-and then nothing for tens of minutes. That is normal; the watchdog fuse for trials is
-45 min (`WATCHDOG_FUSE=2700`, env-overridable) and the per-trial `timeout` is in the
-manifest. Peak memory is read from `train/mem/peak_gb_per_rank`; a trial "fits" only if it
+Cold compiles are silent and LONG: the log shows `targeted run
+addsub-all-layers-trial-... | 8 GPU`, then the placement audit, then nothing at all for well
+over an hour while XLA compiles at a few hundred percent CPU. Measured 2026-09-09: a 45-min
+watchdog fuse killed four healthy trials mid-compile, two different meshes dying at an
+identical 48 min — a timer, not a memory limit. The fuse now defaults to 4 h
+(`WATCHDOG_FUSE`, env-overridable) and the per-trial `timeout` is 6 h, in the manifest.
+Confirm a silent trial is compiling rather than wedged with
+`ps -o pid,%cpu,etime,cmd -C python`: a few hundred percent CPU is XLA, near zero is a real
+hang.
+
+A compile reaches the XLA cache only when it COMPLETES, so a killed trial caches nothing and
+its successor starts from scratch, and every (mesh, batch) pair compiles separately. On a
+fresh pod, run the FIRST rung alone — `./run_ladder.sh --profile 8xh100 --only mesh-<m>-<batch>`
+— so one compile lands in the cache before committing hours to the rest. Peak memory is read from `train/mem/peak_gb_per_rank`; a trial "fits" only if it
 reached step 30 with rc 0 and no traceback in the log.
 
 ### 6b. The real run

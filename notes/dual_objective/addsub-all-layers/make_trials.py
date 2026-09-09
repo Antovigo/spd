@@ -79,10 +79,15 @@ PROFILES: dict[str, dict[str, Any]] = {
     },
 }
 
-TIMEOUTS = {"mesh": 4500, "smoke-abgrid": 2700, "smoke-resume": 2700}
-# Mesh trials get 75 min: a COLD 32-block compile is silent for tens of minutes before the
-# step-0 slow eval even starts (the 4-block run needed 18 min to step 100 with a WARM cache).
-# The smokes reuse the mesh trial's compiled step from the cache (same mesh, batch, steps).
+TIMEOUTS = {"mesh": 21600, "smoke-abgrid": 7200, "smoke-resume": 10800}
+# MEASURED 2026-09-09, and the reason these are hours rather than minutes: a COLD 32-block
+# compile runs well past 45 min with no output at all. The first 4xh100 ladder killed FOUR
+# trials at the 45-min watchdog fuse while XLA was still compiling at 200% CPU — two
+# different meshes died at an identical 48 min, which is a timer, not a memory limit. Sizing
+# from the 4-block run (18 min to step 100 on a WARM cache) was simply wrong at 224 sites and
+# four passes. A compile reaches the XLA cache only when it COMPLETES, so a trial killed
+# mid-compile caches nothing and its successor starts over. The smokes reuse the mesh trial's
+# compiled step from the cache (same mesh, batch and steps), so they are the short ones.
 
 
 def batch_tag(target: int, nontarget: int) -> str:

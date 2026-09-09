@@ -22,6 +22,11 @@
 #   4. SIGTERM/resume smoke at the same shape: save_every 20, TERM after the step-20 log,
 #      relaunch on the same run id, must resume and finish at 30
 #
+# The hang watchdog defaults to a 4 h fuse here (WATCHDOG_FUSE, env-overridable): a cold
+# 32-block compile is silent for over an hour, so a short fuse kills healthy compiles — which
+# is exactly what the first 4xh100 ladder did to four trials. Prefer --only for the first
+# rung on a fresh pod, so one compile completes and lands in the XLA cache before the rest.
+#
 # `--extra <trial>` appends any manifest trial (e.g. mesh-ddp-b128x128). `--only <trial>`
 # runs exactly one. Rerun after a fix: delete `<ladder>/<trial>.rc` AND the trial's run dir
 # (`$DATA_ROOT/runs/<run id>`, ids in the profile's manifest.tsv) — run ids are fixed, so a
@@ -85,7 +90,7 @@ run_trial() {  # run_trial <trial>  -> <ladder>/<trial>.rc = "<rc> <seconds>"
   reap_gpus || true
   T0=$(date +%s)
   set +e
-  PD_LOG="$LOG" WATCHDOG_FUSE="${WATCHDOG_FUSE:-2700}" \
+  PD_LOG="$LOG" WATCHDOG_FUSE="${WATCHDOG_FUSE:-14400}" \
     timeout -k 600 "$TIMEOUT" "$HERE/pd_run.sh" "$CONFIG" "$RUN_ID" >> "$LOG" 2>&1
   RC=$?
   set -e
@@ -102,7 +107,7 @@ run_resume_trial() {  # two legs on one run id; SIGTERM the trainer once step 20
   reap_gpus || true
   T0=$(date +%s)
   set +e
-  PD_LOG="$LOG" WATCHDOG_FUSE="${WATCHDOG_FUSE:-2700}" \
+  PD_LOG="$LOG" WATCHDOG_FUSE="${WATCHDOG_FUSE:-14400}" \
     timeout -k 600 "$TIMEOUT" "$HERE/pd_run.sh" "$CONFIG" "$RUN_ID" >> "$LOG" 2>&1 &
   LEG1=$!
   # The step-20 record is written right before the step-20 save; a TERM landing during that
@@ -120,7 +125,7 @@ run_resume_trial() {  # two legs on one run id; SIGTERM the trainer once step 20
   echo "[$NAME] leg 1 rc=$RC1; ckpts: $(ls "$RUN_DIR/ckpts" 2>/dev/null | tr '\n' ' ')"
   echo "[$NAME] $(date -Is) leg 2 start (resume on the same run id)"
   reap_gpus || true
-  PD_LOG="$LOG" WATCHDOG_FUSE="${WATCHDOG_FUSE:-2700}" \
+  PD_LOG="$LOG" WATCHDOG_FUSE="${WATCHDOG_FUSE:-14400}" \
     timeout -k 600 "$TIMEOUT" "$HERE/pd_run.sh" "$CONFIG" "$RUN_ID" >> "$LOG" 2>&1
   RC2=$?
   set -e
