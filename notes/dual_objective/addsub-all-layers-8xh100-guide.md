@@ -48,9 +48,29 @@ cannot carry rsync). Put your public key in Runpod → Settings → SSH Public K
 
 **Container disk:** 30 GB is enough (ephemeral: OS + `/root` + uv's build temp).
 
-**Network volume:** create it in the SAME datacenter as the pod (a pod can only mount a
-volume from its own DC; pick the DC by H100 SXM availability first). It mounts at
-`/workspace`. Everything that must survive a pod restart lives there. Budget:
+**Storage: volume disk, because network volumes are not offered for these GPUs.** Set the
+pod's **volume disk** to the size below; it mounts at `/workspace` and everything that must
+survive a pod restart lives there. Know exactly what that buys you:
+
+| event | volume disk | network volume |
+|---|---|---|
+| pod Stop then Start (same pod) | survives | survives |
+| pod terminated, preempted, or its host lost | **GONE** | survives |
+| move the data to a different pod | **impossible** | just remount |
+
+So the disk is a single point of failure for the whole run, and there is no way to migrate
+it. Two consequences, both non-negotiable:
+
+1. **Take the pod on Secure Cloud / on-demand, never Spot or interruptible.** A preemption
+   with volume disk destroys the run, the 16 GB weights cache and the venv together.
+2. **Back up off the pod continuously**, not at the end — see step 7. `pull_backup.sh` does
+   it; it caps a total loss at one checkpoint interval instead of the entire trajectory.
+
+If a network volume becomes available for your GPU type, prefer it: create it in the SAME
+datacenter as the pod (a pod can only mount one from its own DC), and the periodic backup
+becomes belt-and-braces rather than the only line of defence.
+
+Budget, either way:
 
 | item on the volume | GB |
 |---|---|
@@ -66,8 +86,8 @@ volume from its own DC; pick the DC by H100 SXM availability first). It mounts a
 | ladder misc: `hlo/` dumps (~1 GB per trial), logs | 5 |
 | **total** | **~185** |
 
-→ **250 GB** network volume (200 GB is workable if you delete the ladder's checkpoints
-before launching the real run, step 6b).
+→ **250 GB** volume disk (200 GB is workable if you delete the ladder's checkpoints before
+launching the real run, step 6b).
 
 ---
 
@@ -370,7 +390,45 @@ from the trial that won, is in `summary.md` and supersedes this.
 
 ---
 
-## 7. Retrieval while running
+## 7. Retrieval while running — and the continuous backup
+
+**Start this first, before the long run, and leave it running.** On volume disk the pod is a
+single point of failure (step 1), so the backup is not optional bookkeeping: it is what
+turns "the pod died" from losing the run into losing one checkpoint interval. Run it on the
+cluster or your laptop, wherever you have room for a few 20 GB checkpoints:
+
+```bash
+cd <your checkout>/notes/dual_objective/addsub-all-layers
+POD_HOST=<pod public ip> POD_PORT=<exposed ssh port> KEY=~/.ssh/<your key> \
+  nohup ./pull_backup.sh --profile 8xh100 --interval 3600 --dest ~/out/pod-backup \
+  > ~/out/pod-backup.log 2>&1 &
+tail -f ~/out/pod-backup.log
+```
+
+Each hourly pass pulls `metrics.jsonl`, `launch_config.yaml`, the whole `ab_grids/`
+directory, the ladder summary and every log, all of which are small, plus the newest
+COMPLETE checkpoint if it is newer than the one already backed up. Completeness is decided by
+`_CHECKPOINT_METADATA` inside the step directory, which orbax writes at finalize, so a
+checkpoint mid-write is skipped rather than half-copied. `--keep 2` prunes older local
+copies. At `save_every 4000` a new checkpoint appears every 8 to 11 hours, so an hourly
+interval mostly transfers a few megabytes and occasionally 20 GB.
+
+**Restoring onto a fresh pod.** Re-stage code, datasets, weights and secrets per steps 2 to
+4, then push the run directory back and launch:
+
+```bash
+rsync -avP -e "ssh -p $POD_PORT -i $KEY" \
+  ~/out/pod-backup/p-a1132b01/launch_config.yaml \
+  ~/out/pod-backup/p-a1132b01/ckpts \
+  root@$POD_HOST:/workspace/data/runs/p-a1132b01/
+# then on the pod: ./launch_run.sh --profile 8xh100
+```
+
+`launch_run.sh` prints `RESUME: checkpoints present:` and the trainer logs `resumed from
+checkpoint step N`. The pinned `launch_config.yaml` you push back IS the byte-compare
+reference, so it must be the one from the backup, not a fresh copy of the source config.
+
+### Ad-hoc pulls
 
 From your laptop (or the cluster). The run dir is `/workspace/data/runs/p-a1132b01/`:
 
@@ -410,9 +468,9 @@ Equivalent by hand: `kill -TERM $(cat $DATA_ROOT/pids/p-a1132b01.runner.pid)`. N
 `kill -9` a healthy run — that loses everything since the last save (up to 4000 steps).
 
 **Resume on the same run id** (after a clean stop, a crash, a pod restart, or a watchdog
-kill): attach the same network volume to a fresh 8x H100 SXM pod, redo `source env.sh`
-(the venv, caches and data are all on the volume; if `/root/.cache/param-decomp` is missing
-on the new container, `env.sh` re-creates the symlink), then:
+kill) **on the same pod**, whose volume disk still holds the venv, caches, data and
+checkpoints: Start it, `source env.sh` (which re-creates the `/root/.cache/param-decomp`
+symlink if the container was rebuilt), then:
 
 ```bash
 cd $REPO && git log -1 --oneline                  # the code this resume will run
@@ -428,14 +486,17 @@ has no step 0, so the step-0 slow eval does not rerun. If a wedged process from 
 still holding HBM, `pd_run.sh` aborts with `GPUs are not idle` — `nvidia-smi
 --query-compute-apps=pid --format=csv,noheader | xargs -r kill -9`, wait a minute, relaunch.
 
-**Stop the pod without losing anything:** Runpod → the pod → **Stop** (storage-only billing
-for the container disk) or **Terminate** (drops the container disk). The NETWORK volume is a
-separate object and survives both; only deleting the volume itself loses data. Everything
-that matters is under `/workspace` (step 5).
+**Stopping the pod.** Runpod → the pod → **Stop** keeps the volume disk and bills it while
+idle, so `/workspace` is intact when you Start it again and `launch_run.sh` resumes. **Do
+not Terminate until everything is off the pod**: terminating destroys the volume disk with
+the container, and unlike a network volume there is nothing left to remount. Check your
+backup first (step 7): `ls $DEST/<run id>/ckpts` should show a recent step.
 
 **At the end:**
 
-1. Pull `ab_grids/`, `metrics.jsonl`, `launch_config.yaml`, `logs/`, `ladder/summary.md`,
+1. Run one last `./pull_backup.sh --profile 8xh100 --once` so the FINAL checkpoint is off the
+   pod, then confirm `ls ~/out/pod-backup/p-a1132b01/ckpts` shows step 40000. The hourly loop
+   already holds `ab_grids/`, `metrics.jsonl`, `launch_config.yaml`, `logs/` and
    and — if you want the decomposition offline — the final `ckpts/40000/` (~20 GB; the
    `decomposition` item alone, ~7 GB, is what every consumer restores).
 2. Delete on the volume: every ladder trial's run dir,

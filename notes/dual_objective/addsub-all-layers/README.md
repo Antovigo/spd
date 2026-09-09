@@ -21,6 +21,7 @@ ladders can share one `$DATA_ROOT`.
 | `pd_run.sh` | runs one trainer process with SIGTERM forwarding + hang watchdog (shared by ladder and launcher) |
 | `launch_run.sh` | detached launcher for the real run; re-running RESUMES on the profile's fixed run id |
 | `stop_run.sh` | clean stop (SIGTERM, checkpoint save, exit) |
+| `pull_backup.sh` | periodic off-pod backup, run from the CLUSTER not the pod; mandatory on volume disk, where losing the pod loses everything |
 
 Quick path, 4x H100:
 
