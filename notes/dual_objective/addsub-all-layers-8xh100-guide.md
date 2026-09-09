@@ -43,9 +43,57 @@ untested on this branch — stay on `cuda`.
 `runpod/pytorch:*-cuda12.8.1-*-ubuntu22.04` template); nothing from the image's python is
 used — `uv` installs Python 3.12 and the locked venv. Convenient to have: `git`, `curl`, `rsync`
 (`apt-get install -y git curl rsync tmux` if missing); none of them are actually required,
-see "If the image is missing tools" in step 2 for the fallbacks. Enable **SSH over exposed TCP port** in the
-template (needed for `rsync`/`scp`; the web terminal and the proxied `ssh.runpod.io` login
-cannot carry rsync). Put your public key in Runpod → Settings → SSH Public Keys.
+see "If the image is missing tools" in step 2 for the fallbacks. See "SSH access" below: you need the DIRECT
+connection, not the proxied one, or none of the transfers in steps 3 and 7 will work.
+
+**SSH access — get the direct connection, not the tunnel.** Runpod offers two, and they are
+not interchangeable:
+
+| | looks like | carries rsync/scp? |
+|---|---|---|
+| direct, "SSH over exposed TCP" | `ssh root@<public ip> -p <port> -i <key>` | yes |
+| proxied / tunnel | `ssh <pod-id>-<hash>@ssh.runpod.io -i <key>` | **no** |
+
+The proxied form is a restricted relay: it gives you a shell, but `rsync` and `scp` need to
+launch a remote program over the connection and it will not do that. So if the command
+Runpod shows you points at `ssh.runpod.io`, that is the wrong one for this guide, and
+`POD_HOST` / `POD_PORT` come from the direct form instead. To get it, set **Expose TCP
+Ports = 22** on the pod (template settings, or Edit Pod), after which the Connect dialog
+shows a `root@<ip> -p <port>` command. A key file merely NAMED something like `tunnel` is
+fine; only the destination host matters.
+
+**Making a key, if you do not have one.** On the machine that will run the transfers, which
+for step 7 is the machine running the backup loop for days:
+
+```bash
+ssh-keygen -t ed25519 -C runpod -f ~/.ssh/runpod -N ''     # -N '' = no passphrase
+cat ~/.ssh/runpod.pub                                      # paste this into Runpod
+```
+
+Leave it passphrase-free, or the unattended backup loop blocks on the first prompt; if you
+would rather use a passphrase, load the key into `ssh-agent` and keep the agent alive for
+the whole run. Paste the **public** half (`~/.ssh/runpod.pub`, one line starting
+`ssh-ed25519`) into Runpod → Settings → SSH Public Keys, and pass the **private** half as
+`KEY=~/.ssh/runpod`.
+
+Runpod injects those keys when a pod is CREATED. If your pod is already running and was
+created before you added the key, do not recreate it — paste the public line into the pod's
+`/root/.ssh/authorized_keys` from the web terminal:
+
+```bash
+mkdir -p /root/.ssh && chmod 700 /root/.ssh
+echo 'ssh-ed25519 AAAA... runpod' >> /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys
+```
+
+Then check from your side before relying on it in step 3:
+
+```bash
+ssh -p <port> -i ~/.ssh/runpod root@<ip> 'nvidia-smi -L && which rsync'
+```
+
+Both lines must come back. If `rsync` is missing on the pod, the 8-GPU guide's
+"If the image is missing tools" section has the tar-over-ssh fallback, which needs only a
+shell.
 
 **Container disk:** 30 GB is enough (ephemeral: OS + `/root` + uv's build temp).
 
