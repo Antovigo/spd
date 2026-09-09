@@ -21,6 +21,9 @@ ladders can share one `$DATA_ROOT`.
 | `pd_run.sh` | runs one trainer process with SIGTERM forwarding + hang watchdog (shared by ladder and launcher) |
 | `launch_run.sh` | detached launcher for the real run; re-running RESUMES on the profile's fixed run id |
 | `stop_run.sh` | clean stop (SIGTERM, checkpoint save, exit) |
+| `ladder_status.sh` | one-screen ladder status; identifies the live trial from the running process, so stale logs cannot masquerade as running |
+| `scaletest.sh` | run one short trial at a REDUCED block count, to bisect where a full-network run stops working |
+| `run_with_stackdump.py` | diagnostic wrapper: `kill -USR1 <pid>` prints every thread's Python stack into the log, with no ptrace (Runpod forbids it, so py-spy cannot attach) |
 | `pull_backup.sh` | periodic off-pod backup, run from the CLUSTER not the pod; mandatory on volume disk, where losing the pod loses everything |
 
 Quick path, 4x H100:
@@ -39,3 +42,34 @@ Drop `--profile 4xh100` throughout for the 8-GPU route; `8xh100` is the default.
 
 `trials*/` are GENERATED. After editing either production config, regenerate rather than
 hand-editing a trial: `$VENV_PY make_trials.py --profile <name> --check`.
+
+## If a run stops making progress
+
+Runpod containers forbid ptrace, so `py-spy` cannot attach. Use the wrapper instead:
+
+```bash
+./scaletest.sh --profile 4xh100 --blocks 4          # or launch anything via run_with_stackdump.py
+kill -USR1 $(pgrep -f run_with_stackdump | head -1) # stacks land in the log; the run continues
+```
+
+Distinguish the three states before concluding anything, because they look identical from
+outside — the trainer prints nothing during startup or compilation:
+
+| CPU | GPU util | meaning |
+|---|---|---|
+| hundreds of % | ~0 | compiling. A cold 32-block compile runs over an hour. |
+| ~0 | busy | executing, most likely the step-0 slow eval. Also silent. |
+| ~0 | ~0 | genuinely stalled. Dump the stack. |
+
+```bash
+PID=$(pgrep -f run_targeted | head -1)
+read u1 s1 < <(awk '{print $14,$15}' /proc/$PID/stat); sleep 30
+read u2 s2 < <(awk '{print $14,$15}' /proc/$PID/stat)
+echo "cpu ticks/30s: $(( (u2+s2)-(u1+s1) ))  (3000 = one core)"
+nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
+```
+
+`JAX_LOG_COMPILES=1` makes jax print a line per compilation with its duration, which turns
+the silent phases into visible progress. Note that only compiles longer than 60 s reach the
+persistent XLA cache (`jax_persistent_cache_min_compile_time_secs`), so the thousands of
+small ones at startup are repeated on every launch and clearing the cache costs little.

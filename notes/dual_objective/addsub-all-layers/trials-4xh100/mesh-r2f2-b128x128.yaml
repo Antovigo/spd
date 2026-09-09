@@ -339,4 +339,4 @@ runtime:
   remat_ci_fn: true
   sequential_passes: true
   launch_env:
-    xla_python_client_mem_fraction: 0.95
+    xla_python_client_mem_fraction: 0.88

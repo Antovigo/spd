@@ -420,6 +420,12 @@ runtime:
   # sites the one-pass-at-a-time residual lifetime is worth more here, not less.
   sequential_passes: true
   launch_env:
-    xla_python_client_mem_fraction: 0.95  # 4 GB outside the pool for NCCL/cuDNN/context
+    # 0.88, not the 8-GPU file's 0.95: at 0.95 an 81.5 GB card leaves ~3 GB outside the
+    # pool for NCCL's communication buffers, cuDNN workspaces and the CUDA context, which is
+    # thin for 4 ranks under `zero1` — NCCL allocates outside XLA's pool and can block rather
+    # than raise when it cannot. Lowered 2026-09-09 while chasing a startup stall; it did NOT
+    # fix that stall, so this is prudence, not a diagnosis. ~10 GB outside the pool now,
+    # against an activation estimate of 30-60 GB and ~57 GB of remaining headroom.
+    xla_python_client_mem_fraction: 0.88
 wandb:
   project: param-decomp-llama
