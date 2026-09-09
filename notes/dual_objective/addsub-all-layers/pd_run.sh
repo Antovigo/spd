@@ -22,7 +22,7 @@ WATCHDOG_FUSE="${WATCHDOG_FUSE:-3600}"
 [ -f "$CONFIG" ] || { echo "no such config: $1"; exit 2; }
 
 cd "$REPO"
-echo "=== pd_run $(date -Is) config=$CONFIG run_id=$RUN_ID commit=$(git rev-parse --short HEAD) ==="
+echo "=== pd_run $(date -Is) config=$CONFIG run_id=$RUN_ID commit=$(git rev-parse --short HEAD 2>/dev/null || echo tarball) ==="
 nvidia-smi --query-gpu=index,name,memory.total,memory.free,driver_version --format=csv,noheader
 
 # Refuse a contended card rather than wedging on it (report §4): a previous trial that hung

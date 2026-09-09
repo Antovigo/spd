@@ -101,7 +101,7 @@ run_resume_trial() {  # two legs on one run id; SIGTERM the trainer once step 20
   echo "[$NAME] $(date -Is) leg 2 rc=$RC2 (combined $RC) after $(( ($(date +%s) - T0) / 60 )) min"
 }
 
-echo "=== ladder $(date -Is) repo $(git -C "$REPO" rev-parse --short HEAD) data_root $DATA_ROOT ==="
+echo "=== ladder $(date -Is) repo $(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo tarball) data_root $DATA_ROOT ==="
 nvidia-smi --query-gpu=index,name,memory.total,driver_version --format=csv,noheader | head -8
 
 if [ -n "$ONLY" ]; then

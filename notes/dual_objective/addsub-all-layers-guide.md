@@ -37,8 +37,9 @@ untested on this branch — stay on `cuda`.
 
 **Template / image:** any Runpod Ubuntu 22.04 CUDA image works (e.g. the current
 `runpod/pytorch:*-cuda12.8.1-*-ubuntu22.04` template); nothing from the image's python is
-used — `uv` installs Python 3.12 and the locked venv. Requirements: `git`, `curl`, `rsync`
-(`apt-get install -y rsync tmux` if missing). Enable **SSH over exposed TCP port** in the
+used — `uv` installs Python 3.12 and the locked venv. Convenient to have: `git`, `curl`, `rsync`
+(`apt-get install -y git curl rsync tmux` if missing); none of them are actually required,
+see "If the image is missing tools" in step 2 for the fallbacks. Enable **SSH over exposed TCP port** in the
 template (needed for `rsync`/`scp`; the web terminal and the proxied `ssh.runpod.io` login
 cannot carry rsync). Put your public key in Runpod → Settings → SSH Public Keys.
 
@@ -82,6 +83,62 @@ uv sync --frozen --no-dev --extra cuda          # README "Install": driver r525�
 ```
 
 If `jax.devices()` shows CPU only, the driver is the problem (step 1), not the install.
+
+### If the image is missing tools (no `uv`, no `apt-get`, no `git`)
+
+None of them are hard requirements. Only a Python with `pip` and outbound HTTPS are, and
+every Runpod PyTorch image has both. What each one is for, and what to do without it:
+
+**`uv` is never pre-installed** and the block above installs it; that line only assumes
+`curl`. Without root or without `curl`, use pip instead, which is why the image's own Python
+matters even though nothing else uses it:
+
+```bash
+python3 -m pip install --user uv && export PATH="$HOME/.local/bin:$PATH"
+# or, if curl is missing but wget is there:
+wget -qO- https://astral.sh/uv/install.sh | sh && source "$HOME/.local/bin/env"
+```
+
+Do NOT try to skip uv and `pip install -e ".[cuda]"` with the image's own interpreter: the
+project is `requires-python >=3.12,<3.14` and these images ship 3.11, so it refuses. Getting
+a 3.12 without `apt` is exactly what `uv python install 3.12` is for.
+
+**`git` is only needed to fetch the code.** Nothing at install or run time uses it: the lock
+has no git-sourced dependencies, and the build backend is plain setuptools with a static
+version, so `uv sync --frozen` never shells out to git. The repository is public, so the
+pinned commit downloads as a tarball with no credentials:
+
+```bash
+cd /workspace
+curl -L https://codeload.github.com/Antovigo/spd/tar.gz/7d8421a76b7338be7f1e61d2d7032103ad02d195 -o spd.tar.gz
+# or: wget -O spd.tar.gz https://codeload.github.com/...
+# or, with neither: python3 -c "import urllib.request as u; u.urlretrieve('https://codeload.github.com/Antovigo/spd/tar.gz/7d8421a76b7338be7f1e61d2d7032103ad02d195','spd.tar.gz')"
+tar xzf spd.tar.gz && mv spd-7d8421a76b7338be7f1e61d2d7032103ad02d195 spd && rm spd.tar.gz
+```
+
+Then continue from `cd spd` in the block above, skipping the `git checkout` line. The run
+scripts log `commit=tarball` instead of a hash and are otherwise unaffected. The cost of
+this route is that you cannot `git rev-parse HEAD` to prove which code is running, so record
+the tarball URL you used.
+
+**`rsync` matters only on the transfer path** (step 3 and step 7): `rsync` spawns a remote
+`rsync`, so it must exist on BOTH ends. If the pod has none, `scp -r` usually works
+(Runpod runs an OpenSSH server), and if even that fails, tar over ssh needs nothing but a
+shell and `tar` on the pod:
+
+```bash
+# push a dataset from the cluster to the pod, no rsync and no scp needed
+tar cz -C ~/out/datasets fineweb_llama_tok_64 \
+  | ssh -p $POD_PORT -i $KEY root@$POD_HOST 'tar xz -C /workspace/data/datasets'
+# pull results back the same way
+ssh -p $POD_PORT -i $KEY root@$POD_HOST 'tar cz -C /workspace/data/runs/p-a1132b01 ab_grids' | tar xz
+```
+
+**`tmux` is never required.** The launcher and ladder driver detach with `setsid nohup` and
+write to files under `$DATA_ROOT`; tmux is only convenience for watching them.
+
+If `apt-get` fails merely because the index is stale rather than being blocked, one
+`apt-get update` usually fixes it. Do not spend long on it: nothing above needs it.
 
 ---
 
