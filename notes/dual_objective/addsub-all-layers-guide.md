@@ -79,7 +79,8 @@ before launching the real run, step 6b).
 
 ```bash
 cd /workspace
-git clone --branch addsub-all-layers-01 https://github.com/Antovigo/spd.git spd   # the pin, by name
+git -c advice.detachedHead=false clone --branch addsub-all-layers-01 \
+  https://github.com/Antovigo/spd.git spd            # the pin, by name (detached HEAD is expected)
 cd spd
 git describe --tags --exact-match                     # must print addsub-all-layers-01
 curl -LsSf https://astral.sh/uv/install.sh | sh && source "$HOME/.local/bin/env"
