@@ -5,10 +5,17 @@ from `addsub-all-layers-sota.yaml`, run on one Runpod pod with 8x H100 SXM 80 GB
 Companion scripts: `addsub-all-layers/` (read its `README.md`). Every command below is meant
 to be pasted in the order given. `<...>` are placeholders you fill in.
 
-Pinned code: `https://github.com/Antovigo/spd.git`, branch `feature/dual_obj_jax`, commit
-`7d8421a76b7338be7f1e61d2d7032103ad02d195` (the commit that added this guide; `git log -1 --format=%H -- notes/dual_objective/addsub-all-layers-sota.yaml`
-on that branch prints it). The config parses and builds at that commit (224 sites, 32 CI
-chunks, `input_dim` 26624, checked on CPU).
+Pinned code: `https://github.com/Antovigo/spd.git`, **tag `addsub-all-layers-01`** on branch
+`feature/dual_obj_jax`. The config parses and builds at that tag (224 sites, 32 CI chunks,
+`input_dim` 26624, checked on CPU).
+
+**Why a tag and not the branch.** This run resumes across days, possibly on a fresh pod, and
+its `launch_config.yaml` is byte-pinned while the CODE is not. If `feature/dual_obj_jax`
+advanced between leg 1 and leg 2, the second leg would restore a checkpoint into whatever
+the library had become: at best a schema change that refuses the pinned config, at worst a
+numerics change halfway through one trajectory. This is why every run on this line launches
+from a frozen checkout. A tag buys that immutability while still cloning in one readable
+command, which a detached commit hash does not.
 
 Order of operations: pod (1) → code (2) → data + weights (3) → secrets (4) → env sanity (5)
 → probe ladder (6a) → **set the mesh winner in the config** → real run (6b) → retrieval (7)
@@ -72,9 +79,9 @@ before launching the real run, step 6b).
 
 ```bash
 cd /workspace
-git clone https://github.com/Antovigo/spd.git -b feature/dual_obj_jax spd
+git clone --branch addsub-all-layers-01 https://github.com/Antovigo/spd.git spd   # the pin, by name
 cd spd
-git checkout 7d8421a76b7338be7f1e61d2d7032103ad02d195                      # the pin; `git rev-parse HEAD` must print it
+git describe --tags --exact-match                     # must print addsub-all-layers-01
 curl -LsSf https://astral.sh/uv/install.sh | sh && source "$HOME/.local/bin/env"
 source notes/dual_objective/addsub-all-layers/env.sh   # creates the DATA_ROOT tree, sets UV_CACHE_DIR
 uv python install 3.12
@@ -110,16 +117,17 @@ pinned commit downloads as a tarball with no credentials:
 
 ```bash
 cd /workspace
-curl -L https://codeload.github.com/Antovigo/spd/tar.gz/7d8421a76b7338be7f1e61d2d7032103ad02d195 -o spd.tar.gz
-# or: wget -O spd.tar.gz https://codeload.github.com/...
-# or, with neither: python3 -c "import urllib.request as u; u.urlretrieve('https://codeload.github.com/Antovigo/spd/tar.gz/7d8421a76b7338be7f1e61d2d7032103ad02d195','spd.tar.gz')"
-tar xzf spd.tar.gz && mv spd-7d8421a76b7338be7f1e61d2d7032103ad02d195 spd && rm spd.tar.gz
+URL=https://codeload.github.com/Antovigo/spd/tar.gz/refs/tags/addsub-all-layers-01
+curl -L "$URL" -o spd.tar.gz
+# or: wget -O spd.tar.gz "$URL"
+# or, with neither: python3 -c "import urllib.request as u,os; u.urlretrieve(os.environ['URL'],'spd.tar.gz')"
+tar xzf spd.tar.gz && mv spd-addsub-all-layers-01 spd && rm spd.tar.gz
 ```
 
-Then continue from `cd spd` in the block above, skipping the `git checkout` line. The run
+Then continue from `cd spd` in the block above, skipping the `git describe` line. The run
 scripts log `commit=tarball` instead of a hash and are otherwise unaffected. The cost of
-this route is that you cannot `git rev-parse HEAD` to prove which code is running, so record
-the tarball URL you used.
+this route is that you cannot ask git which code is running, but the tarball is taken from
+the same immutable tag, so `addsub-all-layers-01` still names it.
 
 **`rsync` matters only on the transfer path** (step 3 and step 7): `rsync` spawns a remote
 `rsync`, so it must exist on BOTH ends. If the pod has none, `scp -r` usually works
@@ -237,7 +245,7 @@ volume. The ladder's trials carry no `wandb:` block (metrics.jsonl only); the re
 
 ```
 VOLUME=/workspace
-REPO=$VOLUME/spd                              code @ 7d8421a76b7338be7f1e61d2d7032103ad02d195, venv at $REPO/.venv
+REPO=$VOLUME/spd                              code @ tag addsub-all-layers-01, venv at $REPO/.venv
 DATA_ROOT=$VOLUME/data                        the trainer's positional <data_root>
   runs/<run id>/            launch_config.yaml (pinned), metrics.jsonl, ckpts/<step>/, ab_grids/, hlo/, neuron_alignment.json
   runs/by-name/<run_name>   -> ../<run id>    (symlink, made by pd_run.sh)
@@ -396,7 +404,7 @@ kill): attach the same network volume to a fresh 8x H100 SXM pod, redo `source e
 on the new container, `env.sh` re-creates the symlink), then:
 
 ```bash
-cd $REPO && git rev-parse HEAD                    # must still print 7d8421a76b7338be7f1e61d2d7032103ad02d195
+cd $REPO && git describe --tags --exact-match     # must still print addsub-all-layers-01
 cd notes/dual_objective/addsub-all-layers && ./launch_run.sh
 ```
 
