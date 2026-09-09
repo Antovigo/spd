@@ -1,7 +1,7 @@
-# addsub-all-layers-01 on a Runpod 8x H100 SXM pod — step by step
+# addsub-all-layers-8xh100-01 on a Runpod 8x H100 SXM pod — step by step
 
 The full-network (32-block, 224-site) targeted dual-objective decomposition of Llama-3.1-8B
-from `addsub-all-layers-sota.yaml`, run on one Runpod pod with 8x H100 SXM 80 GB (NVLink).
+from `addsub-all-layers-8xh100-sota.yaml`, run on one Runpod pod with 8x H100 SXM 80 GB (NVLink).
 Companion scripts: `addsub-all-layers/` (read its `README.md`). Every command below is meant
 to be pasted in the order given. `<...>` are placeholders you fill in.
 
@@ -182,7 +182,7 @@ done
 ```
 
 The neuron-ranks artifact is regenerable with
-`python -m param_decomp.experiments.lm.harvest_neuron_ranks --config notes/dual_objective/addsub-all-layers-sota.yaml --data_root $DATA_ROOT --out_dir $DATA_ROOT/neuron_ranks/addsub1-100_llama31-8b_unit-energy --local_device_count 1 --layers all --batch_size 128`
+`python -m param_decomp.experiments.lm.harvest_neuron_ranks --config notes/dual_objective/addsub-all-layers-8xh100-sota.yaml --data_root $DATA_ROOT --out_dir $DATA_ROOT/neuron_ranks/addsub1-100_llama31-8b_unit-energy --local_device_count 1 --layers all --batch_size 128`
 (one GPU, ~1 h; needs the weights) — but copying the existing 6 MB is strictly better: it is
 an immutable name and the copy IS the artifact the 1-block and 4-block runs used.
 
@@ -331,7 +331,7 @@ reached step 30 with rc 0 and no traceback in the log.
 Before launching — these are the only edits the config ever gets, and they must happen NOW
 (the pinned `launch_config.yaml` byte-compares on every resume):
 
-1. `runtime.replicate` / `runtime.fsdp` in `addsub-all-layers-sota.yaml` ← the ladder's
+1. `runtime.replicate` / `runtime.fsdp` in `addsub-all-layers-8xh100-sota.yaml` ← the ladder's
    winner (authored as (b) `1 / 8`; (c) is `2 / 4`). `sharding: zero1` either way.
 2. If the pod driver turned out to be < r570 (it should not, step 1): set BOTH
    `target.attention_implementation` and `decomposition.ci.attention.attention_implementation`
@@ -345,21 +345,28 @@ Before launching — these are the only edits the config ever gets, and they mus
 ```bash
 source /workspace/spd/notes/dual_objective/addsub-all-layers/env.sh
 cd $REPO/notes/dual_objective/addsub-all-layers
-./launch_run.sh                                  # run id p-a1132b01, run_name addsub-all-layers-01
-tail -f $DATA_ROOT/logs/addsub-all-layers-01.latest.log
+./launch_run.sh                                  # run id p-a1132b01, run_name addsub-all-layers-8xh100-01
+tail -f $DATA_ROOT/logs/addsub-all-layers-8xh100-01.latest.log
 ```
 
 First minutes of a healthy launch: `persistent XLA compilation cache: /root/.cache/param-decomp/xla`
-(→ the volume via the symlink), `targeted run addsub-all-layers-01 | 8 GPU / 1 proc | target B=256
+(→ the volume via the symlink), `targeted run addsub-all-layers-8xh100-01 | 8 GPU / 1 proc | target B=256
 nontarget B=128 seq=64 sites=224 steps=40000`, `target prompt pool: 20000 prompts x 5 positions`,
 then silence for the compile (cache hit if the ladder ran the same mesh — same step HLO),
 then `[step 0] eval/...` (the slow eval), `checkpoint saved @ step 0`, and `[step 100] ...
 train/perf/step_time_s=... train/mem/peak_gb_per_rank=...` every ~100 steps. AB grids appear
 at step 4000 (`$DATA_ROOT/runs/p-a1132b01/ab_grids/step_4000.js`). wandb: the run is
-`param-decomp-llama/addsub-all-layers-01` (id `p-a1132b01`). Close the shell and the laptop;
+`param-decomp-llama/addsub-all-layers-8xh100-01` (id `p-a1132b01`). Close the shell and the laptop;
 the runner survives (`setsid nohup`). The hang watchdog fuse is 60 min for the real run
 (`WATCHDOG_FUSE=3600`): the trainer logs every 100 steps (~8–10 min), a slow eval + 20 GB
 save can be 20–30 min, a cold compile 20–40 min.
+
+**Expected wall clock and cost.** Anchoring on the measured single-block (3.3 s/step, 7
+sites) and four-block (4.3 s/step, 28 sites) L40 runs and treating an H100 SXM as 3 to 3.5x
+an L40, 224 live sites at 32 prompts and 16 broad rows per rank comes out at roughly **4 to
+6 s/step**. That is **2 to 3 days** for 40k steps including the measured 6% eval and
+checkpoint overhead, so **$1340 to $2010** at $27.92/h. The ladder's own projection, computed
+from the trial that won, is in `summary.md` and supersedes this.
 
 ---
 
@@ -371,13 +378,13 @@ From your laptop (or the cluster). The run dir is `/workspace/data/runs/p-a1132b
 POD_HOST=<pod public ip>; POD_PORT=<exposed ssh port>; KEY=~/.ssh/<your key>
 RS="rsync -avP -e 'ssh -p $POD_PORT -i $KEY'"
 R=root@$POD_HOST:/workspace/data
-eval $RS $R/runs/p-a1132b01/ab_grids/ ./addsub-all-layers-01/ab_grids/      # index.html + manifest.js + step_*.js
-open ./addsub-all-layers-01/ab_grids/index.html        # file:// works; the applet reads manifest.js
-eval $RS $R/runs/p-a1132b01/metrics.jsonl $R/runs/p-a1132b01/launch_config.yaml ./addsub-all-layers-01/
-eval $RS $R/ladder/summary.md $R/ladder/'*.log' ./addsub-all-layers-01/ladder/
-eval $RS $R/logs/ ./addsub-all-layers-01/logs/
+eval $RS $R/runs/p-a1132b01/ab_grids/ ./addsub-all-layers-8xh100-01/ab_grids/      # index.html + manifest.js + step_*.js
+open ./addsub-all-layers-8xh100-01/ab_grids/index.html        # file:// works; the applet reads manifest.js
+eval $RS $R/runs/p-a1132b01/metrics.jsonl $R/runs/p-a1132b01/launch_config.yaml ./addsub-all-layers-8xh100-01/
+eval $RS $R/ladder/summary.md $R/ladder/'*.log' ./addsub-all-layers-8xh100-01/ladder/
+eval $RS $R/logs/ ./addsub-all-layers-8xh100-01/logs/
 # optional, ~20 GB per step dir (decomposition ~7 GB + training ~13 GB):
-eval $RS $R/runs/p-a1132b01/ckpts/<step>/ ./addsub-all-layers-01/ckpts/<step>/
+eval $RS $R/runs/p-a1132b01/ckpts/<step>/ ./addsub-all-layers-8xh100-01/ckpts/<step>/
 ```
 
 `scp -P $POD_PORT -i $KEY -r root@$POD_HOST:/workspace/data/runs/p-a1132b01/ab_grids .` is
@@ -385,7 +392,7 @@ the no-rsync equivalent. Pull the whole `ab_grids/` dir, not single files: `inde
 discovers snapshots through `manifest.js`. Quick status without pulling anything:
 
 ```bash
-ssh -p $POD_PORT -i $KEY root@$POD_HOST 'tail -2 /workspace/data/logs/addsub-all-layers-01.latest.log | cut -c1-300; ls /workspace/data/runs/p-a1132b01/ckpts'
+ssh -p $POD_PORT -i $KEY root@$POD_HOST 'tail -2 /workspace/data/logs/addsub-all-layers-8xh100-01.latest.log | cut -c1-300; ls /workspace/data/runs/p-a1132b01/ckpts'
 ```
 
 ---

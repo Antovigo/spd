@@ -1,4 +1,4 @@
-# addsub-all-layers-01: the single-block targeted dual-objective recipe
+# addsub-all-layers-8xh100-01: the single-block targeted dual-objective recipe
 # `addsub-L18-23-neuronaligned` (notes/dual_objective/addsub-L18-sota.yaml, p-6540dfdd) scaled
 # to ALL 32 blocks of Llama-3.1-8B — 224 sites, 62464 subcomponents — for one pod of
 # 8x H100 SXM 80 GB (NVLink). Same recipe, same kind of result wanted: a sparse
@@ -12,7 +12,7 @@
 #
 # Runs via `python -m param_decomp.experiments.lm.run_targeted <this> <data_root> 8
 # --run_id p-a1132b01`; the launcher, probe ladder and pod guide live next to this file
-# (`addsub-all-layers/`, `addsub-all-layers-guide.md`). The run must resume on its OWN id after
+# (`addsub-all-layers/`, `addsub-all-layers-8xh100-guide.md`). The run must resume on its OWN id after
 # any interruption: the pinned `launch_config.yaml` byte-compares on re-entry, so nothing in
 # this file may change once the run has started.
 #
@@ -135,7 +135,7 @@
 #   CIHiddenActsReconLoss — deleted by #1001); the prompts file; both datasets; seed 0;
 #   wandb project. Rationale for the coefficients: imp-min and frequency are SUMS over
 #   components, so a fixed coefficient keeps per-component pressure constant as C grows 32x.
-run_name: addsub-all-layers-01
+run_name: addsub-all-layers-8xh100-01
 decomposition:
   sites:
     kind: glu_transformer

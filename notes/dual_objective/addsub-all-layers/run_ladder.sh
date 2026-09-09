@@ -9,7 +9,7 @@
 #
 # A PROFILE is one pod shape (see PROFILES in make_trials.py, the single source of truth for
 # which config, meshes, trials dir, ladder dir and run ids it uses):
-#     8xh100   addsub-all-layers-sota.yaml         meshes c (2x4) and b (1x8), batch 256/128
+#     8xh100   addsub-all-layers-8xh100-sota.yaml   meshes c (2x4) and b (1x8), batch 256/128
 #     4xh100   addsub-all-layers-4xh100-sota.yaml  meshes f4 (1x4) and r2f2 (2x2), batch 128/128
 #
 # Order:

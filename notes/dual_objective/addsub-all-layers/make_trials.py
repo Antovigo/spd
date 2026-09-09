@@ -56,7 +56,7 @@ TRIAL_STEPS = 30
 # (report §8.5: 26x all-reduce) — the config builder accepts it, so the guard is lore.
 PROFILES: dict[str, dict[str, Any]] = {
     "8xh100": {
-        "sota": "addsub-all-layers-sota.yaml",
+        "sota": "addsub-all-layers-8xh100-sota.yaml",
         "out": "trials",
         "ladder": "ladder",
         "run_id": "p-a1132b01",

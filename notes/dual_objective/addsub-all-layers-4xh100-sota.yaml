@@ -1,6 +1,6 @@
 # addsub-all-layers-4xh100-01: the 32-block targeted dual-objective decomposition of
 # Llama-3.1-8B (224 sites, 62464 subcomponents) sized for FOUR H100 SXM 80 GB instead of
-# eight. Derived from `addsub-all-layers-sota.yaml` and IDENTICAL to it except for the five
+# eight. Derived from `addsub-all-layers-8xh100-sota.yaml` and IDENTICAL to it except for the five
 # lines listed below; read that file's header for the recipe itself, the CI-fn sizing, the
 # schedule re-placement, and every "deliberately kept" decision. Nothing here re-opens any
 # of those.
@@ -14,7 +14,7 @@
 # --run_id p-b4132c01`. Guide: `addsub-all-layers-4xh100-guide.md`. Note the `4`, not `8`.
 #
 # ---------------------------------------------------------------------------------------
-# THE ENTIRE DELTA FROM addsub-all-layers-sota.yaml
+# THE ENTIRE DELTA FROM addsub-all-layers-8xh100-sota.yaml
 # ---------------------------------------------------------------------------------------
 #   run_name              addsub-all-layers-01 -> addsub-all-layers-4xh100-01
 #   pd.batch_size         256 -> 128

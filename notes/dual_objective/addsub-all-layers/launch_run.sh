@@ -4,7 +4,7 @@
 # Each profile has ONE fixed run id (the trainer enforces `p-<8hex>`): the second and every
 # later invocation resumes from the newest checkpoint in $DATA_ROOT/runs/<run id>/ckpts —
 # the pinned launch_config.yaml is byte-compared, so the config file must be unchanged.
-#     8xh100  addsub-all-layers-sota.yaml         -> p-a1132b01
+#     8xh100  addsub-all-layers-8xh100-sota.yaml   -> p-a1132b01
 #     4xh100  addsub-all-layers-4xh100-sota.yaml  -> p-b4132c01
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

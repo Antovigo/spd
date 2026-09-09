@@ -9,7 +9,7 @@
 # byte-identical to ~/pd_scratch/dual_obj_jax/addsub-L18-23-neuronaligned.yaml apart from
 # this paragraph. It replaces the earlier in-tree copy that ran `initialization: random`
 # (the previous SOTA recipe minus its retired `coupled` init). The full-model scale-up
-# lives next to it as addsub-all-layers-sota.yaml.
+# lives next to it as addsub-all-layers-8xh100-sota.yaml (and -4xh100- for the 4-GPU variant).
 #
 # What "attention included" buys over the retired MLP-only arm: q/k/v/o subcomponents now
 # start as head channels ranked by their own energy (q/k: E[x_j^2] on the projection
