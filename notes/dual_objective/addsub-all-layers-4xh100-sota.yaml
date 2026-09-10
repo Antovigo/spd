@@ -413,8 +413,11 @@ runtime:
   # the multi-minute compile survives a pod restart.
   compilation_cache_dir: ~/.cache/param-decomp/xla
   compiler_options: tuned-v1
-  # The explicit (replicate, fsdp, tp) mesh — 4 GPUs. PENDING THE LADDER: set the winner of
-  # `mesh-f4` (replicate 1 / fsdp 4) vs `mesh-r2f2` (replicate 2 / fsdp 2) here before launch.
+  # The explicit (replicate, fsdp, tp) mesh — 4 GPUs. SETTLED by the ladder on the Runpod
+  # 4x H100 pod, 2026-09-10: `mesh-f4` (replicate 1 / fsdp 4) FITS at 34.8 GB/rank of 80 and
+  # runs 2.55 s/step at batch 128/128 — 30.0 h projected for 40k steps including eval and
+  # checkpoint overhead. `mesh-r2f2` was never run: f4 fits with 45 GB of headroom, so the
+  # memory question the A/B existed to answer is already answered.
   # Both shard optimizer state 8-way under `zero1`; they differ in how the frozen target and
   # compute weights are sharded and gathered (over NVLink either way). Header has the memory
   # argument against the 1-block line's `replicate 8 / fsdp 1 / ddp`.
