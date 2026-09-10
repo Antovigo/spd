@@ -68,8 +68,7 @@ in the header as a deliberate recipe change, not a scale adjustment.
 
 **Hidden pass:** kept on both streams. Points = every block's MLP output,
 `layers.0.mlp.down_proj.out` … `layers.31.mlp.down_proj.out`. The hidden loss is a mean
-over points, so coefficients stay as they are; note this in the header. If memory forces
-a cut, the nontarget hidden pass is the first thing to drop — tell me before doing so.
+over points, so coefficients stay as they are; note this in the header.
 
 **Batch:** target 256, nontarget 128. `eval.batch_size` 128.
 

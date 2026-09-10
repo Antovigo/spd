@@ -28,7 +28,7 @@ decomposition:
     attention:
       kind: mha
       n_heads: 8
-      attention_implementation: auto
+      attention_implementation: xla
     ffn:
       kind: gelu
       hidden: 2048
@@ -315,7 +315,7 @@ cadence:
   checkpointing:
     kind: none
 target:
-  attention_implementation: auto
+  attention_implementation: xla
   spec:
     kind: hf_weights_in_vendored
     model_class: param_decomp.experiments.lm.vendored.llama_3_1.model.VendoredLlama

@@ -54,8 +54,8 @@
 #   shape (1 and 4 blocks) and the cheapest that keeps capacity per component at the
 #   reference's. It scales linearly and its `lax.scan` over chunks holds one chunk's
 #   attention/MLP intermediates at a time.
-#   `attention_implementation: auto` on the CI fn's attention (reference: `xla`, an L40 /
-#   pre-CUDA-12.8-driver workaround — see `target.attention_implementation`).
+#   `attention_implementation: xla` on the CI fn's attention, as the reference — see
+#   `target.attention_implementation` for the H100 measurement that forced it back.
 #
 # HIDDEN PASS: kept on BOTH streams. `pd.hidden.points` = every block's MLP output,
 #   `layers.0.mlp.down_proj.out` .. `layers.31.mlp.down_proj.out` (32 points; reference: 14
@@ -104,9 +104,10 @@
 #     `sharding: ddp` (not zero1): DROPPED — §8.5's 26x all-reduce regression was
 #       `zero1` at a DEGENERATE fsdp axis on a no-P2P box. With fsdp > 1 the layout is the
 #       seat's, and the reductions ride NVLink. `zero1` at `fsdp 1` stays forbidden.
-#     `attention_implementation: xla` (both places): DROPPED — the cuDNN graph-API failure
-#       was the box's pre-CUDA-12.8 driver. Pod requirement: driver >= r570 (CUDA 12.8).
-#       If the pod cannot meet it, set BOTH knobs back to `xla` before launch.
+#     `attention_implementation: xla` (both places): KEPT after all. It was dropped on the
+#       theory that the cuDNN graph-API failure was the L40 box's pre-CUDA-12.8 driver;
+#       MEASURED FALSE on a Runpod H100 pod with driver 580.126.09 (2026-09-10), where
+#       `auto` makes `jit_targeted_step` unloadable. See `target.attention_implementation`.
 #     `xla_python_client_allocator: platform` / TF_GPU_ALLOCATOR: DROPPED — the 4-block
 #       fragmentation OOM it chased was the `stacked_tail` bug (report §1), and §8.11 found
 #       the knob a silent no-op on this jax anyway; the reference config carries neither.
@@ -163,8 +164,9 @@ decomposition:
     attention:
       kind: mha
       n_heads: 8
-      # `auto` (cuDNN on H100), not the L40 line's `xla`: see target.attention_implementation.
-      attention_implementation: auto
+      # `xla`, as the L40 line: see target.attention_implementation. MEASURED on the
+      # Runpod H100 pod 2026-09-10 — `auto` does not load there.
+      attention_implementation: xla
     ffn:
       kind: gelu
       hidden: 2048
@@ -445,12 +447,21 @@ cadence:
       kind: keep_last
       n: 2
 target:
-  # `auto` (cuDNN flash attention on H100), not the L40 line's `xla`: that workaround
-  # existed for a pre-CUDA-12.8 driver whose cuDNN graph API failed inside
-  # `CuDnnThunk::Initialize`. The pod must run driver >= r570 (CUDA 12.8); if it cannot,
-  # set this AND `decomposition.ci.attention.attention_implementation` to `xla` BEFORE
-  # launch (the pinned config cannot change afterwards).
-  attention_implementation: auto
+  # `xla`, NOT `auto`. This was authored `auto` on the theory that the L40 line's `xla`
+  # was a pre-CUDA-12.8-driver workaround and H100 + a modern driver would take cuDNN flash
+  # attention. MEASURED FALSE on a Runpod 4x H100 pod, 2026-09-10 (driver 580.126.09,
+  # jax 0.10.1 / CUDA 12.8 wheels): with `auto`, `jit_targeted_step` compiles and then
+  # FAILS TO LOAD —
+  #     INTERNAL: There was an error before calling cuModuleGetFunction (1):
+  #     cudaErrorInvalidValue [executable_name='jit_targeted_step']
+  # — reproduced at 1 block and at 4, on 1 GPU and on 4, with a fresh compile cache and
+  # with `compiler_options: bare`, so it is neither scale, nor collectives, nor the cache,
+  # nor the tuned flag set. On 4 GPUs it presents as a SILENT HANG in `execute_sharded`
+  # (the ranks block on a peer that never loads its module), which is what cost a day.
+  # With `xla` the same config trains: 0.09 s/step at 1 block, batch 16, 22.1 GB/rank.
+  # This pod was NOT 8x H100; re-test `auto` on an 8-GPU pod only if you want the cuDNN
+  # win badly enough to risk the same hang. Keep BOTH knobs at `xla` otherwise.
+  attention_implementation: xla
   spec:
     kind: hf_weights_in_vendored
     model_class: param_decomp.experiments.lm.vendored.llama_3_1.model.VendoredLlama

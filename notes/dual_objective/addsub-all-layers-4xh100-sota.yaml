@@ -67,8 +67,8 @@
 # regression) — note that the config builder ACCEPTS that combination, so the guard is lore,
 # not code.
 #
-# Everything else — the H100 rationale for `attention_implementation: auto`, dropping the
-# L40-era `xla`/allocator/`fsdp: 1` workarounds, `sequential_passes`, both remat flags,
+# Everything else — dropping the L40-era allocator/`fsdp: 1` workarounds,
+# `sequential_passes`, both remat flags,
 # `mem_fraction 0.95` — carries over unchanged from the 8-GPU file's header, and for the
 # same reasons: this is the same hardware, four of it.
 run_name: addsub-all-layers-4xh100-01
@@ -99,8 +99,9 @@ decomposition:
     attention:
       kind: mha
       n_heads: 8
-      # `auto` (cuDNN on H100), not the L40 line's `xla`: see target.attention_implementation.
-      attention_implementation: auto
+      # `xla`, as the L40 line: see target.attention_implementation. MEASURED on the
+      # Runpod H100 pod 2026-09-10 — `auto` does not load there.
+      attention_implementation: xla
     ffn:
       kind: gelu
       hidden: 2048
@@ -381,12 +382,20 @@ cadence:
       kind: keep_last
       n: 2
 target:
-  # `auto` (cuDNN flash attention on H100), not the L40 line's `xla`: that workaround
-  # existed for a pre-CUDA-12.8 driver whose cuDNN graph API failed inside
-  # `CuDnnThunk::Initialize`. The pod must run driver >= r570 (CUDA 12.8); if it cannot,
-  # set this AND `decomposition.ci.attention.attention_implementation` to `xla` BEFORE
-  # launch (the pinned config cannot change afterwards).
-  attention_implementation: auto
+  # `xla`, NOT `auto`. This was authored `auto` on the theory that the L40 line's `xla`
+  # was a pre-CUDA-12.8-driver workaround and H100 + driver 580 would take cuDNN flash
+  # attention. MEASURED FALSE on the Runpod 4x H100 pod, 2026-09-10 (driver 580.126.09,
+  # jax 0.10.1 / CUDA 12.8 wheels): with `auto`, `jit_targeted_step` compiles and then
+  # FAILS TO LOAD —
+  #     INTERNAL: There was an error before calling cuModuleGetFunction (1):
+  #     cudaErrorInvalidValue [executable_name='jit_targeted_step']
+  # — reproduced at 1 block and at 4, on 1 GPU and on 4, with a fresh compile cache and
+  # with `compiler_options: bare`, so it is neither scale, nor collectives, nor the cache,
+  # nor the tuned flag set. On 4 GPUs it presents as a SILENT HANG in `execute_sharded`
+  # (the ranks block on a peer that never loads its module), which is what cost a day.
+  # With `xla` the same config trains: 0.09 s/step at 1 block, batch 16, 22.1 GB/rank.
+  # Keep BOTH this and `decomposition.ci.attention.attention_implementation` at `xla`.
+  attention_implementation: xla
   spec:
     kind: hf_weights_in_vendored
     model_class: param_decomp.experiments.lm.vendored.llama_3_1.model.VendoredLlama
