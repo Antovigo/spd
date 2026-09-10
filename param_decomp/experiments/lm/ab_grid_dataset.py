@@ -106,9 +106,17 @@ def make_ab_grid_step[PreparedT](
         inner = {}
         for site in site_names:
             v_norm = jnp.linalg.norm(components.site(site).V.astype(jnp.float32), axis=0)
-            inner[site] = component_activations[site][:, recorded, :].astype(
-                jnp.float32
-            ) / jnp.maximum(v_norm, 1e-12)
+            acts = component_activations[site][:, recorded, :].astype(jnp.float32)
+            if not jax.sharding.get_abstract_mesh().empty:
+                # The two component axes come from different placements: V's carries the
+                # optimizer-state spec (e.g. `('tp', 'replicate')`) while the activations'
+                # carries the operand spec (`'tp'`). Under explicit axes a broadcast needs
+                # them EQUAL, not merely the same size, so a mesh with `tp: 1, replicate: 1`
+                # — where the two are numerically identical — still raises
+                # `ShardingTypeError: div got incompatible shardings for broadcasting`.
+                # Measured on 4x H100, mesh (1, 4, 1)/zero1, 2026-09-10.
+                v_norm = jax.sharding.reshard(v_norm, P(jax.typeof(acts).sharding.spec[2]))
+            inner[site] = acts / jnp.maximum(v_norm, 1e-12)
         valid_rows = (jnp.arange(tokens.shape[0]) < n_valid_rows)[:, None, None]
         ci_sum: dict[CIRole, dict[str, Array]] = {
             role: {
