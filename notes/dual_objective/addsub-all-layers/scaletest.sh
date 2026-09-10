@@ -4,6 +4,7 @@
 #
 #     source env.sh && ./scaletest.sh --profile 4xh100 --blocks 4
 #     ./scaletest.sh --profile 4xh100 --blocks 8 --start 18
+#     ./scaletest.sh --blocks 4 --env NCCL_DEBUG=INFO --env NCCL_DEBUG_SUBSYS=INIT,COLL
 #     kill -USR1 $(pgrep -f run_with_stackdump) # dump every thread's stack into the log
 #
 # WHY. The 4xh100 ladder's 32-block trials stalled about a minute in, after allocating the
@@ -23,13 +24,14 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # so a small --blocks reproduces a shape that has completed real runs. Pass --start
 # explicitly to place the window elsewhere; the tail below the window is what the frozen
 # suffix has to run on every masked forward, so lower windows cost more.
-PROFILE=4xh100; BLOCKS=4; START=18; STEPS=30
+PROFILE=4xh100; BLOCKS=4; START=18; STEPS=30; ENV=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --profile) PROFILE="$2"; shift ;;
     --blocks) BLOCKS="$2"; shift ;;
     --start) START="$2"; shift ;;
     --steps) STEPS="$2"; shift ;;
+    --env) ENV+=("$2"); shift ;;   # K=V, repeatable; lands in runtime.launch_env.env
     *) echo "unknown arg $1"; exit 2 ;;
   esac; shift
 done
@@ -40,7 +42,7 @@ RUN_ID=$("$VENV_PY" -c "
 import hashlib
 print('p-' + hashlib.blake2b(f'scaletest/$PROFILE/$BLOCKS/$START'.encode(), digest_size=4).hexdigest())")
 
-"$VENV_PY" "$HERE/scaletest_config.py" "$PROFILE" "$BLOCKS" "$START" "$STEPS" "$CFG"
+"$VENV_PY" "$HERE/scaletest_config.py" "$PROFILE" "$BLOCKS" "$START" "$STEPS" "$CFG" "${ENV[@]:-}"
 
 N_DEV=$("$VENV_PY" -c "
 import yaml; r = yaml.safe_load(open('$CFG'))['runtime']; print(r['replicate'] * r['fsdp'] * r['tp'])")
