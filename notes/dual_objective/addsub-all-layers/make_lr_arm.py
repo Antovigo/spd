@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Generate one LR-sweep arm config from a profile's production config.
 
-    python make_lr_arm.py <profile> <multiplier> <out.yaml> [--no-first-eval]
+    python make_lr_arm.py <profile> <multiplier> <out.yaml> [--no-first-eval] [--c-mult N]
 
 An ARM is the production config with BOTH learning rates scaled by the same multiplier —
 `pd.components_optimizer` and `pd.ci_fn_optimizer`, whose 3.2e-4 / 1.6e-4 the recipe couples
@@ -40,12 +40,20 @@ def arm_run_id(profile: str, mult: float) -> str:
     return f"p-{digest}"
 
 
-def build(profile: str, mult: float, no_first_eval: bool = False) -> dict:
+def build(profile: str, mult: float, no_first_eval: bool = False, c_mult: int = 1) -> dict:
     cfg = yaml.safe_load((HERE.parent / PROFILES[profile]["sota"]).read_text())
     for opt in ("components_optimizer", "ci_fn_optimizer"):
         lr = cfg["pd"][opt]["lr_schedule"]
         lr["max_val"] = float(f"{lr['max_val'] * mult:.6g}")
-    cfg["run_name"] = f"{cfg['run_name']}-lr{mult:g}x"
+    if c_mult != 1:
+        # C is TILED across layers by schema (`GluTransformerCSpec`): the chunkwise CI fn
+        # runs `lax.scan` over chunks and asserts they are homogeneous in the per-slot C
+        # tuple (ci_fn.py), so C can only be scaled for ALL blocks at once. Per-block C
+        # would need the scan replaced or every block padded to the max C — and padding
+        # costs exactly what scaling everywhere costs.
+        cs = cfg["decomposition"]["sites"]["cs"]
+        cfg["decomposition"]["sites"]["cs"] = {k: v * c_mult for k, v in cs.items()}
+    cfg["run_name"] = f"{cfg['run_name']}-lr{mult:g}x" + (f"-C{c_mult}x" if c_mult != 1 else "")
     cfg["cadence"]["checkpointing"]["save_every"] = PROBE_STEPS
     cfg["cadence"]["checkpointing"]["retention"] = {"kind": "keep_last", "n": 1}
     if no_first_eval:
@@ -60,9 +68,14 @@ def build(profile: str, mult: float, no_first_eval: bool = False) -> dict:
 def main() -> None:
     args = [a for a in sys.argv[1:] if a != "--no-first-eval"]
     no_first_eval = "--no-first-eval" in sys.argv[1:]
+    c_mult = 1
+    if "--c-mult" in args:
+        i = args.index("--c-mult")
+        c_mult = int(args[i + 1])
+        args = args[:i] + args[i + 2 :]
     profile, mult_s, out = args[:3]
     mult = float(mult_s)
-    cfg = build(profile, mult, no_first_eval)
+    cfg = build(profile, mult, no_first_eval, c_mult)
     lrs = tuple(
         cfg["pd"][o]["lr_schedule"]["max_val"] for o in ("components_optimizer", "ci_fn_optimizer")
     )

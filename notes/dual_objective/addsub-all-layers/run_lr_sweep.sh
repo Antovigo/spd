@@ -143,8 +143,47 @@ if [ -z "$WINNER" ]; then
   exit 1
 fi
 
-say "WINNER: $WINNER (score $BEST) — resuming it to 40000 as the official run"
-{ echo; echo "**Winner: \`$WINNER\`** (score $BEST), resumed to 40000 as the official run."; } >> "$SWEEP_DIR/summary.md"
-CONFIG="$(arm_cfg "$WINNER")" RUN_ID="$(arm_run_id "$WINNER")" WATCHDOG_FUSE=14400 \
+say "WINNER: $WINNER (score $BEST)"
+
+# The official run DOUBLES C (all 32 blocks — C is tiled by schema, see make_lr_arm.py), so
+# it cannot resume the winning arm: every parameter shape changes. It starts fresh on the
+# profile's own run id and pays one cold compile (~95 min).
+FINAL_CFG="$HERE/arms-4xh100/final-C2x-$WINNER.yaml"
+FINAL_ID="p-b4132c01"
+if [ ! -f "$FINAL_CFG" ]; then
+  say "no doubled-C config for $WINNER at $FINAL_CFG — falling back to RESUMING the arm"
+  CONFIG="$(arm_cfg "$WINNER")" RUN_ID="$(arm_run_id "$WINNER")" WATCHDOG_FUSE=14400 \
+    "$HERE/launch_run.sh" --profile 4xh100 >> "$DRIVER_LOG" 2>&1
+  say "official run (C1x, resumed) launched on $(arm_run_id "$WINNER")"; exit 0
+fi
+
+say "launching the official run: $WINNER at DOUBLED C, run id $FINAL_ID"
+{ echo; echo "**Winner: \`$WINNER\`** (score $BEST). Official run = that LR at **doubled C** (all 32 blocks), run id \`$FINAL_ID\`."; } >> "$SWEEP_DIR/summary.md"
+CONFIG="$FINAL_CFG" RUN_ID="$FINAL_ID" WATCHDOG_FUSE=14400 \
   "$HERE/launch_run.sh" --profile 4xh100 >> "$DRIVER_LOG" 2>&1
-say "official run launched on $(arm_run_id "$WINNER")"
+
+# WALK-BACK: doubled C is a memory gamble (est. 47-50 GB/rank of 80, from 34.5 measured at
+# C1x). If it dies of OOM, resume the winning arm at the authored C instead of losing the
+# night. Watch long enough to cover the cold compile plus the first steps.
+FINAL_LOG="$DATA_ROOT/logs/$(awk -F': *' '/^run_name:/{print $2; exit}' "$FINAL_CFG").latest.log"
+deadline=$(( $(date +%s) + 10800 ))
+while [ "$(date +%s)" -lt "$deadline" ]; do
+  sleep 120
+  pidf="$DATA_ROOT/pids/$FINAL_ID.runner.pid"
+  if [ ! -f "$pidf" ] || ! kill -0 "$(cat "$pidf" 2>/dev/null)" 2>/dev/null; then
+    if grep -qE "RESOURCE_EXHAUSTED|Out of memory|OOM|failed to allocate" "$FINAL_LOG" 2>/dev/null; then
+      say "official run OOMed at doubled C — WALKING BACK to the authored C and resuming $WINNER"
+      { echo; echo "**Doubled C OOMed; walked back to the authored C** (resumed \`$WINNER\`)."; } >> "$SWEEP_DIR/summary.md"
+      CONFIG="$(arm_cfg "$WINNER")" RUN_ID="$(arm_run_id "$WINNER")" WATCHDOG_FUSE=14400 \
+        "$HERE/launch_run.sh" --profile 4xh100 >> "$DRIVER_LOG" 2>&1
+      say "official run (C1x, resumed) launched on $(arm_run_id "$WINNER")"
+    else
+      say "official run exited without an OOM signature — NOT relaunching; inspect $FINAL_LOG"
+    fi
+    exit 0
+  fi
+  if [ "$(max_step "$DATA_ROOT/runs/$FINAL_ID/metrics.jsonl")" -ge 100 ]; then
+    say "official run is training at doubled C — walk-back watch ends"; exit 0
+  fi
+done
+say "walk-back watch timed out; official run still up"
