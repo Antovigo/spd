@@ -427,5 +427,16 @@ runtime:
     # fix that stall, so this is prudence, not a diagnosis. ~10 GB outside the pool now,
     # against an activation estimate of 30-60 GB and ~57 GB of remaining headroom.
     xla_python_client_mem_fraction: 0.88
+    env:
+      # Disable NVLS (NVLink SHARP), whose multicast buffers need CUDA FABRIC memory
+      # handles. A Runpod container does not grant them: every launch logs
+      # `VMM cuMemCreate with FABRIC+POSIX_FD handle types failed: CUDA_ERROR_NOT_PERMITTED`.
+      # DIAGNOSED 2026-09-10 from a faulthandler stack: the run compiled fine and then
+      # blocked in `xla_executable.execute_sharded` on the FIRST training step with all four
+      # GPUs at 0% utilisation. A plain sharded matmul plus one cross-shard reduction ran
+      # correctly on the same pod, so simple ring collectives work and it is the algorithms
+      # needing fabric memory that hang. Costs some collective throughput; a hang costs
+      # everything. Remove only on hardware where `nvidia-smi` shows working fabric/IMEX.
+      NCCL_NVLS_ENABLE: "0"
 wandb:
   project: param-decomp-llama

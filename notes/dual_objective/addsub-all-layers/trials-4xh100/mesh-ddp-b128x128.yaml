@@ -340,3 +340,5 @@ runtime:
   sequential_passes: true
   launch_env:
     xla_python_client_mem_fraction: 0.88
+    env:
+      NCCL_NVLS_ENABLE: '0'
