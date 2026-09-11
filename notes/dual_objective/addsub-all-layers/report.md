@@ -226,8 +226,7 @@ output coefficients alone.
 
 Recommended, in order of cost. Items 1 and 2 are implemented (2026-09-11): `pd.hidden.normalization:
 {kind: per_position, floor_fraction: 0.01}` (S35 amended; default `batch` is the original) and the
-two derived configs `addsub-all-layers-4xh100-bal-coeff.yaml` (item 2 alone, no code change needed)
-and `addsub-all-layers-4xh100-bal-perpos.yaml` (items 1 and 2).
+derived config `addsub-all-layers-4xh100-bal-perpos.yaml` (items 1 and 2).
 
 
 1. **Per-token normalization or position-0 masking in `relative_squared_error`** (mechanism
