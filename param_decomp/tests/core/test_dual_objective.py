@@ -21,11 +21,13 @@ from jaxtyping import Array
 from param_decomp.core.ci_fn import LayerwiseMLPCIArch, LayerwiseMLPCIFn, build_ci_fn
 from param_decomp.core.components import SiteC, init_component_stacks
 from param_decomp.core.configs import (
+    HiddenActsNormalization,
     HiddenPassConfig,
     ImportanceMinimalityLossConfig,
     NonlinearityLocalityLossConfig,
     NontargetConfig,
     NontargetHiddenConfig,
+    PerPositionHiddenActsNormalization,
     StochasticReconLossConfig,
     TargetedLossMetricConfig,
 )
@@ -71,9 +73,12 @@ def _nonlinearity_cfg(coeff: float = 0.25) -> NonlinearityLocalityLossConfig:
     )
 
 
-def _hidden() -> tuple[HiddenPassConfig, NontargetConfig]:
+def _hidden(
+    normalization: HiddenActsNormalization | None = None,
+) -> tuple[HiddenPassConfig, NontargetConfig]:
     hidden = HiddenPassConfig(
         points=HIDDEN_POINTS,
+        **({} if normalization is None else {"normalization": normalization}),
         impmin_coeff=5e-3,
         # An explicit name: the identity is unique across passes because both this and the
         # target pass would otherwise default to the same type literal.
@@ -90,7 +95,13 @@ def _hidden() -> tuple[HiddenPassConfig, NontargetConfig]:
     return hidden, nontarget
 
 
-def _setup(*, dual: bool, sequential: bool, nonlinearity_coeff: float | None = None):
+def _setup(
+    *,
+    dual: bool,
+    sequential: bool,
+    nonlinearity_coeff: float | None = None,
+    normalization: HiddenActsNormalization | None = None,
+):
     cfg = TMSConfig(n_features=5, n_hidden=2)
     sites = site_specs(cfg, (SiteC("linear1", 8), SiteC("linear2", 6)))
     target = init_tms_target(cfg, jax.random.PRNGKey(0))
@@ -119,7 +130,7 @@ def _setup(*, dual: bool, sequential: bool, nonlinearity_coeff: float | None = N
         ),
     )
     if dual:
-        hidden, nontarget = _hidden()
+        hidden, nontarget = _hidden(normalization)
     else:
         hidden, nontarget = (
             None,
@@ -266,6 +277,53 @@ def test_hidden_pass_trains_the_hidden_head_and_reports_its_own_losses(sequentia
         assert key in metrics, sorted(k for k in metrics if "hidden_acts" in k)
     # The hidden pass has NO end-to-end term, so it must not report one.
     assert "hidden_ci/loss/HiddenStochasticRecon/e2e" not in metrics
+
+
+@pytest.mark.parametrize("sequential", [False, True])
+def test_hidden_pass_per_position_normalization_traces_and_moves_the_hidden_head(
+    sequential: bool,
+):
+    """S35 amended 2026-09-11: the per-position form (a median inside the pass's graph)
+    traces under jit on both scheduling paths, gives finite per-point losses that differ from
+    the batch form's, and still reaches the hidden head."""
+    per_position = PerPositionHiddenActsNormalization(floor_fraction=0.01)
+    cfg, state, step = _setup(dual=True, sequential=sequential, normalization=per_position)
+    target_batch, broad = _batches(cfg)
+    before = state.decomposition.ci_fn
+    assert isinstance(before, LayerwiseMLPCIFn)
+    before_heads = {
+        site: np.asarray(mlp.hidden_head[0])
+        for site, mlp in before.site_mlps.items()
+        if mlp.hidden_head is not None
+    }
+    new_state, metrics = step(_model_of(), state, target_batch, broad, jax.random.PRNGKey(7))
+    after = new_state.decomposition.ci_fn
+    assert isinstance(after, LayerwiseMLPCIFn)
+    for site in ("linear1", "linear2"):
+        head_after = after.site_mlps[site].hidden_head
+        assert head_after is not None
+        assert not np.allclose(before_heads[site], np.asarray(head_after[0]))
+    per_point = {
+        point: float(
+            metrics[f"hidden_ci/loss/HiddenStochasticRecon/hidden_acts_reconstruction/{point}"]
+        )
+        for point in HIDDEN_POINTS
+    }
+    assert all(np.isfinite(v) for v in per_point.values()), per_point
+
+    # The batch form on the same draws scores differently: the two are distinct objectives.
+    _, state_b, step_b = _setup(dual=True, sequential=sequential)
+    _, metrics_b = step_b(_model_of(), state_b, target_batch, broad, jax.random.PRNGKey(7))
+    per_point_b = {
+        point: float(
+            metrics_b[f"hidden_ci/loss/HiddenStochasticRecon/hidden_acts_reconstruction/{point}"]
+        )
+        for point in HIDDEN_POINTS
+    }
+    assert any(not np.isclose(per_point[p], per_point_b[p], rtol=1e-3) for p in HIDDEN_POINTS), (
+        per_point,
+        per_point_b,
+    )
 
 
 def test_hidden_pass_and_dual_ci_must_agree():

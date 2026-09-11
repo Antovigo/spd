@@ -53,7 +53,11 @@ from param_decomp.core.ci_fn import (
     output_ci,
 )
 from param_decomp.core.components import ComponentStacks
-from param_decomp.core.configs import LossCoeff
+from param_decomp.core.configs import (
+    BATCH_HIDDEN_ACTS_NORMALIZATION,
+    HiddenActsNormalization,
+    LossCoeff,
+)
 from param_decomp.core.decomposed_linear import constrain_component_activation
 from param_decomp.core.faithfulness import FaithfulnessLossFn
 from param_decomp.core.jit_util import filter_jit
@@ -1454,6 +1458,9 @@ class _PassPlan:
     from every other pass's."""
     impmin_coeff: LossCoeff
     points: tuple[str, ...]
+    normalization: HiddenActsNormalization
+    """How a hidden pass's points pool over positions (S35 amended 2026-09-11); unused
+    by an output pass, whose terms resolve their own S35 rider."""
     adversary_keys: tuple[str, ...]
     """The persistent bundles this pass's terms carry."""
 
@@ -1549,6 +1556,7 @@ def make_targeted_train_step[PreparedT](
         terms: tuple[AnyReconLossTerm, ...],
         impmin_coeff: LossCoeff,
         points: tuple[str, ...],
+        normalization: HiddenActsNormalization = BATCH_HIDDEN_ACTS_NORMALIZATION,
     ) -> None:
         """Resolve one pass and append it. Adversary state keys are a GLOBAL namespace, so
         each pass's bundles are indexed into ONE table — `index_persistent_terms` is what
@@ -1564,6 +1572,7 @@ def make_targeted_train_step[PreparedT](
                 grid=grid,
                 impmin_coeff=impmin_coeff,
                 points=points,
+                normalization=normalization,
                 adversary_keys=tuple(grid.persistent_by_key),
             )
         )
@@ -1586,6 +1595,7 @@ def make_targeted_train_step[PreparedT](
             objective.hidden.recon,
             objective.hidden.impmin_coeff,
             objective.hidden.points,
+            objective.hidden.normalization,
         )
     if objective.nontarget_hidden is not None:
         add_pass(
@@ -1595,6 +1605,7 @@ def make_targeted_train_step[PreparedT](
             cast("tuple[AnyReconLossTerm, ...]", objective.nontarget_hidden.recon),
             objective.nontarget_hidden.impmin_coeff,
             objective.nontarget_hidden.points,
+            objective.nontarget_hidden.normalization,
         )
     passes = tuple(plans)
     target_plan = passes[0]
@@ -1767,7 +1778,7 @@ def make_targeted_train_step[PreparedT](
                 case "hidden":
                     assert plan.points, f"hidden pass {plan.label!r} has no points to score"
                     return {
-                        term.name: HiddenActsOnlyReconstruction(plan.points)
+                        term.name: HiddenActsOnlyReconstruction(plan.points, plan.normalization)
                         for term in plan.grid.terms
                     }
                 case "output":

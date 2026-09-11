@@ -16,7 +16,9 @@ from jax.sharding import Mesh
 from jaxtyping import Array, Float, PRNGKeyArray
 
 from param_decomp.core.configs import (
+    BATCH_HIDDEN_ACTS_NORMALIZATION,
     AllRoutingConfig,
+    HiddenActsNormalization,
     HiddenActsReconstruction,
     LossCoeff,
     MergedStochasticSubsetPPGDReconLossConfig,
@@ -132,6 +134,7 @@ class OutputAndHiddenActsReconstruction:
 
     coeff: Float[Array, ""] | float
     points: tuple[str, ...]
+    normalization: HiddenActsNormalization = BATCH_HIDDEN_ACTS_NORMALIZATION
 
 
 @dataclass(frozen=True)
@@ -144,9 +147,13 @@ class HiddenActsOnlyReconstruction:
     its CI is still shaped mostly by the output objective. The hidden pass instead asks its own
     question — "which subcomponents matter for reproducing these internal activations?" — and
     carries no output term to dilute it. There is no `coeff` here either: the pass's strength
-    lives on its recon terms' own coefficients, one level up, exactly like the output pass's."""
+    lives on its recon terms' own coefficients, one level up, exactly like the output pass's.
+
+    `normalization` is how each point pools over positions (S35 amended 2026-09-11): the
+    original batch-wide ratio, or one ratio per (batch, position) entry averaged."""
 
     points: tuple[str, ...]
+    normalization: HiddenActsNormalization = BATCH_HIDDEN_ACTS_NORMALIZATION
 
 
 type ReconstructionSpec = (
@@ -189,7 +196,9 @@ def resolve_reconstruction_spec(
         "an eval probe's hidden-activation reconstruction coeff must be a constant "
         f"float, got {coeff}"
     )
-    return OutputAndHiddenActsReconstruction(coeff, hidden_acts_reconstruction.points)
+    return OutputAndHiddenActsReconstruction(
+        coeff, hidden_acts_reconstruction.points, hidden_acts_reconstruction.normalization
+    )
 
 
 def hidden_acts_capture_keys(reconstruction: ReconstructionSpec) -> CaptureKeys:

@@ -115,6 +115,44 @@ class LossMetricConfig(BaseConfig):
     name: str | None = None
 
 
+class BatchHiddenActsNormalization(BaseConfig):
+    """One ratio per point over the whole batch: `Σ_{b,t,d}(m−c)² / Σ_{b,t,d}c²` (SPEC S35's
+    original form). Every position's ABSOLUTE squared error is pooled against the batch's total
+    clean energy, so a position holding most of that energy (the BOS massive activation at
+    Llama's first and last MLP outputs) is the whole measurement and the others are silenced."""
+
+    kind: Literal["batch"] = "batch"
+
+
+class PerPositionHiddenActsNormalization(BaseConfig):
+    """One ratio per (batch, position) entry, then the mean over entries:
+    `mean_{b,t} ‖m−c‖²_{b,t} / (‖c‖²_{b,t} + floor_fraction · median_{b,t}‖c‖²)` (SPEC S35,
+    amended 2026-09-11). Each position is measured against its own clean scale, so no
+    position can silence another, and the mean over entries keeps the per-token weight at
+    `1/(B·T)` — the same normalization the KL and importance-minimality terms carry, so the
+    recon/sparsity balance stays batch- and stream-invariant. The floor is a fraction of the
+    MEDIAN per-entry clean energy (the median, not the mean, so an outlier position cannot set
+    it) and guards near-silent positions whose own ratio would otherwise explode."""
+
+    kind: Literal["per_position"] = "per_position"
+    floor_fraction: PositiveFloat = Field(
+        default=0.01,
+        description=(
+            "Fraction of the median per-entry clean energy added to every entry's denominator. "
+            "Strictly positive: a zero floor lets a silent position divide by zero."
+        ),
+    )
+
+
+HiddenActsNormalization = Annotated[
+    BatchHiddenActsNormalization | PerPositionHiddenActsNormalization, Discriminator("kind")
+]
+"""How a hidden-activation point's relative squared error pools over positions (S35)."""
+
+BATCH_HIDDEN_ACTS_NORMALIZATION = BatchHiddenActsNormalization()
+"""The default (original S35) normalization, as a module-level singleton for argument defaults."""
+
+
 class HiddenActsReconstruction(BaseConfig):
     """The auxiliary relative-MSE part of one recon loss (SPEC S35): how hard, and measured
     where. Both are required together — a strength with nowhere to measure, or measurement
@@ -140,6 +178,14 @@ class HiddenActsReconstruction(BaseConfig):
             "There is no default: which internal activations matter is a question about the "
             "experiment, not something the trainer should guess. Each unique selected physical "
             "value is retained once; the target owns how those values are materialized."
+        ),
+    )
+    normalization: HiddenActsNormalization = Field(
+        default_factory=BatchHiddenActsNormalization,
+        description=(
+            "How each point's relative squared error pools over positions: `batch` (one ratio "
+            "over the whole batch, the original S35 form) or `per_position` (each entry against "
+            "its own clean scale, then the mean). Default `batch`, byte-inert for existing runs."
         ),
     )
 
@@ -741,9 +787,22 @@ class HiddenPassConfig(BaseConfig):
         description=(
             "Activations the hidden objective reconstructs, in the TARGET's own tap "
             "vocabulary — e.g. `layers.19.mlp.down_proj.out` for block 19's MLP output. Each "
-            "point's error is normalized by its own clean squared scale and the pass takes the "
-            "mean, so points of different magnitude and width stay comparable. No default: "
-            "which activations matter is the experiment's question."
+            "point's error is normalized by its own clean squared scale (see `normalization`) "
+            "and the pass takes the MEAN over points, so points of different magnitude and width "
+            "stay comparable — and so each point's weight is 1/P: adding points dilutes the "
+            "others unless the term coefficients are rescaled. No default: which activations "
+            "matter is the experiment's question."
+        ),
+    )
+    normalization: HiddenActsNormalization = Field(
+        default_factory=BatchHiddenActsNormalization,
+        description=(
+            "How each point's relative squared error pools over positions (S35 amended "
+            "2026-09-11). `batch`: one ratio over the whole batch — a position holding most of "
+            "the point's clean energy (Llama's BOS massive activation at layers 0, 1, 31) IS the "
+            "measurement and silences the rest. `per_position`: each (batch, position) entry "
+            "against its own clean scale, then the mean over entries. Shared with the "
+            "non-target hidden pass, like `points`. Default `batch`, byte-inert for existing runs."
         ),
     )
     impmin_coeff: NonNegativeFloat | ScheduleConfig = Field(

@@ -18,10 +18,14 @@ from param_decomp.core.components import (
     SiteSpec,
 )
 from param_decomp.core.configs import (
+    BATCH_HIDDEN_ACTS_NORMALIZATION,
+    BatchHiddenActsNormalization,
     FrequencyMinimalityConfig,
+    HiddenActsNormalization,
     HiddenActsReconstruction,
     ImportanceMinimalityLossConfig,
     LossCoeff,
+    PerPositionHiddenActsNormalization,
 )
 from param_decomp.core.nonlinearity import (
     KVHeads,
@@ -95,6 +99,7 @@ def reconstruction_spec_at(
     return OutputAndHiddenActsReconstruction(
         coeff_at(train_frac, hidden_acts_reconstruction.coeff),
         hidden_acts_reconstruction.points,
+        hidden_acts_reconstruction.normalization,
     )
 
 
@@ -104,21 +109,48 @@ def relative_squared_error(
     clean: Float[Array, "*leading d"],
     *,
     valid_row_mask: Float[Array, " batch"] | None = None,
+    normalization: HiddenActsNormalization = BATCH_HIDDEN_ACTS_NORMALIZATION,
 ) -> Float[Array, ""]:
-    """`Σ(masked−clean)² / Σ(clean²)` at ONE measurement point, in fp32 (SPEC S35).
+    """The relative squared error at ONE measurement point, in fp32 (SPEC S35).
+
+    `batch`: `Σ_{b,t,d}(masked−clean)² / Σ_{b,t,d}clean²` — one ratio over the batch, every
+    entry's absolute error against the batch's total clean energy.
+    `per_position`: `mean_{b,t} ‖masked−clean‖²_{b,t} / (‖clean‖²_{b,t} + floor)` with
+    `floor = floor_fraction · median_{b,t}‖clean‖²` (the mean when the median is zero, plus
+    fp32 tiny) — each (batch, position) entry against its own clean scale (S35 amended
+    2026-09-11). The mean over entries keeps the per-token
+    weight at `1/(B·T)`, matching `kl_per_position` and the imp-min terms.
 
     Per point, not over a stacked point axis: points need not share a width, and each
     divides by its own clean scale. Callers stack the resulting scalars, never the
-    activations."""
+    activations. `valid_row_mask` drops padded batch rows from every sum, mean and median."""
     masked_f32 = masked.astype(jnp.float32)
     clean_f32 = clean.astype(jnp.float32)
-    squared_error = (masked_f32 - clean_f32) ** 2
-    squared_clean = clean_f32**2
+    entry_error = jnp.sum((masked_f32 - clean_f32) ** 2, axis=-1)  # [*leading]
+    entry_clean = jnp.sum(clean_f32**2, axis=-1)  # [*leading]
     if valid_row_mask is not None:
-        mask = valid_row_mask.reshape(valid_row_mask.shape[0], *((1,) * (clean.ndim - 1)))
-        squared_error = squared_error * mask
-        squared_clean = squared_clean * mask
-    return jnp.sum(squared_error) / jnp.sum(squared_clean)
+        valid = valid_row_mask.reshape(valid_row_mask.shape[0], *((1,) * (clean.ndim - 2))) > 0
+        valid = jnp.broadcast_to(valid, entry_clean.shape)
+    else:
+        valid = jnp.ones(entry_clean.shape, dtype=bool)
+    match normalization:
+        case BatchHiddenActsNormalization():
+            return jnp.sum(jnp.where(valid, entry_error, 0.0)) / jnp.sum(
+                jnp.where(valid, entry_clean, 0.0)
+            )
+        case PerPositionHiddenActsNormalization(floor_fraction=floor_fraction):
+            n_valid = jnp.sum(valid)
+            median_clean = jnp.nanmedian(jnp.where(valid, entry_clean, jnp.nan))
+            mean_clean = jnp.sum(jnp.where(valid, entry_clean, 0.0)) / n_valid
+            # The median is the scale of choice (an outlier position cannot set it), but it
+            # is exactly zero when at least half the valid entries are silent (sparse/ReLU
+            # taps): fall back to the mean, and keep an absolute epsilon under everything so
+            # an entirely silent point still divides by something — the floor must be
+            # POSITIVE, not merely configured positive.
+            scale = jnp.where(median_clean > 0.0, median_clean, mean_clean)
+            floor = floor_fraction * scale + jnp.finfo(jnp.float32).tiny
+            ratio = entry_error / (entry_clean + floor)
+            return jnp.sum(jnp.where(valid, ratio, 0.0)) / n_valid
 
 
 class OutputOnlyReconstructionLoss(NamedTuple):
@@ -156,12 +188,15 @@ def reconstruction_loss(
 ) -> ReconstructionLoss:
     """The closed forms of one recon comparison (SPEC S35 / T12)."""
 
-    def per_point_errors(points: tuple[str, ...]) -> dict[str, Array]:
+    def per_point_errors(
+        points: tuple[str, ...], normalization: HiddenActsNormalization
+    ) -> dict[str, Array]:
         return {
             point: relative_squared_error(
                 masked.hidden_acts_by_point[point],
                 clean.hidden_acts_by_point[point],
                 valid_row_mask=valid_row_mask,
+                normalization=normalization,
             )
             for point in points
         }
@@ -169,17 +204,19 @@ def reconstruction_loss(
     match reconstruction:
         case OutputOnlyReconstruction():
             return OutputOnlyReconstructionLoss(recon_loss_fn(masked.output, clean.output))
-        case OutputAndHiddenActsReconstruction(coeff=coeff, points=points):
+        case OutputAndHiddenActsReconstruction(
+            coeff=coeff, points=points, normalization=normalization
+        ):
             output_loss = recon_loss_fn(masked.output, clean.output)
-            per_point = per_point_errors(points)
+            per_point = per_point_errors(points, normalization)
             aggregate = jnp.mean(jnp.stack(tuple(per_point.values())))
             return OutputAndHiddenActsReconstructionLoss(
                 output_loss + coeff * aggregate, output_loss, per_point
             )
-        case HiddenActsOnlyReconstruction(points=points):
+        case HiddenActsOnlyReconstruction(points=points, normalization=normalization):
             # `recon_loss_fn` is NOT called: the hidden pass has no e2e term, so the KL over
             # the full vocabulary (and its backward) never enters this pass's graph.
-            per_point = per_point_errors(points)
+            per_point = per_point_errors(points, normalization)
             return HiddenActsOnlyReconstructionLoss(
                 jnp.mean(jnp.stack(tuple(per_point.values()))), per_point
             )

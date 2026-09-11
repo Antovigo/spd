@@ -22,6 +22,7 @@ from param_decomp.core.configs import (
     CIMaskedReconLossConfig,
     CIMaskedReconSubsetLossConfig,
     FaithfulnessLossConfig,
+    HiddenActsNormalization,
     HiddenPassConfig,
     ImportanceMinimalityLossConfig,
     LossCoeff,
@@ -203,6 +204,9 @@ class HiddenPass[S: MaskSourceStrategy]:
     recon: tuple[ReconLossTerm[S], ...]
     impmin_coeff: LossCoeff
     points: tuple[str, ...]
+    normalization: HiddenActsNormalization
+    """How each point pools over positions (S35 amended 2026-09-11) — the pass's, shared
+    with the non-target hidden pass exactly like `points`."""
 
 
 @dataclass(frozen=True)
@@ -414,13 +418,17 @@ def build_targeted_objective(
         )
         assert h_recon, "hidden pass has no recon terms"
         hidden_pass = HiddenPass(
-            recon=h_recon, impmin_coeff=hidden.impmin_coeff, points=hidden.points
+            recon=h_recon,
+            impmin_coeff=hidden.impmin_coeff,
+            points=hidden.points,
+            normalization=hidden.normalization,
         )
         if nontarget.hidden is not None:
             nontarget_hidden_pass = HiddenPass(
                 recon=build_nontarget_hidden_terms(nontarget.hidden.recon, site_names),
                 impmin_coeff=nontarget.hidden.impmin_coeff,
                 points=hidden.points,
+                normalization=hidden.normalization,
             )
     else:
         assert nontarget.hidden is None, (

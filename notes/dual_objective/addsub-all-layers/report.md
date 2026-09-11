@@ -224,7 +224,11 @@ output coefficients alone.
 | decomposed blocks n | value ↑ (more noise), per-component marginal effect unchanged, SNR ↓ | same, plus block k feeds only points ≥ k, plus dead own points for blocks 0/1/31 | per component, unchanged | per component, unchanged |
 | components C | marginal effect unchanged, SNR ↓ | same | Σ_c grows, per component unchanged | same |
 
-Recommended, in order of cost:
+Recommended, in order of cost. Items 1 and 2 are implemented (2026-09-11): `pd.hidden.normalization:
+{kind: per_position, floor_fraction: 0.01}` (S35 amended; default `batch` is the original) and the
+two derived configs `addsub-all-layers-4xh100-bal-coeff.yaml` (item 2 alone, no code change needed)
+and `addsub-all-layers-4xh100-bal-perpos.yaml` (items 1 and 2).
+
 
 1. **Per-token normalization or position-0 masking in `relative_squared_error`** (mechanism
    1). Small change in `core/losses.py`; the eval `CIMaskedReconLoss` should follow so the
