@@ -284,7 +284,7 @@ nontarget:
 eval:
   batch_size: 128
   n_steps: 10
-  every: 100000
+  every: 1000
   slow_every: 4000
   slow_on_first_step: false
   metrics:
