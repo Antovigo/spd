@@ -1,6 +1,7 @@
 """The pure loss terms (SPEC §2) and their schedules — fp32 reductions, no state."""
 
 import math
+import os
 from collections import defaultdict
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
@@ -217,9 +218,24 @@ def reconstruction_loss(
             # `recon_loss_fn` is NOT called: the hidden pass has no e2e term, so the KL over
             # the full vocabulary (and its backward) never enters this pass's graph.
             per_point = per_point_errors(points, normalization)
-            return HiddenActsOnlyReconstructionLoss(
-                jnp.mean(jnp.stack(tuple(per_point.values()))), per_point
-            )
+            total = jnp.mean(jnp.stack(tuple(per_point.values())))
+            # DIAGNOSTIC ONLY (`PD_LOG_ALT_HIDDEN_NORM=1`): also measure every point under the
+            # OTHER normalization and log it beside the real one, so the ratio between the two
+            # can be read off a live run. Merged AFTER `total` so the loss is untouched — the
+            # alt values enter the metric dict and nothing else. Used to calibrate the
+            # per-position coefficients against the L18 recipe's batch-normalized exchange
+            # rate (2026-09-11); delete once that number is pinned.
+            if os.environ.get("PD_LOG_ALT_HIDDEN_NORM") == "1":
+                alt_kind: HiddenActsNormalization = (
+                    BATCH_HIDDEN_ACTS_NORMALIZATION
+                    if isinstance(normalization, PerPositionHiddenActsNormalization)
+                    else PerPositionHiddenActsNormalization(floor_fraction=0.01)
+                )
+                per_point = per_point | {
+                    f"{point}__altnorm": value
+                    for point, value in per_point_errors(points, alt_kind).items()
+                }
+            return HiddenActsOnlyReconstructionLoss(total, per_point)
 
 
 def reconstruction_loss_metrics(loss: ReconstructionLoss) -> dict[str, Array]:
