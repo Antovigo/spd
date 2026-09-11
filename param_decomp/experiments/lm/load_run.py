@@ -23,7 +23,11 @@ from param_decomp.core.ci_fn import (
 )
 from param_decomp.core.components import ComponentStacks
 from param_decomp.core.configs import PlacementTableConfig
-from param_decomp.core.init_placed import ComponentInitializer, random_component_initializer
+from param_decomp.core.init_placed import (
+    ComponentInitializer,
+    random_component_initializer,
+    zero_u_component_initializer,
+)
 from param_decomp.core.model import PlacedModel, prepare_compute_weights
 from param_decomp.core.precision import COMPUTE_DT, cast_floating
 from param_decomp.core.run_state import init_decomposition
@@ -113,6 +117,11 @@ def component_initializer_for(
             | LlamaSimpleMLPTargetConfig(component_initialization="random")
         ):
             return random_component_initializer
+        case (
+            TargetConfig(component_initialization="zero_u")
+            | LlamaSimpleMLPTargetConfig(component_initialization="zero_u")
+        ):
+            return zero_u_component_initializer
         case (
             TargetConfig(component_initialization="neuron_aligned")
             | LlamaSimpleMLPTargetConfig(component_initialization="neuron_aligned")

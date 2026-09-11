@@ -678,9 +678,10 @@ def _validate_initialization_capacity(
 ) -> None:
     """The aligned inits' C bounds, decided at resolve time (free, on CPU): `neuron_aligned`
     needs every component a nonempty support; `neuron_aligned_targeted` copies C DISTINCT
-    ranked coordinates, so C may not exceed the site's coordinate count."""
+    ranked coordinates, so C may not exceed the site's coordinate count. `random` and
+    `zero_u` seed at any C and are unconstrained."""
     match initialization:
-        case "random":
+        case "random" | "zero_u":
             return
         case "neuron_aligned":
             for site_spec in site_specs:

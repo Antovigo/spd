@@ -212,6 +212,72 @@ def component_stacks_from_sites(vu: dict[str, tuple[Array, Array]]) -> Component
     return component_stacks_from_site_arrays(sites, vu)
 
 
+def zero_component_stacks(sites: tuple[SiteSpec, ...]) -> ComponentStacks:
+    """All-zero V/U in the stacked layout. `weight_deltas` is `W − (V@U)^T`, so passing this
+    reads each site's frozen `W` back through the model protocol without widening it."""
+    return component_stacks_from_site_arrays(
+        sites,
+        {
+            spec.name: (
+                jnp.zeros((spec.d_in, spec.C), jnp.float32),
+                jnp.zeros((spec.C, spec.d_out), jnp.float32),
+            )
+            for spec in sites
+        },
+    )
+
+
+def _coupled_site_vu(W: Array, key: Array, C: int) -> tuple[Array, Array]:
+    """One site's coupled V/U from its frozen `W [d_out, d_in]`: a unit-norm Gaussian seed on
+    the NARROW side, the wide side its raw `W`-image. No C-dependent rescale — components sit
+    at `W`'s natural scale."""
+    d_out, d_in = W.shape
+    if d_in <= d_out:
+        v = jax.random.normal(key, (d_in, C))
+        V = v / jnp.linalg.norm(v, axis=0, keepdims=True)
+        return V, (W @ V).T
+    u = jax.random.normal(key, (C, d_out))
+    U = u / jnp.linalg.norm(u, axis=1, keepdims=True)
+    return W.T @ U.T, U
+
+
+def init_component_stacks_zero_u(
+    sites: tuple[SiteSpec, ...], target_weights: dict[str, Array], key: Array
+) -> ComponentStacks:
+    """The `zero_u` seeding: the coupled init's `V`, with `U` zeroed.
+
+    The component sum is then exactly zero and the delta carries all of `W`, while `x @ V`
+    still feeds the CI nets a live signal and `U` has a nonzero gradient from step 0 (`V`'s
+    is zero until `U` moves off zero). A subcomponent the reconstruction losses never ask
+    for therefore stays at exactly zero, rather than holding `W`-scale junk that a mask
+    adversary could switch on.
+
+    Per-SITE, not vmapped over a shape group: vmap would need the group's `W`s stacked into
+    one contiguous buffer (`[2, 14336, 4096]` fp32 = 470MB for llama8b's gate+up alone) and
+    would keep every matrix in the group simultaneously live. The draw here is one matmul
+    and one norm — no RNG fan-out to amortize — so the loop costs nothing and lets XLA free
+    each `W` before the next.
+
+    Key discipline, and the reason this is not simply `V` from a fresh draw: the per-site
+    keys are split exactly as the retired `coupled` arm split them and indexed by site
+    position, so a `zero_u` run on this branch reproduces the pre-#1001 `zero_u` runs' V
+    bit for bit at the same seed. That is what makes p-88665048 a usable control.
+    """
+    keys = jax.random.split(key, len(sites))
+    return component_stacks_from_site_arrays(
+        sites,
+        {
+            spec.name: (
+                _coupled_site_vu(target_weights[spec.name].astype(jnp.float32), keys[idx], spec.C)[
+                    0
+                ],
+                jnp.zeros((spec.C, spec.d_out), jnp.float32),
+            )
+            for idx, spec in enumerate(sites)
+        },
+    )
+
+
 def init_component_stacks(sites: tuple[SiteSpec, ...], key: Array) -> ComponentStacks:
     """Small random fp32 V ~ N(0, d_in^-0.5), U ~ N(0, C^-0.5) per site, built directly in
     the stacked persistence layout; the weight-delta channel carries the faithfulness

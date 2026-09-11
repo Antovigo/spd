@@ -13,11 +13,14 @@ from param_decomp.core.configs import NeuronRanksRef, PDConfig, TargetedPDConfig
 from param_decomp.vendored_jax.llama import AttentionImplementation
 
 WeightsDtype = Literal["float32", "bfloat16"]
-ComponentInitialization = Literal["random", "neuron_aligned", "neuron_aligned_targeted"]
+ComponentInitialization = Literal["random", "zero_u", "neuron_aligned", "neuron_aligned_targeted"]
 """How the subcomponent V/U masters are seeded. `random`: target-blind small random.
-`neuron_aligned`: every site along its own architectural coordinates, chosen without
-data. `neuron_aligned_targeted` (tPD only, SPEC T13): the top-C coordinates by activity on
-the target prompt pool, from the harvested artifact `neuron_ranks` names."""
+`zero_u`: the target-coupled seed's `V` with `U` zeroed, so the component sum is exactly
+zero at init and the delta carries all of `W` — a subcomponent acquires norm only as the
+reconstruction losses demand it. `neuron_aligned`: every site along its own architectural
+coordinates, chosen without data. `neuron_aligned_targeted` (tPD only, SPEC T13): the
+top-C coordinates by activity on the target prompt pool, from the harvested artifact
+`neuron_ranks` names."""
 
 
 def weights_jnp_dtype(dtype: WeightsDtype) -> DTypeLike:

@@ -22,7 +22,7 @@ import jax
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from jax.typing import DTypeLike
-from jaxtyping import PRNGKeyArray
+from jaxtyping import Array, PRNGKeyArray
 
 from param_decomp.core.adversary import (
     SiteSource,
@@ -44,6 +44,8 @@ from param_decomp.core.components import (
     ComponentStacks,
     SiteSpec,
     init_component_stacks,
+    init_component_stacks_zero_u,
+    zero_component_stacks,
 )
 from param_decomp.core.configs import SourceShape
 from param_decomp.core.model import (
@@ -53,6 +55,7 @@ from param_decomp.core.model import (
     PositionAxis,
     Positioned,
     Positionless,
+    site_weight_delta,
 )
 from param_decomp.core.placement import PlacementRules, component_stacks_shardings
 
@@ -63,6 +66,23 @@ type ComponentInitializer = Callable[[DecomposedModel, PRNGKeyArray], ComponentS
 def random_component_initializer(model: DecomposedModel, key: PRNGKeyArray) -> ComponentStacks:
     """The domain-neutral random initializer used unless a composition root selects another."""
     return init_component_stacks(model.sites, key)
+
+
+def _site_weights_in_graph(model: DecomposedModel) -> dict[str, Array]:
+    """Every site's frozen `W`, read INSIDE the init graph through the zero-stacks
+    `weight_deltas` identity (`W − 0`), so no full-precision copy crosses the jit and the
+    initializer needs no widening of the target protocol."""
+    zero = zero_component_stacks(model.sites)
+    stacked = model.weight_deltas(zero)
+    return {spec.name: site_weight_delta(stacked, zero, spec.name) for spec in model.sites}
+
+
+def zero_u_component_initializer(model: DecomposedModel, key: PRNGKeyArray) -> ComponentStacks:
+    """The `zero_u` arm: the coupled seed's `V` against each site's own frozen `W`, `U` zeroed.
+
+    Domain-neutral — it reads `W` only through `weight_deltas`, which every `DecomposedModel`
+    implements, so the toys can select it as readily as the LM."""
+    return init_component_stacks_zero_u(model.sites, _site_weights_in_graph(model), key)
 
 
 def init_component_stacks_placed(
