@@ -12,6 +12,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from beartype import beartype
+from jax.sharding import PartitionSpec as P
 from jaxtyping import Array, Float, jaxtyped
 
 from param_decomp.core.components import (
@@ -141,7 +142,19 @@ def relative_squared_error(
             )
         case PerPositionHiddenActsNormalization(floor_fraction=floor_fraction):
             n_valid = jnp.sum(valid)
-            median_clean = jnp.nanmedian(jnp.where(valid, entry_clean, jnp.nan))
+            # The median lowers to `lax.sort`, which REFUSES a sharded sort dimension: the
+            # per-entry energies carry the batch axis's `('replicate', 'fsdp')` spec, so on
+            # any mesh with fsdp > 1 this raises `ShardingTypeError` at trace time (measured
+            # on the 4x H100 seat, 2026-09-11 — the per-position mode could not run at all).
+            # Replicate the statistic first: it is one scalar per (batch, position) entry —
+            # 32 KB at batch 128 x 64 positions — so the gather costs nothing next to the
+            # forward that produced it, and every rank then computes the identical scale.
+            energies, energies_valid = entry_clean, valid
+            if not jax.sharding.get_abstract_mesh().empty:
+                replicated = P(*((None,) * entry_clean.ndim))
+                energies = jax.sharding.reshard(entry_clean, replicated)
+                energies_valid = jax.sharding.reshard(valid, replicated)
+            median_clean = jnp.nanmedian(jnp.where(energies_valid, energies, jnp.nan))
             mean_clean = jnp.sum(jnp.where(valid, entry_clean, 0.0)) / n_valid
             # The median is the scale of choice (an outlier position cannot set it), but it
             # is exactly zero when at least half the valid entries are silent (sparse/ReLU

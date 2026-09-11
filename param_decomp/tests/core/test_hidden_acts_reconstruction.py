@@ -676,3 +676,30 @@ def test_adversary_actually_ascends_the_combined_objective():
         "source moments are identical at hidden-activation reconstruction coeff 1 and 50, so the term "
         "is not reaching the final-ascent gradient"
     )
+
+
+def test_per_position_normalization_runs_with_a_batch_sharded_argument():
+    """The median lowers to `lax.sort`, which refuses a sharded sort dimension. The hidden
+    activations arrive batch-sharded on every real mesh, so without replicating the per-entry
+    energies first this mode raises `ShardingTypeError` at trace time and the per-position
+    recipe cannot run at all (measured on the 4x H100 seat, 2026-09-11). Run this file at
+    `XLA_FLAGS=--xla_force_host_platform_device_count=4` for the sharded arm to be real."""
+    n = jax.device_count()
+    if n < 2:
+        pytest.skip(f"needs >= 2 devices to shard the batch, have {n}")
+    mesh = jax.make_mesh((n,), ("batch",), axis_types=(jax.sharding.AxisType.Explicit,))
+    b, t, d = 4 * n, 3, 2
+    key = jax.random.key(0)
+    clean = jax.random.normal(key, (b, t, d))
+    masked = clean * 1.5
+    with jax.set_mesh(mesh):
+        spec = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("batch", None, None))
+        sharded_clean = jax.device_put(clean, spec)
+        sharded_masked = jax.device_put(masked, spec)
+        got = float(
+            jax.jit(lambda m, c: relative_squared_error(m, c, normalization=PER_POSITION))(
+                sharded_masked, sharded_clean
+            )
+        )
+    unsharded = float(relative_squared_error(masked, clean, normalization=PER_POSITION))
+    assert got == pytest.approx(unsharded, rel=1e-5)
