@@ -112,6 +112,7 @@ from param_decomp.core.recon import (
     ConstantSources,
     ForwardObservations,
     FreshPGDSources,
+    HiddenActsAndOutputReconstruction,
     HiddenActsOnlyReconstruction,
     MaskSourceStrategy,
     MixedPersistentStochasticSources,
@@ -1461,6 +1462,9 @@ class _PassPlan:
     normalization: HiddenActsNormalization
     """How a hidden pass's points pool over positions (S35 amended 2026-09-11); unused
     by an output pass, whose terms resolve their own S35 rider."""
+    output_coeff: LossCoeff | None
+    """A hidden pass's optional e2e KL rider (T12 amended 2026-09-11); `None` on an output
+    pass and on a pure hidden pass."""
     adversary_keys: tuple[str, ...]
     """The persistent bundles this pass's terms carry."""
 
@@ -1557,6 +1561,7 @@ def make_targeted_train_step[PreparedT](
         impmin_coeff: LossCoeff,
         points: tuple[str, ...],
         normalization: HiddenActsNormalization = BATCH_HIDDEN_ACTS_NORMALIZATION,
+        output_coeff: LossCoeff | None = None,
     ) -> None:
         """Resolve one pass and append it. Adversary state keys are a GLOBAL namespace, so
         each pass's bundles are indexed into ONE table — `index_persistent_terms` is what
@@ -1573,6 +1578,7 @@ def make_targeted_train_step[PreparedT](
                 impmin_coeff=impmin_coeff,
                 points=points,
                 normalization=normalization,
+                output_coeff=output_coeff,
                 adversary_keys=tuple(grid.persistent_by_key),
             )
         )
@@ -1596,6 +1602,7 @@ def make_targeted_train_step[PreparedT](
             objective.hidden.impmin_coeff,
             objective.hidden.points,
             objective.hidden.normalization,
+            objective.hidden.output_coeff,
         )
     if objective.nontarget_hidden is not None:
         add_pass(
@@ -1606,6 +1613,7 @@ def make_targeted_train_step[PreparedT](
             objective.nontarget_hidden.impmin_coeff,
             objective.nontarget_hidden.points,
             objective.nontarget_hidden.normalization,
+            objective.nontarget_hidden.output_coeff,
         )
     passes = tuple(plans)
     target_plan = passes[0]
@@ -1777,10 +1785,16 @@ def make_targeted_train_step[PreparedT](
             match plan.role:
                 case "hidden":
                     assert plan.points, f"hidden pass {plan.label!r} has no points to score"
-                    return {
-                        term.name: HiddenActsOnlyReconstruction(plan.points, plan.normalization)
-                        for term in plan.grid.terms
-                    }
+                    spec: ReconstructionSpec = (
+                        HiddenActsOnlyReconstruction(plan.points, plan.normalization)
+                        if plan.output_coeff is None
+                        else HiddenActsAndOutputReconstruction(
+                            plan.points,
+                            plan.normalization,
+                            coeff_at(train_frac, plan.output_coeff),
+                        )
+                    )
+                    return {term.name: spec for term in plan.grid.terms}
                 case "output":
                     return plan.grid.reconstruction_specs_at(train_frac)
 

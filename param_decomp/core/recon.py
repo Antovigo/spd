@@ -156,8 +156,26 @@ class HiddenActsOnlyReconstruction:
     normalization: HiddenActsNormalization = BATCH_HIDDEN_ACTS_NORMALIZATION
 
 
+@dataclass(frozen=True)
+class HiddenActsAndOutputReconstruction:
+    """The hidden pass's comparison WITH the optional e2e rider (T12 amended 2026-09-11):
+    `mean_points(relative error) + output_coeff · kl_per_position`, both on the one masked
+    forward. The mirror image of S35's rider: there the output is the objective and the
+    hidden error rides on it; here the hidden error is the objective and the output rides on
+    it, so the hidden head is also asked to keep what the output needs. `output_coeff` is a
+    per-step value (a schedule resolved by the step), as `OutputAndHiddenActsReconstruction`'s
+    `coeff` is."""
+
+    points: tuple[str, ...]
+    normalization: HiddenActsNormalization
+    output_coeff: Float[Array, ""] | float
+
+
 type ReconstructionSpec = (
-    OutputOnlyReconstruction | OutputAndHiddenActsReconstruction | HiddenActsOnlyReconstruction
+    OutputOnlyReconstruction
+    | OutputAndHiddenActsReconstruction
+    | HiddenActsOnlyReconstruction
+    | HiddenActsAndOutputReconstruction
 )
 
 
@@ -209,6 +227,7 @@ def hidden_acts_capture_keys(reconstruction: ReconstructionSpec) -> CaptureKeys:
         case (
             OutputAndHiddenActsReconstruction(points=points)
             | HiddenActsOnlyReconstruction(points=points)
+            | HiddenActsAndOutputReconstruction(points=points)
         ):
             return frozenset(points)
 

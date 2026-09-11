@@ -207,6 +207,9 @@ class HiddenPass[S: MaskSourceStrategy]:
     normalization: HiddenActsNormalization
     """How each point pools over positions (S35 amended 2026-09-11) — the pass's, shared
     with the non-target hidden pass exactly like `points`."""
+    output_coeff: LossCoeff | None = None
+    """The optional e2e KL rider (T12 amended 2026-09-11); `None` is the pure hidden pass.
+    Per pass, not shared: each stream's hidden pass authors its own."""
 
 
 @dataclass(frozen=True)
@@ -422,6 +425,7 @@ def build_targeted_objective(
             impmin_coeff=hidden.impmin_coeff,
             points=hidden.points,
             normalization=hidden.normalization,
+            output_coeff=hidden.output_coeff,
         )
         if nontarget.hidden is not None:
             nontarget_hidden_pass = HiddenPass(
@@ -429,6 +433,7 @@ def build_targeted_objective(
                 impmin_coeff=nontarget.hidden.impmin_coeff,
                 points=hidden.points,
                 normalization=hidden.normalization,
+                output_coeff=nontarget.hidden.output_coeff,
             )
     else:
         assert nontarget.hidden is None, (

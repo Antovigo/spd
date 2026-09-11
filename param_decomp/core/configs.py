@@ -816,6 +816,18 @@ class HiddenPassConfig(BaseConfig):
     recon: list[Annotated[HiddenReconLossMetricConfig, Discriminator("type")]] = Field(
         ..., min_length=1
     )
+    output_coeff: LossCoeff | None = Field(
+        default=None,
+        description=(
+            "OPTIONAL end-to-end KL rider on the hidden pass (T12 amended 2026-09-11): each "
+            "hidden term scores `mean_points(hidden error) + output_coeff * kl_per_position` "
+            "on the SAME masked forward, so the hidden head is also asked to keep the "
+            "components the model output needs — the hidden head as a superset of the output "
+            "head, rather than an independent question. `None` (default) is the pure hidden "
+            "pass: no e2e term, `recon_loss_fn` never called on a hidden forward. Its "
+            "adversaries ascend the complete objective including the rider."
+        ),
+    )
 
     @model_validator(mode="after")
     def validate_hidden_entries(self) -> Self:
@@ -845,6 +857,14 @@ class NontargetHiddenConfig(BaseConfig):
     impmin_coeff: NonNegativeFloat | ScheduleConfig
     recon: list[Annotated[NontargetHiddenReconLossMetricConfig, Discriminator("type")]] = Field(
         ..., min_length=1
+    )
+    output_coeff: LossCoeff | None = Field(
+        default=None,
+        description=(
+            "OPTIONAL end-to-end KL rider on the non-target hidden pass, as `pd.hidden."
+            "output_coeff`. Costs the full-vocabulary logits and their backward on every "
+            "broad-stream hidden forward (seq 64) — the pass that was kept KL-free for memory."
+        ),
     )
 
     @model_validator(mode="after")

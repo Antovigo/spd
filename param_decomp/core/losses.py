@@ -38,6 +38,7 @@ from param_decomp.core.nonlinearity import (
 )
 from param_decomp.core.recon import (
     ForwardObservations,
+    HiddenActsAndOutputReconstruction,
     HiddenActsOnlyReconstruction,
     OutputAndHiddenActsReconstruction,
     OutputOnlyReconstruction,
@@ -185,10 +186,21 @@ class HiddenActsOnlyReconstructionLoss(NamedTuple):
     hidden_acts_by_point: dict[str, Array]
 
 
+class HiddenActsAndOutputReconstructionLoss(NamedTuple):
+    """The hidden pass's result WITH the e2e rider (T12 amended 2026-09-11): `total` is
+    `mean_points + output_coeff · output`; `output` is the bare KL so it can be logged as
+    `e2e` next to the point breakdown, exactly as the S35 rider's result does."""
+
+    total: Array
+    output: Array
+    hidden_acts_by_point: dict[str, Array]
+
+
 type ReconstructionLoss = (
     OutputOnlyReconstructionLoss
     | OutputAndHiddenActsReconstructionLoss
     | HiddenActsOnlyReconstructionLoss
+    | HiddenActsAndOutputReconstructionLoss
 )
 
 
@@ -249,6 +261,17 @@ def reconstruction_loss(
                     for point, value in per_point_errors(points, alt_kind).items()
                 }
             return HiddenActsOnlyReconstructionLoss(total, per_point)
+        case HiddenActsAndOutputReconstruction(
+            points=points, normalization=normalization, output_coeff=output_coeff
+        ):
+            # The hidden pass WITH its e2e rider (T12 amended 2026-09-11): the same masked
+            # forward scores both, so the KL costs the unembed + log-softmax, not a forward.
+            output_loss = recon_loss_fn(masked.output, clean.output)
+            per_point = per_point_errors(points, normalization)
+            aggregate = jnp.mean(jnp.stack(tuple(per_point.values())))
+            return HiddenActsAndOutputReconstructionLoss(
+                aggregate + output_coeff * output_loss, output_loss, per_point
+            )
 
 
 def reconstruction_loss_metrics(loss: ReconstructionLoss) -> dict[str, Array]:
@@ -263,8 +286,13 @@ def reconstruction_loss_metrics(loss: ReconstructionLoss) -> dict[str, Array]:
                 f"hidden_acts_reconstruction/{point}": value
                 for point, value in hidden_acts_by_point.items()
             }
-        case OutputAndHiddenActsReconstructionLoss(
-            output=output, hidden_acts_by_point=hidden_acts_by_point
+        case (
+            OutputAndHiddenActsReconstructionLoss(
+                output=output, hidden_acts_by_point=hidden_acts_by_point
+            )
+            | HiddenActsAndOutputReconstructionLoss(
+                output=output, hidden_acts_by_point=hidden_acts_by_point
+            )
         ):
             return {
                 "e2e": output,

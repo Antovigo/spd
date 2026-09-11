@@ -75,10 +75,12 @@ def _nonlinearity_cfg(coeff: float = 0.25) -> NonlinearityLocalityLossConfig:
 
 def _hidden(
     normalization: HiddenActsNormalization | None = None,
+    output_coeff: float | None = None,
 ) -> tuple[HiddenPassConfig, NontargetConfig]:
     hidden = HiddenPassConfig(
         points=HIDDEN_POINTS,
         **({} if normalization is None else {"normalization": normalization}),
+        output_coeff=output_coeff,
         impmin_coeff=5e-3,
         # An explicit name: the identity is unique across passes because both this and the
         # target pass would otherwise default to the same type literal.
@@ -101,6 +103,7 @@ def _setup(
     sequential: bool,
     nonlinearity_coeff: float | None = None,
     normalization: HiddenActsNormalization | None = None,
+    output_coeff: float | None = None,
 ):
     cfg = TMSConfig(n_features=5, n_hidden=2)
     sites = site_specs(cfg, (SiteC("linear1", 8), SiteC("linear2", 6)))
@@ -130,7 +133,7 @@ def _setup(
         ),
     )
     if dual:
-        hidden, nontarget = _hidden(normalization)
+        hidden, nontarget = _hidden(normalization, output_coeff)
     else:
         hidden, nontarget = (
             None,
@@ -324,6 +327,33 @@ def test_hidden_pass_per_position_normalization_traces_and_moves_the_hidden_head
         per_point,
         per_point_b,
     )
+
+
+@pytest.mark.parametrize("sequential", [False, True])
+def test_hidden_pass_output_rider_adds_the_kl_to_the_hidden_objective(sequential: bool):
+    """T12 amended 2026-09-11: with `output_coeff` the hidden pass scores
+    `mean_points + output_coeff * KL` on its own forward, logs the bare KL as `e2e`, and the
+    target-OUTPUT pass is untouched. Without it no `e2e` key exists on the hidden pass."""
+    kappa = 0.5
+    cfg, state, step = _setup(dual=True, sequential=sequential, output_coeff=kappa)
+    target_batch, broad = _batches(cfg)
+    _, metrics = step(_model_of(), state, target_batch, broad, jax.random.PRNGKey(7))
+    prefix = "hidden_ci/loss/HiddenStochasticRecon"
+    e2e = float(metrics[f"{prefix}/e2e"])
+    assert np.isfinite(e2e) and e2e > 0.0
+    per_point = [float(metrics[f"{prefix}/hidden_acts_reconstruction/{p}"]) for p in HIDDEN_POINTS]
+    assert float(metrics[prefix]) == pytest.approx(np.mean(per_point) + kappa * e2e, rel=1e-5)
+    # The rider is per pass: the non-target hidden pass authored none, so it logs no e2e.
+    nt_prefix = "nontarget_data/hidden_ci/loss/StochasticReconLoss"
+    assert nt_prefix in metrics and f"{nt_prefix}/e2e" not in metrics
+    # And the pure hidden pass is unchanged: same draws, no e2e key, hidden term = point mean.
+    _, state_b, step_b = _setup(dual=True, sequential=sequential)
+    _, metrics_b = step_b(_model_of(), state_b, target_batch, broad, jax.random.PRNGKey(7))
+    assert f"{prefix}/e2e" not in metrics_b
+    per_point_b = [
+        float(metrics_b[f"{prefix}/hidden_acts_reconstruction/{p}"]) for p in HIDDEN_POINTS
+    ]
+    assert float(metrics_b[prefix]) == pytest.approx(np.mean(per_point_b), rel=1e-5)
 
 
 def test_hidden_pass_and_dual_ci_must_agree():
