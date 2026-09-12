@@ -73,7 +73,7 @@ PROFILES: dict[str, dict[str, Any]] = {
         # p-b4132c01 was the PRE-BALANCE run (batch normalization, diluted hidden
         # coefficients, LR 3.2e-04); it reached step 14804 and is kept for comparison. The
         # balanced sota gets its own id because resume byte-compares the pinned config.
-        "run_id": "p-ba2a0c02",
+        "run_id": "p-ba3a0c03",
         "devices": 4,
         "meshes": {"f4": (1, 4, 1, "zero1"), "r2f2": (2, 2, 1, "zero1")},
         # generated but never in the default order: 45.7 GB static leaves ~29 GB for

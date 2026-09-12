@@ -104,7 +104,7 @@
 # `sequential_passes`, both remat flags,
 # `mem_fraction 0.95` — carries over unchanged from the 8-GPU file's header, and for the
 # same reasons: this is the same hardware, four of it.
-run_name: addsub-all-layers-4xh100-02
+run_name: addsub-all-layers-4xh100-03
 decomposition:
   sites:
     kind: glu_transformer
@@ -151,7 +151,7 @@ pd:
   ci_scaled_weight_decay: 0.2
   components_optimizer:
     lr_schedule:
-      max_val: 0.00016
+      max_val: 8.0e-05
       points:
         - {at: 0.0, frac: 1.0}
         - {at: 1.0, frac: 0.1, interp: cosine}
@@ -160,7 +160,7 @@ pd:
     grad_clip_norm: 0.01
   ci_fn_optimizer:
     lr_schedule:
-      max_val: 8.0e-05
+      max_val: 4.0e-05
       points:
         - {at: 0.0, frac: 1.0}
         - {at: 1.0, frac: 0.1, interp: cosine}
@@ -318,7 +318,7 @@ nontarget:
   # clique) — the probe ladder runs every shape under `timeout -k` for exactly this reason.
   # Matched to the target stream: 4x 5.0e-05 at step 0, linear to 5.0e-05 at step 10000.
   impmin_coeff:
-    max_val: 2.0e-04
+    max_val: 4.0e-04
     points:
       - {at: 0.0, frac: 1.0}
       - {at: 0.25, frac: 0.25}
@@ -359,7 +359,7 @@ nontarget:
   hidden:
     # Matched to the target stream: 4x 5.0e-05 at step 0, linear to 5.0e-05 at step 10000.
     impmin_coeff:
-      max_val: 2.0e-04
+      max_val: 4.0e-04
       points:
         - {at: 0.0, frac: 1.0}
         - {at: 0.25, frac: 0.25}
