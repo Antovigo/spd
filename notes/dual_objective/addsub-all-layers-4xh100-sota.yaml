@@ -104,7 +104,7 @@
 # `sequential_passes`, both remat flags,
 # `mem_fraction 0.95` — carries over unchanged from the 8-GPU file's header, and for the
 # same reasons: this is the same hardware, four of it.
-run_name: addsub-all-layers-4xh100-sota-01
+run_name: addsub-all-layers-4xh100-02
 decomposition:
   sites:
     kind: glu_transformer
@@ -147,7 +147,8 @@ pd:
   steps: 40000
   batch_size: 128
   # REMOVED (reference 0.3): the one recipe change. `null` is the off switch (SPEC T11).
-  ci_scaled_weight_decay: null
+  # BACK ON at 0.2 (-01 had it off; the L18 reference used 0.3).
+  ci_scaled_weight_decay: 0.2
   components_optimizer:
     lr_schedule:
       max_val: 0.00016
@@ -194,15 +195,26 @@ pd:
             - {at: 0.25, frac: 0.25}
             - {at: 1.0, frac: 0.25}
         reference_datapoint_count: auto
-    - type: StochasticReconSubsetLoss
-      coeff: 1.0
+    # MERGED (-02): replaces the -01 pair `StochasticReconSubsetLoss 1.0` +
+    # `PersistentPGDReconLoss 0.5`. `coeff` is the TOTAL and `adv_fraction` the adversarial
+    # share, so 1.5 x 0.3333 reproduces that pair IN EXPECTATION (1.0 stochastic + 0.5
+    # adversarial) while costing ONE masked forward instead of two. Each batch element is
+    # either adversarial or stochastic for the whole sequence, never a mixed context.
+    - type: MergedStochasticSubsetPPGDReconLoss
+      coeff: 1.5
+      adv_fraction:
+        max_val: 0.3333333
+        # 0 -> full share over the first 2000 steps (0.05 of 40k). The -01 recipe ramped over
+        # 100 steps; slowed on every stream so the decomposition has a fit before the
+        # adversary bites.
+        points:
+          - {at: 0.0, frac: 0.0}
+          - {at: 0.05, frac: 1.0}
+          - {at: 1.0, frac: 1.0}
+      # 2 warmup + the S14 final ascent = 3 ascents per step, as -01's PersistentPGDReconLoss.
+      n_warmup_steps: 2
       routing:
         type: uniform_k_subset
-    - type: UnmaskedReconLoss
-      coeff: 0.5
-    - type: PersistentPGDReconLoss
-      coeff: 0.5
-      n_warmup_steps: 2
       optimizer:
         type: adam
         beta1: 0.5
@@ -216,6 +228,8 @@ pd:
             - {at: 0.0125, frac: 1.0}
             - {at: 1.0, frac: 1.0}
       source_shape: bsc
+    - type: UnmaskedReconLoss
+      coeff: 0.5
   # The dual objective's HIDDEN pass (SPEC S36/T12): the CI fn's second head scored at every
   # block's MLP output instead of the model logits, so components stay important for what
   # each block writes, not only for what survives to the unembed. 32 points; the loss is
@@ -267,16 +281,20 @@ pd:
         - {at: 0.25, frac: 0.25}
         - {at: 1.0, frac: 0.25}
     recon:
-      - type: StochasticReconSubsetLoss
-        name: HiddenStochasticReconSubset
-        # 2.0 x 32/14: the L18 SOTA's per-point weight (2.0 over 14 points) at 32 points.
-        coeff: 4.5714286
+      # MERGED (-02), as the output pass: 4.5714286 stochastic + 2.2857143 adversarial
+      # becomes coeff 6.8571429 at adv_fraction 0.3333 — identical in expectation, one
+      # masked forward instead of two, and still the L18 per-point weight (x32/14).
+      - type: MergedStochasticSubsetPPGDReconLoss
+        name: HiddenMergedStochasticPPGDRecon
+        coeff: 6.8571429
+        adv_fraction:
+          max_val: 0.3333333
+          points:
+            - {at: 0.0, frac: 0.0}
+            - {at: 0.05, frac: 1.0}
+            - {at: 1.0, frac: 1.0}
         routing:
           type: uniform_k_subset
-      - type: PersistentPGDReconLoss
-        name: HiddenPersistentPGDRecon
-        # 1.0 x 32/14, same reason.
-        coeff: 2.2857143
         n_warmup_steps: 2
         optimizer:
           type: adam
@@ -317,9 +335,11 @@ nontarget:
         max_val: 0.5
         points:
           - {at: 0.0, frac: 0.0}
-          - {at: 0.0025, frac: 1.0}
+          - {at: 0.05, frac: 1.0}
           - {at: 1.0, frac: 1.0}
-      n_warmup_steps: 0
+      # 1 warmup + the final ascent = 2 ascents (-01 had 1): the broad stream's adversary
+      # was too weak — its PGD recon collapsed 66 -> 11.8 between steps 20000 and 24000.
+      n_warmup_steps: 1
       routing:
         type: uniform_k_subset
       optimizer:
@@ -333,7 +353,9 @@ nontarget:
             - {at: 0.0, frac: 0.0}
             - {at: 0.0125, frac: 1.0}
             - {at: 1.0, frac: 1.0}
-      source_shape: c
+      # `bsc`, not -01's `c`: one scalar per component shared by the whole batch could not
+      # express a per-token attack, which is why the broad stream became reconstructible.
+      source_shape: bsc
   hidden:
     # Matched to the target stream: 4x 5.0e-05 at step 0, linear to 5.0e-05 at step 10000.
     impmin_coeff:
@@ -353,9 +375,9 @@ nontarget:
           max_val: 0.5
           points:
             - {at: 0.0, frac: 0.0}
-            - {at: 0.0025, frac: 1.0}
+            - {at: 0.05, frac: 1.0}
             - {at: 1.0, frac: 1.0}
-        n_warmup_steps: 0
+        n_warmup_steps: 1
         routing:
           type: uniform_k_subset
         optimizer:
@@ -369,7 +391,7 @@ nontarget:
               - {at: 0.0, frac: 0.0}
               - {at: 0.0125, frac: 1.0}
               - {at: 1.0, frac: 1.0}
-        source_shape: c
+        source_shape: bsc
 eval:
   # Tracks nontarget.batch_size's geometry on the broad stream (32 rows/rank); the
   # target-stream probes run at the pool's own (unpadded) geometry.

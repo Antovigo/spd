@@ -6,7 +6,7 @@ after `source env.sh`. Read the guide for your pod shape first.
 | profile | config | guide | GPUs | batch | run id | trials | ladder dir |
 |---|---|---|---|---|---|---|---|
 | `8xh100` (default) | `../addsub-all-layers-8xh100-sota.yaml` | `../addsub-all-layers-8xh100-guide.md` | 8 | 256/128 | `p-a1132b01` | `trials/` | `$DATA_ROOT/ladder` |
-| `4xh100` | `../addsub-all-layers-4xh100-sota.yaml` | `../addsub-all-layers-4xh100-guide.md` | 4 | 128/128 | `p-ba1a0c01` | `trials-4xh100/` | `$DATA_ROOT/ladder-4xh100` |
+| `4xh100` | `../addsub-all-layers-4xh100-sota.yaml` | `../addsub-all-layers-4xh100-guide.md` | 4 | 128/128 | `p-ba2a0c02` | `trials-4xh100/` | `$DATA_ROOT/ladder-4xh100` |
 
 `PROFILES` in `make_trials.py` is the single source of truth for that table; the shell
 scripts read it rather than carrying their own copy, and run ids are disjoint so both
