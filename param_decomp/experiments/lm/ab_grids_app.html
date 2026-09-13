@@ -13,13 +13,18 @@
   select, input[type=range] { vertical-align: middle; }
   #thrval { font-family: ui-monospace, monospace; min-width: 64px; display: inline-block; }
   #count { color: var(--muted); }
-  #detail { display: none; padding: 12px 16px; border-top: 1px solid var(--line); background: var(--card); }
-  #detail .panes { display: flex; gap: 24px; flex-wrap: wrap; }
-  #detail h3 { margin: 0 0 6px; font-size: 14px; }
+  #detail { display: none; position: fixed; top: 0; right: 0; height: 100vh; overflow: auto;
+            min-width: 240px; padding: 12px 16px; border-left: 1px solid var(--line);
+            background: var(--card); z-index: 6; }
+  #detail .panes { display: flex; flex-direction: column; gap: 16px; align-items: center; }
+  #detail h3 { margin: 0 0 10px; font-size: 14px; }
   #detail .pane { text-align: center; }
   #detail .pane .cap { color: var(--muted); margin-top: 4px; }
-  #readout { font-family: ui-monospace, monospace; margin-top: 6px; min-height: 1.3em; }
+  #readout { font-family: ui-monospace, monospace; margin-top: 10px; min-height: 1.3em;
+             white-space: pre-wrap; }
   #gallery { padding: 10px 16px; }
+  body.drawer-open header, body.drawer-open .axis-note, body.drawer-open #legend,
+  body.drawer-open #gallery, body.drawer-open #empty { margin-right: var(--drawer-w, 0px); }
   .matrix-row { margin-bottom: 16px; }
   .matrix-row .row-title { font-family: ui-monospace, monospace; font-size: 12px; color: var(--muted);
                            margin: 0 0 5px; }
@@ -192,6 +197,20 @@ function tileDrawers(mi, si, pi, oi) {
   return drawers;
 }
 
+// Network order for module rows: by layer index, then K, Q, V, O, up, gate, down. Names
+// that do not parse (no `layers.N.`) sort after, alphabetically.
+const SITE_RANK = ["k_proj", "q_proj", "v_proj", "o_proj", "up_proj", "gate_proj", "down_proj"];
+function moduleKey(name) {
+  const m = name.match(/(?:^|\.)layers\.(\d+)\./);
+  const layer = m ? +m[1] : Infinity;
+  const site = SITE_RANK.findIndex(r => name.endsWith(r));
+  return [layer, site < 0 ? SITE_RANK.length : site];
+}
+function compareModules(a, b) {
+  const ka = moduleKey(cur.modules[a].name), kb = moduleKey(cur.modules[b].name);
+  return ka[0] - kb[0] || ka[1] - kb[1] || cur.modules[a].name.localeCompare(cur.modules[b].name);
+}
+
 // Ranked and thresholded on the max over CI nets, mirroring the metric-side save filter:
 // a subcomponent that only the hidden net cares about must not be filtered away.
 function visibleComponents() {
@@ -239,7 +258,7 @@ function renderGallery() {
     if (!byModule.has(comp.mi)) byModule.set(comp.mi, []);
     byModule.get(comp.mi).push(comp);
   }
-  for (const mi of [...byModule.keys()].sort((a, b) => a - b)) {
+  for (const mi of [...byModule.keys()].sort(compareModules)) {
     const row = document.createElement("div");
     row.className = "matrix-row";
     const title = document.createElement("div");
@@ -269,9 +288,12 @@ function renderGallery() {
 function renderDetail() {
   const detail = $("detail");
   if (!selected || !cur.modules[selected.mi] || cur.modules[selected.mi].saved[selected.si] !== selected.c) {
-    detail.style.display = "none"; return;
+    detail.style.display = "none";
+    document.body.classList.remove("drawer-open");
+    return;
   }
   detail.style.display = "block";
+  document.body.classList.add("drawer-open");
   const pi = +$("pos").value, oi = +$("op").value;
   $("dtitle").textContent = `${selected.name} · component ${selected.c} · op ${cur.ops[oi]} · position ${cur.positions[pi]} · step ${cur.step}`;
   const drawers = tileDrawers(selected.mi, selected.si, pi, oi);
@@ -294,7 +316,18 @@ function renderDetail() {
         `a=${a} ${cur.ops[oi]} b=${b}   CI=${drawers.ciVal(ai, bi).toFixed(3)}${hid}   inner=${drawers.innerVal(ai, bi).toFixed(4)}`;
     };
   }
+  // Keep the gallery clear of the drawer (its width follows the canvas size).
+  document.body.style.setProperty("--drawer-w", detail.offsetWidth + "px");
 }
+
+// Clicking anywhere on the main view that is not a tile closes the drawer. Clicks inside
+// the drawer or the header controls leave it alone.
+document.addEventListener("click", ev => {
+  if (!selected) return;
+  if (ev.target.closest(".tile, #detail, header")) return;
+  selected = null;
+  render();
+});
 
 function render() { renderGallery(); renderDetail(); }
 
