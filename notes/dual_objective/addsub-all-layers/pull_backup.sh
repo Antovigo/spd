@@ -55,6 +55,18 @@ RUN_REMOTE="$REMOTE_DATA/runs/$RUN_ID"
 OUT="$DEST/$RUN_ID"
 mkdir -p "$OUT"
 
+# Mirror the pod's `runs/by-name/<run_name> -> ../<run id>` convention into $DEST, so the
+# backups are browsable by the name you launched under and not just by opaque run id. The
+# name comes from the pinned launch_config.yaml we just pulled, so it is the run's OWN name
+# rather than whatever the generator currently emits.
+link_by_name() {
+  local name
+  name=$(sed -n 's/^run_name: *//p' "$OUT/launch_config.yaml" 2>/dev/null | head -1) || return 0
+  [ -n "$name" ] || return 0
+  mkdir -p "$DEST/by-name"
+  ln -sfn "../$RUN_ID" "$DEST/by-name/$name"
+}
+
 pass_once() {
   echo "=== $(date -Is) backup pass: $REMOTE:$RUN_REMOTE -> $OUT ==="
   # 1. the small artifacts. `|| true` throughout: a pass that fails because the pod is
@@ -64,6 +76,7 @@ pass_once() {
     --include='ab_grids/' --include='ab_grids/**' --exclude='*' \
     "$REMOTE:$RUN_REMOTE/" "$OUT/" || { echo "small-artifact pull failed"; return 0; }
   rsync -az --partial -e "${SSH[*]}" "$REMOTE:$REMOTE_DATA/logs/" "$OUT/logs/" || true
+  link_by_name
   for L in ladder ladder-4xh100; do
     rsync -az --partial -e "${SSH[*]}" --include='summary.md' --include='*.log' --include='*.rc' \
       --exclude='*' "$REMOTE:$REMOTE_DATA/$L/" "$OUT/$L/" 2>/dev/null || true
