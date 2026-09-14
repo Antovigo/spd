@@ -1,3 +1,16 @@
+# -05 (2026-09-14): -04 with a different INITIALIZATION — `neuron_aligned_zero_u`
+# (branch feature/neuron_aligned_zero_u). Exactly two leaves change from -04: this and
+# `run_name`. The init is `neuron_aligned_targeted`'s V — the SAME top-C coordinates from
+# the SAME `neuron_ranks` artifact — with U zeroed, so the component sum is exactly zero
+# at init and the delta carries all of W. A subcomponent the reconstruction losses never
+# ask for therefore stays at exactly zero rather than holding W-scale weights a mask
+# adversary could switch on, which is what `zero_u` buys; the aligned V keeps `x @ V` a
+# live, targeted signal from step 0, which is what plain `zero_u` lacks.
+#   ASYMMETRY, worth knowing when reading the result (SPEC T13 `selected_unit_factors`):
+#     where the aligned units sit on d_out (q/k/v, gate/up) V IS the coordinate's weight
+#     vector, so zeroing U keeps the alignment in full; where they sit on d_in (o, down)
+#     the weights live in U and V is the one-hot, so those sites start aligned in WHICH
+#     coordinate they read but carry none of its magnitude.
 # -04 (2026-09-13): -03 plus the hidden pass's e2e KL RIDER at 1x strength, on both hidden
 # passes (`pd.hidden.output_coeff: 0.21875`, `nontarget.hidden.output_coeff: 0.4375`; code
 # 3f7e1fc2a), and the NON-TARGET minimality doubled again (Antoine, 2026-09-13):
@@ -114,7 +127,7 @@
 # `sequential_passes`, both remat flags,
 # `mem_fraction 0.95` — carries over unchanged from the 8-GPU file's header, and for the
 # same reasons: this is the same hardware, four of it.
-run_name: addsub-all-layers-4xh100-04
+run_name: addsub-all-layers-4xh100-05
 decomposition:
   sites:
     kind: glu_transformer
@@ -128,7 +141,7 @@ decomposition:
       gate: 912
       up: 912
       down: 1024
-    initialization: neuron_aligned_targeted
+    initialization: neuron_aligned_zero_u
     neuron_ranks: {kind: name, name: addsub1-100_llama31-8b_unit-energy}
   ci:
     type: chunkwise_transformer
