@@ -36,6 +36,7 @@ from param_decomp.experiments.lm.eval_operations import global_token_batch, make
 from param_decomp.experiments.lm.load_run import build_target, component_initializer_for
 from param_decomp.experiments.lm.neuron_ranks import load_neuron_alignment
 from param_decomp.experiments.lm.resolved import (
+    ALIGNED_INITIALIZATIONS,
     AnyLMTargetConfig,
     LlamaSimpleMLPTargetConfig,
     LMTargetedRun,
@@ -141,7 +142,7 @@ def train_targeted(
             data_root,
             write_summary_to=built.run.run_dir if is_main else None,
         )
-        if built.target.component_initialization == "neuron_aligned_targeted"
+        if built.target.component_initialization in ALIGNED_INITIALIZATIONS
         else None
     )
     component_initializer = component_initializer_for(built.target, neuron_alignment)

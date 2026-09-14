@@ -479,6 +479,29 @@ def validate_neuron_alignment(
         assert units.min() >= 0 and units.max() < n, (spec.name, units.min(), units.max(), n)
 
 
+def _aligned_site_arrays(
+    model: DecomposedModel, alignment: NeuronAlignment
+) -> dict[str, tuple[Array, Array]]:
+    """Every site's aligned `(V, U)` from the frozen weights, read inside the init graph.
+    Shared by the two aligned inits so they cannot drift apart in which coordinates they
+    select — they differ only in what they then do with `U`."""
+    assert isinstance(model, GLUDecomposedModel), (
+        f"the neuron-aligned inits need a transformer target, got {type(model)}"
+    )
+    validate_neuron_alignment(model.sites, model.anatomy, alignment)
+    site_arrays: dict[str, tuple[Array, Array]] = {}
+    for spec in model.sites:
+        layer, kind = model.anatomy.family.parse(spec.name)
+        weight = _frozen_site_weight(model.anatomy, model.frozen_block(layer), kind)
+        site_arrays[spec.name] = selected_unit_factors(
+            weight,
+            spec,
+            kind in model.anatomy.row_kinds,
+            jnp.asarray(alignment[spec.name], dtype=jnp.int32),
+        )
+    return site_arrays
+
+
 def neuron_aligned_targeted_component_initializer(
     alignment: NeuronAlignment,
 ) -> ComponentInitializer:
@@ -488,20 +511,40 @@ def neuron_aligned_targeted_component_initializer(
 
     def initialize(model: DecomposedModel, key: PRNGKeyArray) -> ComponentStacks:
         del key
-        assert isinstance(model, GLUDecomposedModel), (
-            f"neuron_aligned_targeted needs a transformer target, got {type(model)}"
+        return component_stacks_from_site_arrays(
+            model.sites, _aligned_site_arrays(model, alignment)
         )
-        validate_neuron_alignment(model.sites, model.anatomy, alignment)
-        site_arrays: dict[str, tuple[Array, Array]] = {}
-        for spec in model.sites:
-            layer, kind = model.anatomy.family.parse(spec.name)
-            weight = _frozen_site_weight(model.anatomy, model.frozen_block(layer), kind)
-            site_arrays[spec.name] = selected_unit_factors(
-                weight,
-                spec,
-                kind in model.anatomy.row_kinds,
-                jnp.asarray(alignment[spec.name], dtype=jnp.int32),
-            )
-        return component_stacks_from_site_arrays(model.sites, site_arrays)
+
+    return initialize
+
+
+def neuron_aligned_zero_u_component_initializer(
+    alignment: NeuronAlignment,
+) -> ComponentInitializer:
+    """`neuron_aligned_targeted`'s `V` with `U` zeroed — the targeted coordinates under
+    `zero_u`'s discipline. Consumes no randomness.
+
+    The component sum is then exactly zero and the delta carries all of `W`, so a
+    subcomponent the reconstruction losses never ask for stays at exactly zero instead of
+    holding `W`-scale weights a mask adversary could switch on, while `x @ V` still reads the
+    aligned coordinates and `U` has a dense nonzero gradient from step 0.
+
+    NOTE the asymmetry this inherits from `selected_unit_factors` (SPEC T13). Where the
+    aligned units sit on `d_out` (q/k/v, gate/up) `V` is the coordinate's own weight vector,
+    so zeroing `U` keeps the alignment in full. Where they sit on `d_in` (o, down) the
+    weights live in `U` and `V` is the one-hot `Eᵀ`, so zeroing `U` leaves those sites
+    selecting the aligned input coordinates but carrying none of their weights. Both halves
+    are "V is neuron-aligned"; only the first also retains the coordinate's magnitude."""
+
+    def initialize(model: DecomposedModel, key: PRNGKeyArray) -> ComponentStacks:
+        del key
+        aligned = _aligned_site_arrays(model, alignment)
+        return component_stacks_from_site_arrays(
+            model.sites,
+            {
+                spec.name: (aligned[spec.name][0], jnp.zeros((spec.C, spec.d_out), jnp.float32))
+                for spec in model.sites
+            },
+        )
 
     return initialize

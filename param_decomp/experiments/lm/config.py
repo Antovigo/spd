@@ -62,6 +62,7 @@ from param_decomp.experiments.config import (
 )
 from param_decomp.experiments.eval_config import EvalConfig
 from param_decomp.experiments.lm.resolved import (
+    ALIGNED_INITIALIZATIONS,
     AnyLMTargetConfig,
     ComponentInitialization,
     LlamaSimpleMLPTargetConfig,
@@ -195,15 +196,15 @@ class GluTransformerCSpec(BaseConfig):
     initialization: ComponentInitialization = "random"
     neuron_ranks: NeuronRanksRef | None = None
     """The harvested ranking artifact (`harvest_neuron_ranks` writes it), required by — and
-    only by — `initialization: neuron_aligned_targeted`; its provenance (target model, prompt
-    pool) is checked against the run's at load."""
+    only by — the aligned inits (`ALIGNED_INITIALIZATIONS`); its provenance (target model,
+    prompt pool) is checked against the run's at load."""
 
     @model_validator(mode="after")
     def validate_neuron_ranks(self) -> Self:
-        aligned = self.initialization == "neuron_aligned_targeted"
+        aligned = self.initialization in ALIGNED_INITIALIZATIONS
         assert aligned == (self.neuron_ranks is not None), (
-            "`neuron_ranks` is required by, and only by, `initialization: "
-            f"neuron_aligned_targeted` (initialization={self.initialization!r}, "
+            "`neuron_ranks` is required by, and only by, "
+            f"{sorted(ALIGNED_INITIALIZATIONS)} (initialization={self.initialization!r}, "
             f"neuron_ranks={self.neuron_ranks!r})"
         )
         return self
@@ -218,15 +219,15 @@ class SimpleMlpCSpec(BaseConfig):
     initialization: ComponentInitialization = "random"
     neuron_ranks: NeuronRanksRef | None = None
     """The harvested ranking artifact (`harvest_neuron_ranks` writes it), required by — and
-    only by — `initialization: neuron_aligned_targeted`; its provenance (target model, prompt
-    pool) is checked against the run's at load."""
+    only by — the aligned inits (`ALIGNED_INITIALIZATIONS`); its provenance (target model,
+    prompt pool) is checked against the run's at load."""
 
     @model_validator(mode="after")
     def validate_neuron_ranks(self) -> Self:
-        aligned = self.initialization == "neuron_aligned_targeted"
+        aligned = self.initialization in ALIGNED_INITIALIZATIONS
         assert aligned == (self.neuron_ranks is not None), (
-            "`neuron_ranks` is required by, and only by, `initialization: "
-            f"neuron_aligned_targeted` (initialization={self.initialization!r}, "
+            "`neuron_ranks` is required by, and only by, "
+            f"{sorted(ALIGNED_INITIALIZATIONS)} (initialization={self.initialization!r}, "
             f"neuron_ranks={self.neuron_ranks!r})"
         )
         return self
@@ -467,8 +468,9 @@ class LMExperimentConfig(ExperimentConfig):
     @model_validator(mode="after")
     def validate_initialization(self) -> Self:
         # The rankings are a statistic of the TARGET prompt pool, which a plain run lacks.
-        assert self.decomposition.sites.initialization != "neuron_aligned_targeted", (
-            "initialization: neuron_aligned_targeted is a targeted-run (tPD) init"
+        assert self.decomposition.sites.initialization not in ALIGNED_INITIALIZATIONS, (
+            f"initialization: {self.decomposition.sites.initialization} is a "
+            "targeted-run (tPD) init"
         )
         return self
 
@@ -677,20 +679,21 @@ def _validate_initialization_capacity(
     site_specs: tuple[SiteSpec, ...],
 ) -> None:
     """The aligned inits' C bounds, decided at resolve time (free, on CPU): `neuron_aligned`
-    needs every component a nonempty support; `neuron_aligned_targeted` copies C DISTINCT
-    ranked coordinates, so C may not exceed the site's coordinate count. `random` and
-    `zero_u` seed at any C and are unconstrained."""
+    needs every component a nonempty support; the aligned targeted inits copy C DISTINCT
+    ranked coordinates, so C may not exceed the site's coordinate count — that bound is a
+    property of the SELECTION, which `neuron_aligned_zero_u` shares, not of what it then
+    does with `U`. `random` and `zero_u` seed at any C and are unconstrained."""
     match initialization:
         case "random" | "zero_u":
             return
         case "neuron_aligned":
             for site_spec in site_specs:
                 glu_transformer.validate_neuron_aligned_capacity(anatomy, site_spec)
-        case "neuron_aligned_targeted":
+        case "neuron_aligned_targeted" | "neuron_aligned_zero_u":
             for site_spec in site_specs:
                 n = glu_transformer.neuron_aligned_component_count(anatomy, site_spec)
                 assert n >= site_spec.C, (
-                    f"{site_spec.name}: neuron_aligned_targeted needs C <= {n} distinct "
+                    f"{site_spec.name}: {initialization} needs C <= {n} distinct "
                     f"coordinates, got C={site_spec.C}"
                 )
 

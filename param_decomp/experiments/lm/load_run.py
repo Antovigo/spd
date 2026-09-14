@@ -36,6 +36,7 @@ from param_decomp.core.train import Decomposition
 from param_decomp.experiments.lm.config import LMCIFnArch, hf_model_variant
 from param_decomp.experiments.lm.deliverable import ResolvedDeliverable, load_deliverable
 from param_decomp.experiments.lm.resolved import (
+    ALIGNED_INITIALIZATIONS,
     AnyLMTargetConfig,
     LlamaSimpleMLPTargetConfig,
     TargetConfig,
@@ -47,6 +48,7 @@ from param_decomp.targets.glu_transformer import GLUDecomposedModel, GLULayer, g
 from param_decomp.targets.neuron_alignment import (
     NeuronAlignment,
     neuron_aligned_targeted_component_initializer,
+    neuron_aligned_zero_u_component_initializer,
 )
 from param_decomp.vendored_jax.llama import AttentionImplementation
 
@@ -106,10 +108,10 @@ def component_initializer_for(
     target: AnyLMTargetConfig, alignment: NeuronAlignment | None = None
 ) -> ComponentInitializer:
     """Resolve the one run-start V/U initializer from the authored target family config.
-    `alignment` is the `neuron_aligned_targeted` init's loaded rankings
-    (`neuron_ranks.load_neuron_alignment`), required by — and only by — that init."""
+    `alignment` is the aligned inits' loaded rankings (`neuron_ranks.load_neuron_alignment`),
+    required by — and only by — the inits in `ALIGNED_INITIALIZATIONS`."""
     assert (alignment is not None) == (
-        target.component_initialization == "neuron_aligned_targeted"
+        target.component_initialization in ALIGNED_INITIALIZATIONS
     ), (target.component_initialization, alignment is not None)
     match target:
         case (
@@ -133,6 +135,12 @@ def component_initializer_for(
         ):
             assert alignment is not None
             return neuron_aligned_targeted_component_initializer(alignment)
+        case (
+            TargetConfig(component_initialization="neuron_aligned_zero_u")
+            | LlamaSimpleMLPTargetConfig(component_initialization="neuron_aligned_zero_u")
+        ):
+            assert alignment is not None
+            return neuron_aligned_zero_u_component_initializer(alignment)
         case _:
             raise AssertionError(target)
 

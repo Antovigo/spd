@@ -13,14 +13,26 @@ from param_decomp.core.configs import NeuronRanksRef, PDConfig, TargetedPDConfig
 from param_decomp.vendored_jax.llama import AttentionImplementation
 
 WeightsDtype = Literal["float32", "bfloat16"]
-ComponentInitialization = Literal["random", "zero_u", "neuron_aligned", "neuron_aligned_targeted"]
+ComponentInitialization = Literal[
+    "random", "zero_u", "neuron_aligned", "neuron_aligned_targeted", "neuron_aligned_zero_u"
+]
 """How the subcomponent V/U masters are seeded. `random`: target-blind small random.
 `zero_u`: the target-coupled seed's `V` with `U` zeroed, so the component sum is exactly
 zero at init and the delta carries all of `W` — a subcomponent acquires norm only as the
 reconstruction losses demand it. `neuron_aligned`: every site along its own architectural
 coordinates, chosen without data. `neuron_aligned_targeted` (tPD only, SPEC T13): the
 top-C coordinates by activity on the target prompt pool, from the harvested artifact
-`neuron_ranks` names."""
+`neuron_ranks` names. `neuron_aligned_zero_u` (tPD only): the same targeted coordinates,
+but with `U` zeroed — `neuron_aligned_targeted`'s `V` under `zero_u`'s discipline, so the
+component sum is exactly zero at init and the delta carries all of `W` while `x @ V` still
+reads the selected coordinates."""
+
+ALIGNED_INITIALIZATIONS: frozenset[ComponentInitialization] = frozenset(
+    {"neuron_aligned_targeted", "neuron_aligned_zero_u"}
+)
+"""The inits that consume the harvested `neuron_ranks` artifact, and the only ones for which
+`neuron_ranks` may be authored. Both read the SAME ranking; they differ only in whether `U`
+carries the selected coordinate's weights or is zeroed."""
 
 
 def weights_jnp_dtype(dtype: WeightsDtype) -> DTypeLike:
