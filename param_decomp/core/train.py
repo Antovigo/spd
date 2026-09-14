@@ -57,6 +57,8 @@ from param_decomp.core.configs import (
     BATCH_HIDDEN_ACTS_NORMALIZATION,
     HiddenActsNormalization,
     LossCoeff,
+    WeightDecayRoles,
+    WeightDecayStreams,
 )
 from param_decomp.core.decomposed_linear import constrain_component_activation
 from param_decomp.core.faithfulness import FaithfulnessLossFn
@@ -1330,10 +1332,27 @@ def make_train_step[PreparedT](
 @dataclass(frozen=True)
 class CIScaledWeightDecay:
     """The tPD CI-scaled weight decay (SPEC T11): its coefficient joined with the
-    components optimizer's LR schedule, applied after the optimizer update."""
+    components optimizer's LR schedule, applied after the optimizer update.
+
+    `stream`, `role` and `quantile` are the SELECTION (T11 amended): which passes' CI count
+    as evidence that a component is alive, and how tolerant that evidence is. The defaults
+    (`all`, `all`, `1.0`) are the original rule — the max CI over every pass — so a config
+    that names none of them runs the pre-amendment step exactly."""
 
     coeff: float
     components_lr: ScheduleConfig
+    stream: WeightDecayStreams = "all"
+    role: WeightDecayRoles = "all"
+    quantile: float = 1.0
+
+    def selects(self, on_target_stream: bool, role: CIRole) -> bool:
+        """Whether a pass's CI bundle feeds the decay. STATIC (both axes are static pass
+        facts), so an unselected pass is simply absent from the reduction — never a traced
+        branch or a zero-weighted contribution."""
+        stream_ok = self.stream == "all" or (
+            self.stream == "target" if on_target_stream else self.stream == "nontarget"
+        )
+        return stream_ok and (self.role == "all" or self.role == role)
 
     def apply(
         self,
@@ -1344,11 +1363,13 @@ class CIScaledWeightDecay:
     ) -> tuple[TrainState, dict[str, Array]]:
         """Apply T11 after the optimizer update, using this step's pre-update CIs.
 
-        `ci_bundles` is EVERY pass's bundle — both streams, and both CI heads when the run
-        carries a hidden pass. The decay reads their per-component max, so a component that
-        matters on either stream OR either head is not dead and is never decayed away."""
+        `ci_bundles` is the SELECTED passes' bundles (`selects` decides; by default every
+        pass — both streams, and both CI heads when the run carries a hidden pass). Each
+        bundle contributes its per-component `quantile` over the batch, and the bundles
+        combine by max, so a component that matters on any selected stream OR head is not
+        dead and is never decayed away."""
         assert ci_bundles, "CI-scaled weight decay needs at least one CI bundle"
-        per_bundle = [_per_component_batch_max(ci.lower) for ci in ci_bundles]
+        per_bundle = [_per_component_batch_quantile(ci.lower, self.quantile) for ci in ci_bundles]
         rate = scheduled_value_at(train_frac, self.components_lr) * self.coeff
         decay = {
             site: rate
@@ -1377,6 +1398,29 @@ def _per_component_batch_max(ci_lower: dict[str, Array]) -> dict[str, Array]:
         site: jnp.max(v.astype(jnp.float32), axis=tuple(range(v.ndim - 1)))
         for site, v in ci_lower.items()
     }
+
+
+def _per_component_batch_quantile(ci_lower: dict[str, Array], quantile: float) -> dict[str, Array]:
+    """Each site's per-subcomponent CI `quantile` over the pooled leading (batch AND
+    position) axes, fp32. `quantile == 1.0` IS the max and takes that exact path — the
+    identity keeps a run that does not ask for a quantile byte-identical (and free of the
+    gather below)."""
+    if quantile >= 1.0:
+        return _per_component_batch_max(ci_lower)
+    return {site: _pooled_quantile(v.astype(jnp.float32), quantile) for site, v in ci_lower.items()}
+
+
+def _pooled_quantile(ci: Float[Array, "*leading C"], quantile: float) -> Float[Array, " C"]:
+    """The quantile over every leading axis at once, per component.
+
+    `jnp.quantile` lowers to `lax.sort`, which REFUSES a sharded sort dimension, and the
+    pooling reshape would merge sharded leading axes anyway — so replicate the leading axes
+    first (the same move S35's per-position median makes in `losses.py`), keeping the C axis
+    on its own `tp` spec: C is the wide axis, and it is not the one being sorted."""
+    if not jax.sharding.get_abstract_mesh().empty:
+        c_spec = jax.typeof(ci).sharding.spec[-1]
+        ci = jax.sharding.reshard(ci, P(*((None,) * (ci.ndim - 1)), c_spec))
+    return jnp.quantile(ci.reshape(-1, ci.shape[-1]), quantile, axis=0)
 
 
 def _scale_subcomponents(
@@ -1617,6 +1661,23 @@ def make_targeted_train_step[PreparedT](
         )
     passes = tuple(plans)
     target_plan = passes[0]
+
+    # T11's selection is resolved ONCE, here, against the passes this objective actually
+    # built: a decay that names a stream or a role the run does not carry would silently
+    # decay every component at the full rate, so it is a construction error, not a runtime
+    # degradation. `()` when the run has no decay at all.
+    wd_passes: tuple[_PassPlan, ...] = ()
+    if ci_scaled_weight_decay is not None:
+        wd_passes = tuple(
+            plan
+            for plan in passes
+            if ci_scaled_weight_decay.selects(plan.on_target_stream, plan.role)
+        )
+        assert wd_passes, (
+            "the CI-scaled weight decay selects no pass: stream="
+            f"{ci_scaled_weight_decay.stream!r} role={ci_scaled_weight_decay.role!r} against "
+            f"{tuple(plan.label for plan in passes)}"
+        )
 
     def stream_capture_keys(on_target_stream: bool) -> CaptureKeys:
         """What one stream's clean forward must capture: every pass on it contributes its
@@ -2041,10 +2102,10 @@ def make_targeted_train_step[PreparedT](
         if ci_scaled_weight_decay is not None:
             # T11: an update rule on the post-step component masters, not a loss term —
             # nothing differentiates through it. Off the step's own pre-update forward CIs,
-            # maxed over every pass.
+            # over the passes the decay's own (stream, role) selection admits.
             new_state, wd_metrics = ci_scaled_weight_decay.apply(
                 new_state,
-                [bundle_for(plan, ci_any, nt_ci_any) for plan in passes],
+                [bundle_for(plan, ci_any, nt_ci_any) for plan in wd_passes],
                 train_frac,
                 model.site_names,
             )

@@ -138,6 +138,68 @@ def test_targeted_pd_config_ci_scaled_weight_decay_parses():
             TargetedPDConfig.model_validate({**base, "ci_scaled_weight_decay": not_positive})
 
 
+def test_targeted_pd_config_ci_scaled_weight_decay_selection_parses():
+    # T11 amended: the three selectors default to the ORIGINAL rule (every stream, every
+    # head, the max), so a config that names none of them is the pre-amendment decay.
+    base = {
+        "loss_metrics": [
+            {"type": "ImportanceMinimalityLoss", "coeff": 3e-3, "gamma": 1.0},
+            {"type": "StochasticReconLoss", "coeff": 1.0},
+        ],
+        "components_optimizer": {"lr_schedule": 1e-3},
+        "ci_fn_optimizer": {"lr_schedule": 1e-3},
+        "steps": 10,
+        "batch_size": 8,
+        "ci_scaled_weight_decay": 0.1,
+    }
+    default = TargetedPDConfig.model_validate(base)
+    assert default.ci_scaled_weight_decay_stream == "all"
+    assert default.ci_scaled_weight_decay_role == "all"
+    assert default.ci_scaled_weight_decay_quantile == 1.0
+
+    picked = TargetedPDConfig.model_validate(
+        {
+            **base,
+            "ci_scaled_weight_decay_stream": "target",
+            "ci_scaled_weight_decay_role": "output",
+            "ci_scaled_weight_decay_quantile": 0.9,
+        }
+    )
+    assert picked.ci_scaled_weight_decay_stream == "target"
+    assert picked.ci_scaled_weight_decay_role == "output"
+    assert picked.ci_scaled_weight_decay_quantile == 0.9
+
+    for field, bad in (
+        ("ci_scaled_weight_decay_stream", "both"),  # the spelling is target|nontarget|all
+        ("ci_scaled_weight_decay_role", "activations"),  # ... and output|hidden|all
+        ("ci_scaled_weight_decay_quantile", 0.0),  # a quantile of nothing
+        ("ci_scaled_weight_decay_quantile", 1.5),
+    ):
+        with pytest.raises(Exception, match=field):
+            TargetedPDConfig.model_validate({**base, field: bad})
+
+
+def test_ci_scaled_weight_decay_selection_needs_a_decay_to_select_from():
+    # A selector without a coefficient reads as if it changed something; it cannot.
+    base = {
+        "loss_metrics": [
+            {"type": "ImportanceMinimalityLoss", "coeff": 3e-3, "gamma": 1.0},
+            {"type": "StochasticReconLoss", "coeff": 1.0},
+        ],
+        "components_optimizer": {"lr_schedule": 1e-3},
+        "ci_fn_optimizer": {"lr_schedule": 1e-3},
+        "steps": 10,
+        "batch_size": 8,
+    }
+    for field, value in (
+        ("ci_scaled_weight_decay_stream", "target"),
+        ("ci_scaled_weight_decay_role", "output"),
+        ("ci_scaled_weight_decay_quantile", 0.5),
+    ):
+        with pytest.raises(Exception, match="ci_scaled_weight_decay"):
+            TargetedPDConfig.model_validate({**base, field: value})
+
+
 def test_plain_pd_config_cannot_spell_ci_scaled_weight_decay():
     # T11 is targeted-only: in plain PD faithfulness penalizes the residual delta, so
     # decaying component vectors would fight it head-on — the field does not exist on

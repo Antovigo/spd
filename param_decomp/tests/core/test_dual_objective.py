@@ -35,6 +35,7 @@ from param_decomp.core.model import PlacedModel
 from param_decomp.core.objective import build_targeted_objective
 from param_decomp.core.schedule import ScheduleConfig
 from param_decomp.core.train import (
+    CIScaledWeightDecay,
     Decomposition,
     ForwardSubstrate,
     TrainingItem,
@@ -104,6 +105,7 @@ def _setup(
     nonlinearity_coeff: float | None = None,
     normalization: HiddenActsNormalization | None = None,
     output_coeff: float | None = None,
+    ci_scaled_weight_decay: CIScaledWeightDecay | None = None,
 ):
     cfg = TMSConfig(n_features=5, n_hidden=2)
     sites = site_specs(cfg, (SiteC("linear1", 8), SiteC("linear2", 6)))
@@ -155,7 +157,7 @@ def _setup(
             ci_placement=None,
         ),
         objective=objective,
-        ci_scaled_weight_decay=None,
+        ci_scaled_weight_decay=ci_scaled_weight_decay,
         components_optimizer=opt_vu,
         ci_fn_optimizer=opt_ci,
         total_steps=20,
@@ -433,3 +435,68 @@ def test_a_hidden_pass_cannot_spell_the_nonlinearity_prior() -> None:
             # is unrepresentable statically as well as at parse.
             recon=[*hidden.recon, _nonlinearity_cfg()],  # pyright: ignore[reportArgumentType]
         )
+
+
+def _pin_heads(state: TrainState, *, output_ci: float, hidden_ci: float) -> TrainState:
+    """Freeze the dual CI landscape so T11's statistic is known exactly: every trunk weight
+    and both readout heads' weights zeroed, each head's BIAS pinned to saturation, so every
+    component reads CI `output_ci` from the output head and `hidden_ci` from the hidden one
+    — independent of the batch, the stream, and the site."""
+    ci_fn = jax.tree.map(jnp.zeros_like, state.decomposition.ci_fn)
+    assert isinstance(ci_fn, LayerwiseMLPCIFn)
+    logit = {1.0: 30.0, 0.0: -30.0}  # saturates the CI squashing in either direction
+    pinned = ci_fn
+    for site in ci_fn.site_mlps:
+        mlp = ci_fn.site_mlps[site]
+        assert mlp.hidden_head is not None, "the dual fn carries a second readout head (S37)"
+        pinned = eqx.tree_at(
+            lambda f, site=site: (
+                f.site_mlps[site].biases[-1],
+                f.site_mlps[site].hidden_head[1],
+            ),
+            pinned,
+            (
+                jnp.full_like(mlp.biases[-1], logit[output_ci]),
+                jnp.full_like(mlp.hidden_head[1], logit[hidden_ci]),
+            ),
+        )
+    return TrainState(
+        decomposition=Decomposition(components=state.decomposition.components, ci_fn=pinned),
+        training=state.training,
+    )
+
+
+@pytest.mark.parametrize(
+    ("role", "expected_decay"),
+    [("all", 0.0), ("hidden", 0.0), ("output", 0.2)],
+)
+def test_ci_scaled_weight_decay_role_selects_which_head_counts_as_alive(
+    role: str, expected_decay: float
+) -> None:
+    """T11 amended: `role` decides WHICH readout head's CI keeps a component alive.
+
+    The CI fn is pinned so every component is DEAD to the output head and SATURATED on the
+    hidden head — a hidden-reconstruction-only component, the shape the default rule
+    protects. `all` and `hidden` therefore decay nothing; `output` decays everything at the
+    full `lr·wd` rate, which is the point of the knob: it is how you ask for a decay that
+    ignores the hidden objective."""
+    wd = CIScaledWeightDecay(
+        coeff=0.2,
+        components_lr=ScheduleConfig.constant(1.0),
+        role=role,  # pyright: ignore[reportArgumentType]
+    )
+    cfg, state, step = _setup(dual=True, sequential=False, ci_scaled_weight_decay=wd)
+    state = _pin_heads(state, output_ci=0.0, hidden_ci=1.0)
+    target_batch, broad = _batches(cfg)
+    _, metrics = step(_model_of(), state, target_batch, broad, jax.random.PRNGKey(5))
+    assert float(metrics["ci_scaled_weight_decay/max"]) == pytest.approx(expected_decay, abs=1e-6)
+    assert float(metrics["ci_scaled_weight_decay/mean"]) == pytest.approx(expected_decay, abs=1e-6)
+
+
+def test_ci_scaled_weight_decay_refuses_a_role_the_run_does_not_carry() -> None:
+    """The selection is resolved against the passes the objective built, at construction:
+    asking a single-head run for the hidden head would otherwise leave an empty reduction
+    (or, worse, a silent full-rate decay of every component)."""
+    wd = CIScaledWeightDecay(coeff=0.2, components_lr=ScheduleConfig.constant(1.0), role="hidden")
+    with pytest.raises(AssertionError, match="selects no pass"):
+        _setup(dual=False, sequential=False, ci_scaled_weight_decay=wd)

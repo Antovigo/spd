@@ -1136,6 +1136,15 @@ class PDConfig(PDConfigBase):
         return self
 
 
+type WeightDecayStreams = Literal["target", "nontarget", "all"]
+"""Which streams' CI the T11 decay reads (`TargetedPDConfig.ci_scaled_weight_decay_stream`)."""
+
+type WeightDecayRoles = Literal["output", "hidden", "all"]
+"""Which CI READOUT HEAD the T11 decay reads (`TargetedPDConfig.ci_scaled_weight_decay_role`):
+`output` the end-to-end head every run carries, `hidden` the internal-activations head (S36's
+second role, present only when the run carries a hidden pass)."""
+
+
 class TargetedPDConfig(PDConfigBase):
     """The tPD algorithm shape (SPEC §11): the faithfulness-free loss vocabulary, and no
     faithfulness-warmup fields at all — warmup drives the weight delta to zero, and tPD
@@ -1166,11 +1175,60 @@ class TargetedPDConfig(PDConfigBase):
         description=(
             "CI-scaled weight decay on the subcomponent V/U vectors (SPEC T11): after each "
             "optimizer step every subcomponent's V column and U row scale by "
-            "`1 - lr*wd*(1 - max CI)` with the max over BOTH streams' batches, so dead "
-            "components — never important on either stream — get dragged to zero. None "
-            "disables (the default; the term is an optional auxiliary)."
+            "`1 - lr*wd*(1 - max CI)`, the max taken over every pass's batch by default — "
+            "both streams and both CI heads — so dead components, never important anywhere, "
+            "get dragged to zero. None disables (the default; the term is an optional "
+            "auxiliary). The three `ci_scaled_weight_decay_*` fields below narrow WHICH CI "
+            "that max reads."
         ),
     )
+    ci_scaled_weight_decay_stream: WeightDecayStreams = Field(
+        default="all",
+        description=(
+            "Which streams' CI counts as evidence a component is alive (SPEC T11 amended): "
+            "`all` (the default, the original rule), `target` (the narrow stream only — a "
+            "component load-bearing ONLY on the broad stream is then decayed away), or "
+            "`nontarget`. Only meaningful with `ci_scaled_weight_decay` set."
+        ),
+    )
+    ci_scaled_weight_decay_role: WeightDecayRoles = Field(
+        default="all",
+        description=(
+            "Which CI READOUT HEAD the decay reads (SPEC T11 amended): `all` (the default, "
+            "the original rule), `output` (the end-to-end reconstruction head only — "
+            "components that only ever matter to the hidden-activations objective are then "
+            "decayed away), or `hidden` (the internal-activations head only, which requires "
+            "a hidden pass). Only meaningful with `ci_scaled_weight_decay` set."
+        ),
+    )
+    ci_scaled_weight_decay_quantile: float = Field(
+        default=1.0,
+        gt=0.0,
+        le=1.0,
+        description=(
+            "The per-component batch statistic the decay reads (SPEC T11 amended): 1.0 (the "
+            "default) is the MAX — the original rule, byte-inert and gather-free — and a "
+            "smaller value takes that quantile over the pooled batch and position axes "
+            "instead, so a component alive on only a few points no longer fully escapes the "
+            "decay. Applied per selected pass; the passes still combine by max. Only "
+            "meaningful with `ci_scaled_weight_decay` set."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def validate_ci_scaled_weight_decay(self) -> Self:
+        """The selectors describe a decay; without one they would be a config that reads as
+        if it changed something. Fail closed rather than ignoring them."""
+        if self.ci_scaled_weight_decay is None:
+            assert (
+                self.ci_scaled_weight_decay_stream == "all"
+                and self.ci_scaled_weight_decay_role == "all"
+                and self.ci_scaled_weight_decay_quantile == 1.0
+            ), (
+                "ci_scaled_weight_decay_{stream,role,quantile} select which CI the CI-scaled "
+                "weight decay reads; they need `ci_scaled_weight_decay` set to mean anything"
+            )
+        return self
 
     @model_validator(mode="after")
     def validate_loss_metrics(self) -> Self:

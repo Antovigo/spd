@@ -910,3 +910,30 @@ def test_per_site_metric_readers_trace_under_stack_owned_placement():
     for name, _, _ in vu.site_slots:
         assert np.isfinite(float(grad_norms[f"grad_norms/components.vu['{name}'][0]"])), name
         assert np.isfinite(float(ratios[f"uv_norm_ratio['{name}']"])), name
+
+
+def test_ci_scaled_weight_decay_quantile_runs_on_a_sharded_ci():
+    """T11 amended: the quantile lowers to `lax.sort`, which REFUSES a sharded sort
+    dimension — the failure S35's per-position median hit on the 4x H100 seat. The CI
+    arrives batch-sharded with C on `tp`, i.e. every axis involved is sharded, so this is
+    the shape that must work: the leading axes replicate, C stays on `tp`, and the result
+    equals the unsharded quantile."""
+    from jax.sharding import NamedSharding
+    from jax.sharding import PartitionSpec as P
+
+    from param_decomp.core.train import _per_component_batch_quantile
+
+    n = jax.device_count()
+    mesh = hsdp_mesh(1, n // 2, 2)
+    ci = jax.random.uniform(jax.random.PRNGKey(3), (n * 2, 4, 6))  # [B, P, C]
+    sharded = jax.device_put(ci, NamedSharding(mesh, P(("replicate", "fsdp"), None, "tp")))
+
+    @jax.jit
+    def run(x: jax.Array) -> dict[str, jax.Array]:
+        return _per_component_batch_quantile({"site": x}, 0.25)
+
+    with jax.set_mesh(mesh):
+        out = run(sharded)["site"]
+    assert out.shape == (6,)
+    expected = jnp.quantile(ci.reshape(-1, 6), 0.25, axis=0)
+    assert jnp.allclose(out, expected, atol=1e-6)

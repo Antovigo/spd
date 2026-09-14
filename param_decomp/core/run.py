@@ -1086,7 +1086,13 @@ def run_targeted_decomposition_training[EvalPassT, EvalContextT](
         substrate=substrate,
         objective=objective,
         ci_scaled_weight_decay=(
-            CIScaledWeightDecay(pd.ci_scaled_weight_decay, pd.components_optimizer.lr_schedule)
+            CIScaledWeightDecay(
+                pd.ci_scaled_weight_decay,
+                pd.components_optimizer.lr_schedule,
+                stream=pd.ci_scaled_weight_decay_stream,
+                role=pd.ci_scaled_weight_decay_role,
+                quantile=pd.ci_scaled_weight_decay_quantile,
+            )
             if pd.ci_scaled_weight_decay is not None
             else None
         ),

@@ -737,6 +737,75 @@ def test_ci_scaled_weight_decay_drags_dead_norms_down_across_steps():
     assert abs(live_norm_after - live_norm_before) < 0.05
 
 
+@pytest.mark.parametrize(
+    ("stream", "quantile", "nontarget_only_decays"),
+    [("all", 1.0, False), ("target", 1.0, True), ("all", 0.5, True)],
+)
+def test_ci_scaled_weight_decay_selection_reaches_the_nontarget_only_component(
+    stream: str, quantile: float, nontarget_only_decays: bool
+) -> None:
+    """T11 amended, against the pinned CI landscape of `_pin_ci_fn`: linear1 component 0 is
+    saturated everywhere, component 1 is alive ONLY on the non-target stream and only on the
+    rows where feature 3 fires (p≈0.3).
+
+    Both knobs are ways of saying "that is not enough aliveness to protect it", and they say
+    it for different reasons — `stream: target` because the evidence is off-target, the
+    median because the evidence is rare — so both must decay component 1 at the full rate
+    while leaving the always-alive component 0 untouched."""
+    wd = CIScaledWeightDecay(
+        coeff=0.2,
+        components_lr=ScheduleConfig.constant(1.0),
+        stream=stream,  # pyright: ignore[reportArgumentType]
+        quantile=quantile,
+    )
+    cfg, model, state, step = _tiny_setup(
+        _loss_metrics(), _stochastic_nontarget(), ci_scaled_weight_decay=wd
+    )
+    _, _, state_none, step_none = _tiny_setup(_loss_metrics(), _stochastic_nontarget())
+    state, state_none = _pin_ci_fn(state), _pin_ci_fn(state_none)
+
+    target_batch, nontarget_batch = _target_batch(cfg, 0), _nontarget_batch(cfg, 0)
+    fires = float((nontarget_batch[:, 3] > 0).mean())
+    assert 0.0 < fires < 0.5, fires  # rare enough for the median to read 0, common for the max
+    key = jax.random.PRNGKey(0)
+    state_d, _ = step(model, state, target_batch, nontarget_batch, key)
+    state_n, _ = step_none(model, state_none, target_batch, nontarget_batch, key)
+
+    vu_d, vu_n = (
+        state_d.decomposition.components.site("linear1"),
+        (state_n.decomposition.components.site("linear1")),
+    )
+    # The always-alive component is never touched, whatever the selection.
+    assert jnp.array_equal(vu_d.V[:, 0], vu_n.V[:, 0])
+    assert jnp.array_equal(vu_d.U[0], vu_n.U[0])
+    expected = 0.8 if nontarget_only_decays else 1.0
+    assert jnp.allclose(vu_d.V[:, 1], expected * vu_n.V[:, 1], rtol=1e-6)
+    assert jnp.allclose(vu_d.U[1], expected * vu_n.U[1], rtol=1e-6)
+
+
+def test_ci_scaled_weight_decay_quantile_one_is_the_max_exactly() -> None:
+    """The quantile default is an IDENTITY, not an approximation of the old rule: `1.0`
+    takes the max path (no sort, no gather), and the step it produces is bit-identical to
+    the same decay with no quantile authored at all."""
+    lr = ScheduleConfig.constant(1.0)
+    cfg, model, state, step_max = _tiny_setup(
+        _loss_metrics(),
+        _stochastic_nontarget(),
+        ci_scaled_weight_decay=CIScaledWeightDecay(coeff=0.2, components_lr=lr),
+    )
+    _, _, state_q, step_q = _tiny_setup(
+        _loss_metrics(),
+        _stochastic_nontarget(),
+        ci_scaled_weight_decay=CIScaledWeightDecay(coeff=0.2, components_lr=lr, quantile=1.0),
+    )
+    state, state_q = _pin_ci_fn(state), _pin_ci_fn(state_q)
+    batches = (_target_batch(cfg, 0), _nontarget_batch(cfg, 0))
+    key = jax.random.PRNGKey(0)
+    out_max, _ = step_max(model, state, *batches, key)
+    out_q, _ = step_q(model, state_q, *batches, key)
+    assert eqx.tree_equal(out_max.decomposition, out_q.decomposition)
+
+
 def test_scatter_features_places_and_zeroes():
     x = jnp.asarray([[0.5, 0.7], [0.0, 0.9]])
     out = scatter_features(x, (1, 3), 5)
