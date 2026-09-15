@@ -8,7 +8,7 @@ frequency schedule; the only differences are the decomposed span (32 blocks vs 1
 the batch-per-rank.
 
 Protocol for everything below: frozen HF Llama-3.1-8B in fp32 on CPU, "a+b=" grid, layer 30's
-seven sites replaced by one run's components under a mask, layers 0-29 and 31 frozen (except §5).
+seven sites replaced by one run's components under a mask, layers 0-29 and 31 frozen (except §6).
 CI is the torch port of the chunkwise CI fn on the clean taps, as in training. Scripts and raw
 outputs live in `~/pd_scratch/dual_obj_jax/last_layers/` (`emu.py`, `static_compare.py`,
 `directions.py`, `inner_grids.py`, `site_transform.py`, `early_recruit_plots.py`,
@@ -33,7 +33,11 @@ outputs live in `~/pd_scratch/dual_obj_jax/last_layers/` (`emu.py`, `static_comp
    penalty saving; every always-on piece sits at CI preactivation 1.3-2.1, where the mask squash
    passes no gradient and the imp-min leak passes 0.01x. Merging would need the surviving pieces
    to absorb the others' function *before* their CI drops, which nothing rewards.
-4. **The pieces were recruited in the first 2 000 steps, when the last layers were the cheapest
+4. **Under the noisy upstream the deep run trains on, its ten pieces reconstruct better
+   than block30's three** (KL 0.049 vs 0.071 with stochastic upstream masks, §6): the extra
+   pieces are load-bearing for the objective it actually sees, even though they are dead
+   weight for the clean-upstream objective.
+5. **The pieces were recruited in the first 2 000 steps, when the last layers were the cheapest
    fix for a chaotic output, and then parked.** Layer-30/31 L0 was 460 at step 500 against a
    median of 76 for layers 2-29; every extra piece is already at CI 1 in the step-4000 snapshot.
    Components that are always-on at 4k either stay at 1 or die (bimodal), in every layer group.
@@ -207,13 +211,44 @@ to the last layers; what is specific is how many pieces they recruit before it e
 *Fig D. Mean-CI trajectories (4k to 16k) of every component always-on at 4k, layers 31, 30 and 18.*
 
 
-## 6. Pending measurements
+## 6. Noisy upstream: the ten pieces beat the three where the deep run actually trains
 
-- **Noisy upstream** (`emu_up/`): layer 30 by each run's components with layers 0-29 replaced by
-  the all-layers run's CI-masked or stochastically masked components. Tests whether the ten
-  pieces are worth more than the three when the input carries upstream reconstruction error.
-- **Merged replacements** (`followup.json`): each run's always-on set replaced by its best
-  rank-k least-squares merge, k = 1..3 (5), fitted on all positions. Measures directly how many
-  rank-1 pieces the write needs.
+Same emulation, but layers 0-29 are replaced by the all-layers run's own components before
+layer 30 is swapped in (2 500 prompts, `emu_up/results.json`). Three upstream contexts: the
+CI-masked forward (deterministic, no delta), stochastic masks `ci + (1-ci)·U` with the delta
+channel on a random mask (the training term's stochastic family), and the same without delta.
+The upstream perturbation at "=" is a relative squared error of 0.25 / 0.17 / 0.21 on the
+layer-30 input.
+
+| upstream context | layer-30 CI-masked, KL at "=" all-layers / block30 | all comps on | always-on set only |
+|---|---|---|---|
+| clean (§3) | 0.028 / **0.011** | 0.026 / **0.004** | 0.095 / 0.124 |
+| layers 0-29 CI-masked | 0.073 / 0.073 | 0.078 / 0.072 | 0.117 / 0.168 |
+| layers 0-29 stochastic + delta | **0.049** / 0.071 | **0.050** / 0.063 | 0.128 / 0.223 |
+| layers 0-29 stochastic, no delta | **0.061** / 0.073 | **0.063** / 0.067 | 0.126 / 0.200 |
+
+![Fig 8. KL and hidden-point error at '=' for layer 30 by each run's components, under clean vs all-layers-masked upstream contexts.](plots/last_layers/fig8_upstream_context.png)
+*Fig 8. KL and hidden-point error at '=' for layer 30 by each run's components, under clean vs all-layers-masked upstream contexts.*
+
+The ranking flips. With the upstream noise the deep run trains under, its layer-30 components
+reconstruct the logits better than block30's (0.049 vs 0.071 under stochastic masks), and the
+ten always-on pieces alone beat the three alone by a wider margin (0.13 vs 0.22) than the
+reverse margin in the clean setting. The block30 components are tuned to the clean layer-30
+input and lose 7x when it is perturbed (0.011 to 0.071); the all-layers components lose less
+than 2x (0.028 to 0.049). The extra pieces keep their per-piece value under noise (Fig 9): the
+ablation costs are 0.002-0.37 nats in every context, so the deep run's solution is a local
+optimum of the objective it was actually trained on, not of the clean-upstream objective the
+block30 run sees.
+
+![Fig 9. Single-component ablations of the all-layers always-on set under each upstream context.](plots/last_layers/fig9_ablations_by_context.png)
+*Fig 9. Single-component ablations of the all-layers always-on set under each upstream context (gray = also always-on in block30).*
+
+## 7. Pending measurements
+
+- **Merged replacements** (`followup.json`, job 11754): each run's always-on set replaced by
+  its best rank-k least-squares merge, k = 1..3 (5), fitted on all positions; how many rank-1
+  pieces the write needs.
 - **Fineweb CI**: CI of the same components on 384 x 64 fineweb tokens; whether the pieces are
   used separately on the non-target stream.
+- **The upper-leak test**: `addsub-4L28-31-leak0.01` (control, stopped at the step-4000 grid)
+  vs `addsub-4L28-31-leak0.1` (branch `feature/upper_leak`, `decomposition.ci.upper_leak`).
