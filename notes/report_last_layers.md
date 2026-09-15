@@ -50,9 +50,15 @@ Per-site counts at "=" from the grid snapshots (mean output-role CI over 10 000 
 | o | 512 | 2 / 2 | 1 / 0 | 2 / 0 |
 | q, k, v | | 1 / 1, 1 / 0, 0 | 1 / 1, 1 / 0, 0 | 1 / 1, 1 / 0, 1 / 0 |
 
-`fig1_mean_ci_sorted.png`: the mean CI of each site's components sorted; the deep run has a
+
+![Fig 1. Mean output-role CI at '=' per component, sorted, layer-30 gate/up/down; dashed line = 0.9.](plots/last_layers/fig1_mean_ci_sorted.png)
+*Fig 1. Mean output-role CI at '=' per component, sorted, layer-30 gate/up/down; dashed line = 0.9.*
+Fig 1: the mean CI of each site's components sorted; the deep run has a
 plateau of ~10 at CI 1, the block30 run a plateau of 3 followed by the same tail of partially-on
-components. `fig2_alwayson_union.png`: same indices in both runs (same init). The block30 set is a
+components. 
+![Fig 2. Mean CI at '=' of the union of both runs' always-on sets, per run.](plots/last_layers/fig2_alwayson_union.png)
+*Fig 2. Mean CI at '=' of the union of both runs' always-on sets, per run.*
+Fig 2: same indices in both runs (same init). The block30 set is a
 strict subset of the all-layers set: gate {3, 43, 103} ⊂ {1, 3, 6, 15, 17, 21, 27, 43, 103,
 299}; up {3, 47, 52} ⊂ {1, 3, 15, 21, 43, 47, 52}; down {1, 3, 52} ⊂ {1, 3, 17, 21, 27, 43, 52}.
 The extras have mean CI 0.00-0.08 in the block30 run (gate c1 is the exception at 0.36-0.43).
@@ -60,7 +66,10 @@ Each component still carries its init neuron as its top neuron (11272, 3382, 676
 10073, 11976, 11430, 11920, 2762 for gate), but with only 10-40 % of its energy there; block30's
 three spread half their energy over 450-1 200 neurons, the all-layers pieces over 430-900.
 
-**They are bias-like.** `fig10_inner_grids.png` shows x·V_c/|V_c| over the 100x100 grid for all
+
+![Fig 10. Inner activation x·V_c/|V_c| at '=' over the (a, b) grid for every always-on component; colour = panel mean ± 3 sd.](plots/last_layers/fig10_inner_grids.png)
+*Fig 10. Inner activation x·V_c/|V_c| at '=' over the (a, b) grid for every always-on component; colour = panel mean ± 3 sd.*
+**They are bias-like.** Fig 10 shows x·V_c/|V_c| over the 100x100 grid for all
 always-on components: means 2 to 15 in magnitude, sd 0.2 to 1.0, with a faint diagonal (a+b)
 modulation. The CI-fn preactivation at "=" is 1.3-2.1 for every one of them (block30: 1.1-1.4),
 i.e. all are in the leaky region above 1.
@@ -81,8 +90,10 @@ The sum is essentially one constant vector per site (rms deviation over prompts 
 mean norm of 65-84 at gate/up). Per-piece constant contributions (norms) at gate: all-layers
 c299 32, c15 27, c6 19, c27 14, c17 13, c103 13, c43 10, c3 7, c1 3, c21 3; block30 c103 58,
 c43 37, c3 8. So the deep run's extras are genuine parts of the sum, not cancelling pairs, and
-block30's pieces are 2-5x larger. `fig6_alwayson_function.png` gives the per-prompt cosine and
-error distributions.
+block30's pieces are 2-5x larger. Fig 6 gives the per-prompt cosine and error distributions.
+![Fig 6. Layer-30 MLP output at '=' with only the always-on set on: per-prompt cosine and relative error vs clean, and norms.](plots/last_layers/fig6_alwayson_function.png)
+*Fig 6. Layer-30 MLP output at '=' with only the always-on set on: per-prompt cosine and relative error vs clean, and norms.*
+
 
 The read/write directions themselves have drifted apart: same-index components have cosine
 0.2-0.7 between runs, and block30's always-on V and U lie only 25-60 % inside the span of the
@@ -92,7 +103,10 @@ not keep three of the ten.
 ## 3. Which set gives the better loss?
 
 Layer 30 replaced by each run's components, clean upstream, 2 500 prompts
-(`emu_clean/results.json`, `fig3_kl_by_mask.png`):
+(`emu_clean/results.json`, Fig 3):
+![Fig 3. KL and hidden-point error with layer 30 replaced by each run's components under each mask type; everything else frozen.](plots/last_layers/fig3_kl_by_mask.png)
+*Fig 3. KL and hidden-point error with layer 30 replaced by each run's components under each mask type; everything else frozen.*
+
 
 | mask | KL at "=" all-layers / block30 | KL mean over 5 positions | MLP-30 rel. sq. err at "=" |
 |---|---|---|---|
@@ -114,11 +128,17 @@ slightly better than the three alone) because the block30 run leans more on its 
 tail. Restricting the all-layers V/U to block30's three indices gives KL 0.36: those three
 components do not carry the write in the deep run.
 
-`fig7_kl_heatmaps.png`: per-prompt KL over (a, b) for both runs' CI-masked forward.
+
+![Fig 7. Per-prompt KL at '=' over (a, b): CI-masked forward of both runs, and the all-layers always-on set alone.](plots/last_layers/fig7_kl_heatmaps.png)
+*Fig 7. Per-prompt KL at '=' over (a, b): CI-masked forward of both runs, and the all-layers always-on set alone.*
+
 
 ## 4. Why gradient descent does not merge them
 
-`fig4_ablations.png`: ablating a single always-on component from the CI-masked forward.
+Fig 4: ablating a single always-on component from the CI-masked forward.
+![Fig 4. Increase of KL at '=' when one always-on component is removed from the CI-masked forward (gray = always-on in both runs; dotted = penalty saving of one component).](plots/last_layers/fig4_ablations.png)
+*Fig 4. Increase of KL at '=' when one always-on component is removed from the CI-masked forward (gray = always-on in both runs; dotted = penalty saving of one component).*
+
 
 | all-layers extra pieces | ΔKL at "=" | block30 pieces | ΔKL at "=" |
 |---|---|---|---|
@@ -147,11 +167,17 @@ the configuration:
 Why block30 nevertheless ended at 3: its recon was satisfied from step 100 (train KL 0.03,
 layer-30 L0 8.5 at step 500) while imp-min sat at its 4x initial coefficient, so marginal
 pieces were pushed below CI 1 before they became load-bearing. The deep run spent its first
-2 000 steps at train KL 1.4 (`fig5_trajectories.png`).
+2 000 steps at train KL 1.4 (Fig 5).
+![Fig 5. Layer-30 gate L0, whole-run kl_ci_masked and the layer-30 hidden-point recon over training, both runs.](plots/last_layers/fig5_trajectories.png)
+*Fig 5. Layer-30 gate L0, whole-run kl_ci_masked and the layer-30 hidden-point recon over training, both runs.*
+
 
 ## 5. Why the last layers, and why early
 
-`figA_l0_per_layer.png` (eval L0 per layer over training, output head, all positions):
+Fig A (eval L0 per layer over training, output head, all positions):
+![Fig A. all-layers-04: eval L0 per layer vs step (heatmap), and layers 30, 31, 0, 1 against the median and range of layers 2-29.](plots/last_layers/figA_l0_per_layer.png)
+*Fig A. all-layers-04: eval L0 per layer vs step (heatmap), and layers 30, 31, 0, 1 against the median and range of layers 2-29.*
+
 
 | step | layer 31 | layer 30 | median of layers 2-29 |
 |---|---|---|---|
@@ -161,17 +187,25 @@ pieces were pushed below CI 1 before they became load-bearing. The deep run spen
 | 16 500 | 89 | 64 | 38 |
 
 At step 500 layers 30 and 31 hold 6x the components of a typical layer; layers 22-23 and 28 are
-the next largest and layers 0-1 are the other outliers. `figB_alwayson_per_layer.png` (grid
-snapshots, "=" only): always-on counts at 4k/16k are 47/27 for layer 30 and 69/40 for layer 31
+the next largest and layers 0-1 are the other outliers. Fig B (grid snapshots, "=" only):
+![Fig B. Number of always-on (≥0.9) and alive (≥0.05) components per layer at the 4k/8k/12k/16k grid snapshots.](plots/last_layers/figB_alwayson_per_layer.png)
+*Fig B. Number of always-on (≥0.9) and alive (≥0.05) components per layer at the 4k/8k/12k/16k grid snapshots.*
+ always-on counts at 4k/16k are 47/27 for layer 30 and 69/40 for layer 31
 against 8-33 / 4-22 elsewhere. The last layers are the only place the output can still be
 corrected before the unembed, their component gradients are the largest in the network (norm
 1.74 at layer 31, 0.42 at layer 30, 0.18-0.29 for layers 9-29 at step 16 900), and during the
 noisy start every direction that helps the logits gets recruited.
 
-`figC_stickiness.png` and `figD_ci_traj_alwayson.png`: of the 116 components always-on at 4k in
+Figs C and D: of the 116 components always-on at 4k in
 layers 30-31, 66 are still ≥0.9 at 16k and 33 are dead, with almost nothing in between; layers
 2-29 show the same bimodality (326 of 499 stay, 113 die). The parking mechanism is not specific
 to the last layers; what is specific is how many pieces they recruit before it engages.
+![Fig C. Components always-on at step 4000: their mean CI at step 16000, by layer group.](plots/last_layers/figC_stickiness.png)
+*Fig C. Components always-on at step 4000: their mean CI at step 16000, by layer group.*
+
+![Fig D. Mean-CI trajectories (4k to 16k) of every component always-on at 4k, layers 31, 30 and 18.](plots/last_layers/figD_ci_traj_alwayson.png)
+*Fig D. Mean-CI trajectories (4k to 16k) of every component always-on at 4k, layers 31, 30 and 18.*
+
 
 ## 6. Pending measurements
 
