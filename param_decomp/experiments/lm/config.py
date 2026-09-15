@@ -388,6 +388,16 @@ class ChunkwiseTransformerCiConfig(BaseConfig):
             "Kaiming draws. False keeps the Kaiming heads."
         ),
     )
+    upper_leak: float = Field(
+        default=0.01,
+        gt=0.0,
+        description=(
+            "Slope of the CI upper squash above 1 (SPEC S6's alpha, the imp-min side of a "
+            "saturated component). 0.01 is the historical value. Larger values keep an "
+            "imp-min gradient on always-on components; the lower squash is unaffected. "
+            "Training-side only: the slow-eval CI reductions squash with the default."
+        ),
+    )
     dual: bool = Field(
         default=False,
         description=(
@@ -777,6 +787,7 @@ def _resolve_chunkwise_ci_arch(
         ffn_kind=ci.ffn.kind,
         learned_norm_scale=ci.learned_norm_scale,
         zero_init_readout=ci.zero_init_readout,
+        upper_leak=ci.upper_leak,
         dual=ci.dual,
     )
 

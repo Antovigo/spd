@@ -108,10 +108,17 @@ def _lhs_b(x: Array, g: Array) -> tuple[Array]:
 lower_leaky_hard_sigmoid.defvjp(_lhs_f, _lhs_b)
 
 
-def upper_leaky_hard_sigmoid(x: Float[Array, "..."]) -> Float[Array, "..."]:
+DEFAULT_UPPER_LEAK = 0.01
+"""The upper squash's slope above 1 (SPEC S6's alpha). Configurable per CI fn
+(`ChunkwiseTransformerCIArch.upper_leak`); the lower squash's leak below 0 stays 0.01."""
+
+
+def upper_leaky_hard_sigmoid(
+    x: Float[Array, "..."], alpha: float = DEFAULT_UPPER_LEAK
+) -> Float[Array, "..."]:
     """`x>1 ? 1+alpha*(x-1) : clamp(x,0,1)` — ordinary autodiff of this expression
-    (torch builds its backward the same way; only the lower squashing is a custom VJP)."""
-    alpha = 0.01
+    (torch builds its backward the same way; only the lower squashing is a custom VJP).
+    `alpha` is the leak above 1: it is what imp-min sees for a saturated component."""
     return jnp.where(x > 1, 1 + alpha * (x - 1), jnp.clip(x, 0.0, 1.0))
 
 
@@ -130,11 +137,13 @@ class CI:
     upper: SiteDict
 
     @staticmethod
-    def from_preactivations(preactivations: SiteDict) -> "CI":
+    def from_preactivations(
+        preactivations: SiteDict, upper_leak: float = DEFAULT_UPPER_LEAK
+    ) -> "CI":
         return CI(
             preactivations=preactivations,
             lower={k: lower_leaky_hard_sigmoid(v) for k, v in preactivations.items()},
-            upper={k: upper_leaky_hard_sigmoid(v) for k, v in preactivations.items()},
+            upper={k: upper_leaky_hard_sigmoid(v, upper_leak) for k, v in preactivations.items()},
         )
 
 
@@ -181,17 +190,21 @@ def output_ci(ci: AnyCI) -> CI:
     return ci_for_role(ci, "output")
 
 
-def _bundle(roles: tuple[CIRole, ...], per_role: tuple[SiteDict, ...]) -> AnyCI:
+def _bundle(
+    roles: tuple[CIRole, ...],
+    per_role: tuple[SiteDict, ...],
+    upper_leak: float = DEFAULT_UPPER_LEAK,
+) -> AnyCI:
     """Squash each role's preactivations into its bundle, returning the shape `roles` implies —
     a bare `CI` for a single-role fn, so nothing downstream of a plain run ever sees `DualCI`."""
     assert len(roles) == len(per_role), (roles, len(per_role))
     match roles:
         case ("output",):
-            return CI.from_preactivations(per_role[0])
+            return CI.from_preactivations(per_role[0], upper_leak)
         case ("output", "hidden"):
             return DualCI(
-                output=CI.from_preactivations(per_role[0]),
-                hidden=CI.from_preactivations(per_role[1]),
+                output=CI.from_preactivations(per_role[0], upper_leak),
+                hidden=CI.from_preactivations(per_role[1], upper_leak),
             )
         case _:
             raise AssertionError(f"unknown CI role tuple {roles}")
@@ -651,6 +664,9 @@ class ChunkwiseTransformerCIArch:
     """Zero-init every readout head (`W = 0`, bias 0.5): all CI logits start mid-window,
     the torch trainer's default. Head-only — the trunk keeps its Kaiming draws (and its
     RNG consumption). False keeps the Kaiming heads the equivalence goldens pin."""
+    upper_leak: float = DEFAULT_UPPER_LEAK
+    """Slope of the upper squash above 1 (the imp-min side of a saturated CI). 0.01 is the
+    historical value; larger keeps imp-min gradient alive on always-on components."""
     dual: bool = False
     """Build a SECOND readout head on this same trunk (SPEC S37), so the CI fn scores both
     the output and the hidden reconstruction objectives. An ARCH property, not a build-time
@@ -881,6 +897,7 @@ class ChunkwiseTransformerCIFn(eqx.Module):
     eps: float = eqx.field(static=True)
     has_position_axis: bool = eqx.field(static=True)
     roles: tuple[CIRole, ...] = eqx.field(static=True)
+    upper_leak: float = eqx.field(static=True, default=DEFAULT_UPPER_LEAK)
 
     def shardings(self, mesh: Mesh, placement: CIFnPlacement) -> "ChunkwiseTransformerCIFn":
         """The stacked per-chunk transformer's HSDP layout (`ChunkTransformer.shardings`,
@@ -998,7 +1015,11 @@ class ChunkwiseTransformerCIFn(eqx.Module):
         # ONE scan produced every head: the trunk ran once, and the heads' slot tuples come
         # back stacked side by side. `_bundle` is the single place that decides what a role
         # tuple maps to, so this impl cannot drift from the MLP ones.
-        return _bundle(self.roles, tuple(scatter(s) for s in stacked_per_role[: len(self.roles)]))
+        return _bundle(
+            self.roles,
+            tuple(scatter(s) for s in stacked_per_role[: len(self.roles)]),
+            self.upper_leak,
+        )
 
 
 def _init_chunk_transformer(
@@ -1156,6 +1177,7 @@ def init_chunkwise_transformer_ci_fn(
         eps=CI_FN_RMS_EPS,
         has_position_axis=True,
         roles=roles_for(dual),
+        upper_leak=arch.upper_leak,
     )
 
 
