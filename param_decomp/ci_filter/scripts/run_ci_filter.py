@@ -239,7 +239,6 @@ def run_ci_filter(config: CIFilterConfig, data_root: Path, filter_id: str) -> Pa
                 all_on=fixed({k: np.ones_like(v) for k, v in alive.items()})
                 if references and at_step == 0
                 else None,
-                pgd_recon=pgd_recon(ci_fn) if references and pgd_eval is not None else None,
             )
             _wandb_log(_flat_eval(result), at_step)
             with outputs.pool_evals.open("a") as sink:
@@ -248,11 +247,15 @@ def run_ci_filter(config: CIFilterConfig, data_root: Path, filter_id: str) -> Pa
                 f"eval @ {at_step} ({time.time() - t0:.0f}s): n_alive {result.n_alive}, "
                 f"L0/token {result.l0_per_token:.1f} (last {result.l0_per_token_last:.1f}), "
                 f"ci {result.ci}, rounded {result.rounded}, alive_set {result.alive_set}, "
-                f"all_on {result.all_on}, pgd_recon {result.pgd_recon}"
+                f"all_on {result.all_on}"
             )
             return result, site_max
 
         evaluate(0, ci_fn, references=True)
+        # The starting CI fn's PGD eval runs at the END, beside the final one: run first, its
+        # 20-step adversarial backward left a 1x L40 unable to fit the training step (smoke
+        # 11820). Its masters wait in host memory.
+        initial_ci_fn = jax.tree.map(np.asarray, trainable(ci_fn)) if pgd_eval is not None else None
 
         optimizer = make_optimizer(config)
         lr = optax_schedule(config.lr_schedule, config.steps)
@@ -353,6 +356,29 @@ def run_ci_filter(config: CIFilterConfig, data_root: Path, filter_id: str) -> Pa
                 outputs.grids, slices, pool, config.steps, config.grid.mean_ci_floor
             )
             logger.info(f"grid {block.operation} ({time.time() - t0:.0f}s): saved {counts}")
+        if pgd_eval is not None:
+            assert initial_ci_fn is not None and config.pgd_eval is not None
+            t0 = time.time()
+            pgd_final = pgd_recon(ci_fn)
+            initial_params = jax.tree.map(
+                lambda host, like: jax.device_put(host, like.sharding),
+                initial_ci_fn,
+                trainable(ci_fn),
+            )
+            pgd_initial = pgd_recon(cast(PlacedCIFn, eqx.combine(initial_params, ci_fn)))
+            outputs.pgd.write_text(
+                json.dumps(
+                    {"initial": pgd_initial, "final": pgd_final, **config.pgd_eval.model_dump()}
+                )
+            )
+            final = final.model_copy(update={"pgd_recon": pgd_final})
+            outputs.summary.write_text(final.model_dump_json(indent=2))
+            _wandb_log(
+                {"eval/pgd_recon_initial": pgd_initial, "eval/pgd_recon": pgd_final}, config.steps
+            )
+            logger.info(
+                f"PGD recon ({time.time() - t0:.0f}s): initial {pgd_initial:.4f}, final {pgd_final:.4f}"
+            )
     if config.wandb is not None:
         assert wandb.run is not None
         wandb.run.summary.update({"outputs": str(outputs.root), "final/n_alive": final.n_alive})

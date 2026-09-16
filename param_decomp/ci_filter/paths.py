@@ -7,7 +7,8 @@ A CI filter's outputs live with the decomposition it reads:
         training/metrics.jsonl      per-step optimization log
         training/ci_fn/             the fine-tuned CI fn (orbax; a later filter's `init`)
         eval/pool_evals.jsonl       pool evaluations (before the first step, periodic, final)
-        eval/summary.json           the final PoolEval
+        eval/summary.json           the final PoolEval (its `pgd_recon` is the final PGD eval)
+        eval/pgd_recon.json         the PGD recon eval of the starting and the final CI fn
         alive/alive.json            {site: [component ids]} with max CI > alive_threshold
         alive/max_ci.npz            {site: (C,)} max output CI over every prompt and position
         ab_grids/index.html         the applet (open over file://)
@@ -47,6 +48,10 @@ class CIFilterOutputs:
     @property
     def summary(self) -> Path:
         return self.root / "eval" / "summary.json"
+
+    @property
+    def pgd(self) -> Path:
+        return self.root / "eval" / "pgd_recon.json"
 
     @property
     def alive(self) -> Path:
