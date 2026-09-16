@@ -36,7 +36,7 @@ from param_decomp.ci_filter.pool import Tokenizer, answer_token_ids, build_pool
 from param_decomp.ci_filter.step import (
     Prepared,
     RowArrays,
-    accumulate,
+    batch_gradients,
     index_batches,
     make_apply_update,
     make_eval_batch,
@@ -209,22 +209,18 @@ def run_ci_filter(config: CIFilterConfig, data_root: Path, filter_id: str) -> Pa
             for i in range(config.steps):
                 idx = sample_batch(pool.n_prompts, config.batch_size, config.seed, i)
                 train_frac = jnp.float32(i / max(config.steps - 1, 1))
-                grads = None
-                metrics: dict[str, Array] = {}
-                schedules: dict[str, Array] = {}
-                for start in range(0, config.batch_size, micro):
-                    g, m, schedules = micro_grads(
-                        placed,
-                        prepared,
-                        ci_fn,
-                        tokens_all,
-                        jnp.asarray(idx[start : start + micro]),
-                        answer_ids,
-                        train_frac,
-                    )
-                    grads = g if grads is None else accumulate(grads, g)
-                    metrics = {k: metrics[k] + v if metrics else v for k, v in m.items()}
-                assert grads is not None
+                grads, metrics, schedules = batch_gradients(
+                    micro_grads,
+                    placed,
+                    prepared,
+                    ci_fn,
+                    tokens_all,
+                    idx,
+                    answer_ids,
+                    train_frac,
+                    micro,
+                    config.accumulate_on_host,
+                )
                 ci_fn, opt_state, grad_norm = apply_update(ci_fn, opt_state, grads)
                 del grads
                 if i % config.log_every == 0 or i == config.steps - 1:

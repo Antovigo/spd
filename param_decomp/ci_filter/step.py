@@ -157,6 +157,54 @@ def accumulate(acc: Trainable, grads: Trainable) -> Trainable:
     return jax.tree.map(lambda a, g: a + g, acc, grads)
 
 
+def batch_gradients(
+    micro_grads: MicroGrads,
+    placed: PlacedModel,
+    prepared: Prepared,
+    ci_fn: PlacedCIFn,
+    tokens_all: Int[Array, "N T"],
+    idx: np.ndarray,
+    answer_ids: Int[Array, " K"],
+    train_frac: Array,
+    microbatch_size: int,
+    on_host: bool,
+) -> tuple[Trainable, dict[str, Array], dict[str, Array]]:
+    """One step's summed gradient over consecutive microbatches of `idx`, with the summed
+    (already `1 / n`-scaled) metrics and the step's schedule values. `on_host` keeps the running
+    sum of every microbatch but the last in host memory (`CIFilterConfig.accumulate_on_host`)."""
+    host_sum = None
+    grads = None
+    metrics: dict[str, Array] = {}
+    schedules: dict[str, Array] = {}
+    starts = range(0, len(idx), microbatch_size)
+    for start in starts:
+        g, m, schedules = micro_grads(
+            placed,
+            prepared,
+            ci_fn,
+            tokens_all,
+            jnp.asarray(idx[start : start + microbatch_size]),
+            answer_ids,
+            train_frac,
+        )
+        metrics = {k: metrics[k] + v if metrics else v for k, v in m.items()}
+        if on_host and start != starts[-1]:
+            host_g = jax.tree.map(np.array, g)  # writable host copies
+            del g
+            host_sum = (
+                host_g
+                if host_sum is None
+                else jax.tree.map(lambda a, b: np.add(a, b, out=a), host_sum, host_g)
+            )
+        else:
+            grads = g if grads is None else accumulate(grads, g)
+    assert grads is not None
+    if host_sum is not None:
+        device_sum = jax.tree.map(lambda h, like: jax.device_put(h, like.sharding), host_sum, grads)
+        grads = accumulate(grads, device_sum)
+    return grads, metrics, schedules
+
+
 def make_apply_update(
     optimizer: optax.GradientTransformation,
 ) -> Callable[[PlacedCIFn, optax.OptState, Trainable], tuple[PlacedCIFn, optax.OptState, Array]]:

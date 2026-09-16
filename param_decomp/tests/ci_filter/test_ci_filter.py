@@ -23,7 +23,7 @@ from param_decomp.ci_filter.grid import collect_operation, write_applet, write_o
 from param_decomp.ci_filter.objective import kl_rows, objective_rows, row_scores
 from param_decomp.ci_filter.pool import answer_token_ids, build_pool
 from param_decomp.ci_filter.step import (
-    accumulate,
+    batch_gradients,
     index_batches,
     make_apply_update,
     make_eval_batch,
@@ -219,23 +219,33 @@ def _exercise_placed(tmp_path: Path, mesh: Mesh, sharding: str) -> None:
         apply_update = make_apply_update(optimizer)
         before = jax.tree.leaves(eqx.filter(ci_fn, eqx.is_inexact_array))
         before = [np.asarray(x).copy() for x in before]
+
+        def step_grads(i: int, on_host: bool):
+            idx = sample_batch(pool.n_prompts, config.batch_size, config.seed, i)
+            return batch_gradients(
+                micro_grads,
+                placed,
+                prepared,
+                ci_fn,
+                tokens_all,
+                idx,
+                answer_ids,
+                jnp.float32(i / (config.steps - 1)),
+                micro,
+                on_host,
+            )
+
+        # The host-held running sum is the device sum.
+        on_device, _, _ = step_grads(0, on_host=False)
+        on_host, _, _ = step_grads(0, on_host=True)
+        for a, b in zip(jax.tree.leaves(on_device), jax.tree.leaves(on_host), strict=True):
+            np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=1e-5, atol=1e-7)
+            assert jax.typeof(a).sharding == jax.typeof(b).sharding
+        del on_device, on_host
+
         schedules: dict[str, jax.Array] = {}
         for i in range(config.steps):
-            idx = sample_batch(pool.n_prompts, config.batch_size, config.seed, i)
-            grads, metrics = None, {}
-            for start in (0, micro):
-                g, m, schedules = micro_grads(
-                    placed,
-                    prepared,
-                    ci_fn,
-                    tokens_all,
-                    jnp.asarray(idx[start : start + micro]),
-                    answer_ids,
-                    jnp.float32(i / 3),
-                )
-                grads = g if grads is None else accumulate(grads, g)
-                metrics = {k: metrics[k] + v if metrics else v for k, v in m.items()}
-            assert grads is not None
+            grads, metrics, schedules = step_grads(i, on_host=i % 2 == 1)
             ci_fn, opt_state, grad_norm = apply_update(ci_fn, opt_state, grads)
             assert all(np.isfinite(float(v)) for v in metrics.values())
             assert np.isfinite(float(grad_norm)) and float(grad_norm) > 0.0

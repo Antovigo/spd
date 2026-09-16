@@ -152,6 +152,11 @@ class CIFilterConfig(BaseConfig):
     microbatches. `None` runs the whole batch at once. Hardware-only: the objective is a
     per-prompt mean and the frequency penalty's `a'` is fixed, so it does not change the
     optimization beyond the frequency term's per-microbatch estimate."""
+    accumulate_on_host: bool = False
+    """Hold the running gradient sum in host memory rather than on device: every microbatch
+    but the last is copied off device, and the sum comes back once per step. Hardware-only
+    (the summed gradient is the same up to float reassociation): it frees one CI-fn-sized
+    gradient tree (~3.9 GB for the 8B run) at the cost of two PCIe transfers per step."""
     eval_batch_size: PositiveInt = 1000
     seed: int = 0
     remat: bool = True
