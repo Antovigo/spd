@@ -180,6 +180,12 @@ class CIFilterConfig(BaseConfig):
     but the last is copied off device, and the sum comes back once per step. Hardware-only
     (the summed gradient is the same up to float reassociation): it frees one CI-fn-sized
     gradient tree (~3.9 GB for the 8B run) at the cost of two PCIe transfers per step."""
+    recompute_ci_inputs: bool = False
+    """Split each microbatch's backward in two: the loss's cotangent on the CI values first,
+    then a second clean forward recaptures the CI fn's inputs to pull it back through the CI
+    fn. Hardware-only (same gradient): the captured inputs (~8.5 MB per prompt for the 8B run's
+    `all_block_taps`) no longer sit in memory through the masked backward, at the cost of one
+    extra frozen forward per microbatch."""
     eval_batch_size: PositiveInt = 1000
     seed: int = 0
     remat: bool = True

@@ -239,6 +239,21 @@ def _exercise_placed(tmp_path: Path, mesh: Mesh, sharding: str) -> None:
                 on_host,
             )
 
+        # Recapturing the CI inputs for a second, CI-fn-only backward is the same gradient.
+        idx0 = jnp.asarray(sample_batch(pool.n_prompts, config.batch_size, config.seed, 0)[:micro])
+        recompute = make_micro_grads(config.model_copy(update={"recompute_ci_inputs": True}))
+        g_joint, m_joint, _ = micro_grads(
+            placed, prepared, ci_fn, tokens_all, idx0, answer_ids, jnp.float32(0.3)
+        )
+        g_split, m_split, _ = recompute(
+            placed, prepared, ci_fn, tokens_all, idx0, answer_ids, jnp.float32(0.3)
+        )
+        for a, b in zip(jax.tree.leaves(g_joint), jax.tree.leaves(g_split), strict=True):
+            np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=1e-4, atol=1e-7)
+        for k in m_joint:
+            np.testing.assert_allclose(float(m_joint[k]), float(m_split[k]), rtol=1e-5)
+        del g_joint, g_split
+
         # The host-held running sum is the device sum.
         on_device, _, _ = step_grads(0, on_host=False)
         on_host, _, _ = step_grads(0, on_host=True)

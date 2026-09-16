@@ -117,19 +117,18 @@ def make_micro_grads(config: CIFilterConfig) -> MicroGrads:
             else scheduled_value_at(train_frac, imp.frequency_coeff)
         )
 
-        def loss_fn(params: Trainable) -> tuple[Array, dict[str, Array]]:
-            ci = output_ci(
-                placed, cast(PlacedCIFn, eqx.combine(params, ci_fn)), captures, config.remat
-            )
+        def loss_at_ci(
+            lower: dict[str, Array], upper: dict[str, Array]
+        ) -> tuple[Array, dict[str, Array]]:
             masked_last = placed.masked_forward(
                 prepared,
                 tokens,
-                masking=MaterializedMasking(component_masks=ci.lower),
+                masking=MaterializedMasking(component_masks=lower),
                 remat=config.remat,
             ).output[:, -1, :]
             recon = jnp.mean(objective_rows(objective, masked_last, clean_last, answer_ids))
             activity, freq = importance_minimality_terms(
-                ci.upper,
+                upper,
                 gamma,
                 None if imp.frequency_coeff is None else imp.reference_datapoint_count,
                 imp.normalize_at_one,
@@ -140,12 +139,41 @@ def make_micro_grads(config: CIFilterConfig) -> MicroGrads:
                 "recon": recon,
                 "imp_activity": activity,
                 "imp_freq": freq,
-                "l0": _count_above(ci.lower, 0.0),
-                "l0_alive": _count_above(ci.lower, config.alive_threshold),
+                "l0": _count_above(lower, 0.0),
+                "l0_alive": _count_above(lower, config.alive_threshold),
             }
             return scale * total, metrics
 
-        grads, metrics = eqx.filter_grad(loss_fn, has_aux=True)(trainable(ci_fn))
+        def ci_of(params: Trainable, taps: dict[str, Array]) -> tuple[dict[str, Array], ...]:
+            ci = output_ci(placed, cast(PlacedCIFn, eqx.combine(params, ci_fn)), taps, config.remat)
+            return ci.lower, ci.upper
+
+        if not config.recompute_ci_inputs:
+
+            def loss_fn(params: Trainable) -> tuple[Array, dict[str, Array]]:
+                lower, upper = ci_of(params, captures)
+                return loss_at_ci(lower, upper)
+
+            grads, metrics = eqx.filter_grad(loss_fn, has_aux=True)(trainable(ci_fn))
+        else:
+            # Phase 1: the CI values as constants, and the loss's cotangent on them. The
+            # captured CI inputs die with the CI forward instead of waiting for the backward.
+            lower, upper = jax.lax.stop_gradient(ci_of(trainable(ci_fn), captures))
+            (cot_lower, cot_upper), metrics = jax.grad(loss_at_ci, argnums=(0, 1), has_aux=True)(
+                lower, upper
+            )
+            # Phase 2: recapture the inputs behind a barrier (so XLA neither reuses phase 1's
+            # captures nor starts this forward before phase 1's backward frees its activations)
+            # and pull the cotangent back through the CI fn alone. Same gradient, bit for bit up
+            # to float reassociation.
+            tokens_b, cot_lower, cot_upper = jax.lax.optimization_barrier(
+                (tokens, cot_lower, cot_upper)
+            )
+            taps_b = jax.lax.stop_gradient(
+                placed.clean_forward(tokens_b, capture_keys=ci_fn.capture_keys).captures
+            )
+            _, ci_vjp = jax.vjp(lambda params: ci_of(params, taps_b), trainable(ci_fn))
+            (grads,) = ci_vjp((cot_lower, cot_upper))
         metrics = {k: scale * v for k, v in metrics.items()}
         schedules = {"gamma": gamma, "impmin_coeff": impmin_coeff, "freq_coeff": freq_coeff}
         return cast(Trainable, grads), metrics, schedules
