@@ -194,15 +194,11 @@ def run_ci_filter(config: CIFilterConfig, data_root: Path, filter_id: str) -> Pa
             )
             return result, site_max
 
-        # The optimizer state (2x the CI fn) is allocated BEFORE the first evaluation: allocated
-        # after it, it fragmented the pool enough that a microbatch measured to fit on its own
-        # OOMed (job 11804, 1x L40, microbatch 256).
+        evaluate(0, ci_fn, references=True)
+
         optimizer = make_optimizer(config)
         lr = optax_schedule(config.lr_schedule, config.steps)
         opt_state = optimizer.init(trainable(ci_fn))
-        jax.block_until_ready(opt_state)
-        evaluate(0, ci_fn, references=True)
-
         micro_grads = make_micro_grads(config)
         apply_update = make_apply_update(optimizer)
         micro = config.microbatch_size or config.batch_size
