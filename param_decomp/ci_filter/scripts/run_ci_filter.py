@@ -15,6 +15,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
+import wandb
 from jax.sharding import PartitionSpec as P
 from jaxtyping import Array
 from transformers import AutoTokenizer
@@ -42,7 +43,9 @@ from param_decomp.ci_filter.step import (
     make_eval_batch,
     make_micro_grads,
     make_optimizer,
+    make_pgd_eval,
     make_score_fixed_masks,
+    pgd_eval_batches,
     sample_batch,
     trainable,
 )
@@ -54,6 +57,7 @@ from param_decomp.core.run_state import optax_schedule
 from param_decomp.experiments.lm.load_run import restore_jax_run
 from param_decomp.experiments.lm.resolved import TargetConfig
 from param_decomp.experiments.lm.training import enable_persistent_compilation_cache
+from param_decomp.infra.wandb import init_wandb, try_wandb
 from param_decomp.targets.glu_transformer import hf_snapshot_dir
 
 
@@ -87,6 +91,23 @@ def _concat(parts: list[RowArrays], reals: list[int]) -> dict[str, np.ndarray]:
     }
 
 
+def _flat_eval(result: PoolEval) -> dict[str, float]:
+    """`eval/<masking>/<score>` scalars of a pool evaluation (per-site alive counts stay in
+    the jsonl)."""
+    out: dict[str, float] = {}
+    for key, value in result.model_dump(exclude={"step", "alive_per_site"}).items():
+        if isinstance(value, dict):
+            out |= {f"eval/{key}/{k}": float(v) for k, v in value.items()}
+        elif value is not None:
+            out[f"eval/{key}"] = float(value)
+    return out
+
+
+def _wandb_log(values: dict[str, float], step: int) -> None:
+    if wandb.run is not None:
+        try_wandb(wandb.log, values, step=step)
+
+
 def run_ci_filter(config: CIFilterConfig, data_root: Path, filter_id: str) -> Path:
     if config.compilation_cache_dir is not None:
         enable_persistent_compilation_cache(config.compilation_cache_dir)
@@ -99,6 +120,22 @@ def run_ci_filter(config: CIFilterConfig, data_root: Path, filter_id: str) -> Pa
     outputs.create()
     config.to_file(outputs.config)
     logger.info(f"ci filter {filter_id}: run {run_dir} step {step} -> {outputs.root}")
+    if config.wandb is not None:
+        init_wandb(
+            config.wandb.project,
+            filter_id,
+            {
+                **config.model_dump(mode="json"),
+                "run_dir": str(run_dir),
+                "checkpoint_step": step,
+                "filter_id": filter_id,
+            },
+            resume=False,
+            entity=config.wandb.entity,
+            name=f"{run_dir.name}-{config.objective.kind}-{filter_id}",
+            group=run_dir.name,
+            tags=[config.objective.kind, config.init.kind],
+        )
 
     tokenizer = cast(
         Tokenizer,
@@ -139,6 +176,25 @@ def run_ci_filter(config: CIFilterConfig, data_root: Path, filter_id: str) -> Pa
 
         eval_batch = make_eval_batch(config)
         score_fixed = make_score_fixed_masks(config)
+        pgd_eval = make_pgd_eval(config) if config.pgd_eval is not None else None
+
+        def pgd_recon(ci_fn: PlacedCIFn) -> float:
+            assert pgd_eval is not None
+            key = jax.random.PRNGKey(config.seed + 1)
+            values = [
+                float(
+                    pgd_eval(
+                        placed,
+                        prepared,
+                        ci_fn,
+                        tokens_all,
+                        jnp.asarray(idx),
+                        jax.random.fold_in(key, b),
+                    )
+                )
+                for b, idx in enumerate(pgd_eval_batches(pool.n_prompts, config))
+            ]
+            return float(np.mean(values))
 
         def evaluate(
             at_step: int, ci_fn: PlacedCIFn, references: bool
@@ -183,14 +239,16 @@ def run_ci_filter(config: CIFilterConfig, data_root: Path, filter_id: str) -> Pa
                 all_on=fixed({k: np.ones_like(v) for k, v in alive.items()})
                 if references and at_step == 0
                 else None,
+                pgd_recon=pgd_recon(ci_fn) if references and pgd_eval is not None else None,
             )
+            _wandb_log(_flat_eval(result), at_step)
             with outputs.pool_evals.open("a") as sink:
                 sink.write(result.model_dump_json() + "\n")
             logger.info(
                 f"eval @ {at_step} ({time.time() - t0:.0f}s): n_alive {result.n_alive}, "
                 f"L0/token {result.l0_per_token:.1f} (last {result.l0_per_token_last:.1f}), "
                 f"ci {result.ci}, rounded {result.rounded}, alive_set {result.alive_set}, "
-                f"all_on {result.all_on}"
+                f"all_on {result.all_on}, pgd_recon {result.pgd_recon}"
             )
             return result, site_max
 
@@ -236,6 +294,7 @@ def run_ci_filter(config: CIFilterConfig, data_root: Path, filter_id: str) -> Pa
                     t_log = now
                     sink.write(json.dumps(record) + "\n")
                     sink.flush()
+                    _wandb_log({f"train/{k}": v for k, v in record.items() if k != "step"}, i)
                     logger.info(
                         f"step {i}: loss {record['loss']:.4f} recon {record['recon']:.4f} "
                         f"act {record['imp_activity']:.0f} L0 {record['l0']:.0f} "
@@ -294,6 +353,10 @@ def run_ci_filter(config: CIFilterConfig, data_root: Path, filter_id: str) -> Pa
                 outputs.grids, slices, pool, config.steps, config.grid.mean_ci_floor
             )
             logger.info(f"grid {block.operation} ({time.time() - t0:.0f}s): saved {counts}")
+    if config.wandb is not None:
+        assert wandb.run is not None
+        wandb.run.summary.update({"outputs": str(outputs.root), "final/n_alive": final.n_alive})
+        wandb.finish()
     logger.info(f"done: {outputs.root}")
     return outputs.root
 

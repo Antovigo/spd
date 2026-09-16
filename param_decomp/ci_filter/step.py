@@ -14,7 +14,7 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 from jax.sharding import PartitionSpec as P
-from jaxtyping import Array, Float, Int
+from jaxtyping import Array, Float, Int, PRNGKeyArray
 
 from param_decomp.ci_filter.config import CIFilterConfig
 from param_decomp.ci_filter.objective import objective_rows, row_scores
@@ -23,6 +23,7 @@ from param_decomp.core.decomposed_linear import constrain_component_activation
 from param_decomp.core.losses import importance_minimality_terms, scheduled_value_at
 from param_decomp.core.model import BATCH_AXES, MaterializedMasking, PlacedModel
 from param_decomp.core.precision import COMPUTE_DT
+from param_decomp.core.recon_eval import FreshPGDReconEval, fresh_pgd_recon_loss
 from param_decomp.core.run_state import clip_by_global_norm_with_eps, optax_schedule
 
 type Prepared = dict[str, dict[str, Array]]
@@ -326,6 +327,57 @@ def make_score_fixed_masks(config: CIFilterConfig) -> ScoreFixedMasks:
         return _replicated_rows(value, masked_last, clean_last, answer_ids)
 
     return score
+
+
+type PGDEval = Callable[
+    [PlacedModel, Prepared, PlacedCIFn, Int[Array, "N T"], Int[Array, " B"], PRNGKeyArray],
+    Array,
+]
+
+
+def make_pgd_eval(config: CIFilterConfig) -> PGDEval:
+    """One batch of the decomposition's fresh-PGD reconstruction eval (`PGDEvalConfig`),
+    on the prepared component weights: the kernel is `core.recon_eval.fresh_pgd_recon_loss`,
+    with the delta channel attacked and the target's own full-sequence recon loss."""
+    assert config.pgd_eval is not None
+    probe = FreshPGDReconEval(n_steps=config.pgd_eval.n_steps, step_size=config.pgd_eval.step_size)
+
+    @eqx.filter_jit
+    def pgd_eval(
+        placed: PlacedModel,
+        prepared: Prepared,
+        ci_fn: PlacedCIFn,
+        tokens_all: Int[Array, "N T"],
+        idx: Int[Array, " B"],
+        key: PRNGKeyArray,
+    ) -> Array:
+        tokens = gather_rows(tokens_all, idx)
+        clean = placed.clean_forward(tokens, capture_keys=ci_fn.capture_keys)
+        ci_lower = output_ci(placed, ci_fn, clean.captures, remat=False).lower
+        leading = next(iter(ci_lower.values())).shape[:-1]
+
+        def loss_at_masks(masks: dict[str, Array], delta_masks: dict[str, Array]) -> Array:
+            masked = placed.masked_forward(
+                prepared,
+                tokens,
+                masking=MaterializedMasking(component_masks=masks, weight_delta_masks=delta_masks),
+                remat=config.remat,
+            )
+            return placed.recon_loss_fn(masked.output, clean.output)
+
+        return fresh_pgd_recon_loss(placed.sites, ci_lower, leading, key, probe, loss_at_masks)
+
+    return pgd_eval
+
+
+def pgd_eval_batches(n_prompts: int, config: CIFilterConfig) -> list[np.ndarray]:
+    """The fixed, disjoint prompt draws the PGD eval reads, identical before and after."""
+    assert config.pgd_eval is not None
+    rng = np.random.default_rng(np.random.SeedSequence((config.seed, 1)))
+    total = config.pgd_eval.n_batches * config.pgd_eval.batch_size
+    return np.split(
+        rng.choice(n_prompts, size=total, replace=False).astype(np.int32), config.pgd_eval.n_batches
+    )
 
 
 def index_batches(n: int, batch_size: int) -> list[tuple[np.ndarray, int]]:

@@ -18,6 +18,7 @@ from param_decomp.ci_filter.config import (
     CIFilterConfig,
     InitFromCIFilter,
     LastPositionIntegerKL,
+    PGDEvalConfig,
 )
 from param_decomp.ci_filter.grid import collect_operation, write_applet, write_operation
 from param_decomp.ci_filter.objective import kl_rows, objective_rows, row_scores
@@ -29,7 +30,9 @@ from param_decomp.ci_filter.step import (
     make_eval_batch,
     make_micro_grads,
     make_optimizer,
+    make_pgd_eval,
     make_score_fixed_masks,
+    pgd_eval_batches,
     sample_batch,
     trainable,
 )
@@ -153,6 +156,7 @@ def _config(micro: int) -> CIFilterConfig:
         "eval_batch_size": micro,
         "pool": {"operations": ["add", "sub"], "a_range": [1, 3], "b_range": [1, 3]},
         "compilation_cache_dir": None,
+        "wandb": None,
     }
     return CIFilterConfig.model_validate(raw)
 
@@ -261,6 +265,15 @@ def _exercise_placed(tmp_path: Path, mesh: Mesh, sharding: str) -> None:
         assert np.asarray(rows["ci"]["kl"]).shape == (micro,)
         assert set(site_max) == set(placed.site_names)
         assert np.asarray(l0["l0_per_token"]).shape == (micro,)
+        pgd_config = config.model_copy(
+            update={"pgd_eval": PGDEvalConfig(n_steps=2, n_batches=2, batch_size=micro)}
+        )
+        pgd_batches = pgd_eval_batches(pool.n_prompts, pgd_config)
+        assert len(pgd_batches) == 2 and len(set(np.concatenate(pgd_batches).tolist())) == 2 * micro
+        pgd = make_pgd_eval(pgd_config)(
+            placed, prepared, ci_fn, tokens_all, jnp.asarray(pgd_batches[0]), jax.random.PRNGKey(0)
+        )
+        assert np.isfinite(float(pgd)) and float(pgd) >= 0.0
         on = {s.name: jnp.ones(s.C, jnp.float32) for s in sites}
         scored = make_score_fixed_masks(config)(
             placed, prepared, on, tokens_all, eval_idx, answer_ids

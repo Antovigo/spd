@@ -52,6 +52,13 @@ grad_clip_norm: null
 alive_threshold: 0.01
 eval_every: 1000
 log_every: 10
+# The decomposition's own 20-step fresh-PGD recon eval, before the first and after the last step.
+pgd_eval:
+  n_steps: 20
+  step_size: 0.1
+  n_batches: 4
+  batch_size: 128
+wandb: {project: arithmetic, entity: null}
 grid:
   mean_ci_floor: 0.05
   chunk_prompts: 1000

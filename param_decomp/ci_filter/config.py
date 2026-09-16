@@ -124,6 +124,28 @@ class GridConfig(BaseConfig):
     chunk_prompts: PositiveInt = 1000
 
 
+class PGDEvalConfig(BaseConfig):
+    """The decomposition's own fresh sign-PGD reconstruction eval (`PGDReconLoss`, as
+    addsub-all-layers-4xh100-05 logged it): per-component sources shared by the batch
+    (`source_shape: c`), random init, `n_steps` sign-gradient ascents of `step_size` on the
+    masks `ci + (1 - ci) * source` AND the weight-delta channel, scored by the output KL over
+    every position. Run before the first and after the last step on the same fixed
+    `n_batches x batch_size` pool prompts; reported as the batch mean."""
+
+    n_steps: PositiveInt = 20
+    step_size: PositiveFloat = 0.1
+    n_batches: PositiveInt = 4
+    batch_size: PositiveInt = 128
+
+
+class WandbConfig(BaseConfig):
+    """Live wandb logging; the wandb run id is the filter id."""
+
+    project: str
+    entity: str | None = None
+    """`None` resolves `WANDB_ENTITY` / the logged-in default."""
+
+
 def _constant_then_cosine(max_val: float) -> ScheduleConfig:
     return ScheduleConfig(
         max_val=max_val, points=(Knot(at=0.0, frac=1.0), Knot(at=1.0, frac=0.1, interp="cosine"))
@@ -174,6 +196,8 @@ class CIFilterConfig(BaseConfig):
     eval_every: PositiveInt | None = 1000
     """Pool evaluation cadence in steps (always run before the first and after the last step)."""
     log_every: PositiveInt = 10
+    pgd_eval: PGDEvalConfig | None = PGDEvalConfig()
+    wandb: WandbConfig | None = None
     grid: GridConfig = GridConfig()
     compilation_cache_dir: Path | None = None
 
@@ -225,3 +249,5 @@ class PoolEval(BaseConfig):
     """Every alive component on for every prompt and position (a global mask)."""
     all_on: MaskScores | None = None
     """Every component on (reference: the decomposition with the delta off)."""
+    pgd_recon: float | None = None
+    """`PGDEvalConfig`'s adversarial reconstruction KL (first and last evaluation only)."""
