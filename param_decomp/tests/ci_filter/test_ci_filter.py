@@ -19,13 +19,16 @@ from param_decomp.ci_filter.config import (
     CIFilterConfig,
     InitFromCIFilter,
     LastPositionIntegerKL,
+    MergedPPGDRecon,
     PGDEvalConfig,
 )
 from param_decomp.ci_filter.grid import collect_operation, write_applet, write_operation
 from param_decomp.ci_filter.objective import kl_rows, objective_rows, row_scores
 from param_decomp.ci_filter.pool import answer_token_ids, build_pool
+from param_decomp.ci_filter.ppgd import PPGDStep, init_adversary
 from param_decomp.ci_filter.step import (
     batch_gradients,
+    ci_masked_micro_call,
     index_batches,
     make_apply_update,
     make_eval_batch,
@@ -53,6 +56,7 @@ from param_decomp.core.init_placed import (
 )
 from param_decomp.core.model import PlacedModel, prepare_compute_weights
 from param_decomp.core.placement import from_config
+from param_decomp.core.schedule import ScheduleConfig
 from param_decomp.core.sharding import hsdp_mesh, place_target, single_device_mesh
 from param_decomp.targets.glu_transformer import KIND_ORDER, glu_site_specs, site_name
 from param_decomp.targets.testing import tiny_glu_cfg, tiny_glu_decomposed_lm
@@ -158,6 +162,7 @@ def _config(micro: int) -> CIFilterConfig:
         "pool": {"operations": ["add", "sub"], "a_range": [1, 3], "b_range": [1, 3]},
         "compilation_cache_dir": None,
         "wandb": None,
+        "recon": {"kind": "ci_masked", "coeff": 1.5},
     }
     return CIFilterConfig.model_validate(raw)
 
@@ -227,18 +232,62 @@ def _exercise_placed(tmp_path: Path, mesh: Mesh, sharding: str) -> None:
 
         def step_grads(i: int, on_host: bool):
             idx = sample_batch(pool.n_prompts, config.batch_size, config.seed, i)
-            return batch_gradients(
-                micro_grads,
+            frac = jnp.float32(i / (config.steps - 1))
+            call = ci_masked_micro_call(
+                micro_grads, placed, prepared, ci_fn, tokens_all, answer_ids, frac
+            )
+            return batch_gradients(call, idx, micro, on_host)
+
+        # The merged persistent-PGD step (delta on): warmup + main + final ascent, and a split
+        # into microbatches leaves the adversary's trajectory unchanged (adv_fraction ~0 makes
+        # the main term's source gradient zero, so only the deterministic warmups move it).
+        idx_all = sample_batch(pool.n_prompts, config.batch_size, config.seed, 0)
+        batch = config.batch_size
+        adversaries = {}
+        start = init_adversary(placed, batch, pool.seq_len, jax.random.PRNGKey(5))
+        for split in (1, 2):
+            ppgd_config = config.model_copy(
+                update={
+                    "microbatch_size": batch // split,
+                    "recon": MergedPPGDRecon(adv_fraction=ScheduleConfig.constant(1e-12)),
+                }
+            )
+            ppgd_grads, ppgd_metrics, ppgd_schedules, adversary = PPGDStep.build(ppgd_config)(
                 placed,
                 prepared,
                 ci_fn,
                 tokens_all,
-                idx,
+                idx_all,
                 answer_ids,
-                jnp.float32(i / (config.steps - 1)),
-                micro,
-                on_host,
+                jnp.float32(0.5),
+                start,
+                jax.random.PRNGKey(6),
+                batch // split,
+                False,
             )
+            assert float(adversary.opt_state.step_count) == 3.0  # 2 warmups + the final ascent
+            assert all(np.isfinite(float(v)) for v in ppgd_metrics.values())
+            assert {"adv_fraction", "source_lr"} <= set(ppgd_schedules)
+            assert all(np.isfinite(np.asarray(g)).all() for g in jax.tree.leaves(ppgd_grads))
+            for new_s, old_s in zip(
+                jax.tree.leaves(adversary.sources), jax.tree.leaves(start.sources), strict=True
+            ):
+                assert float(new_s.min()) >= 0.0 and float(new_s.max()) <= 1.0
+                assert new_s.shape == old_s.shape
+            adversaries[split] = adversary
+        moved = any(
+            not np.allclose(np.asarray(a), np.asarray(b))
+            for a, b in zip(
+                jax.tree.leaves(adversaries[1].sources), jax.tree.leaves(start.sources), strict=True
+            )
+        )
+        assert moved
+        for a, b in zip(
+            jax.tree.leaves(adversaries[1].sources),
+            jax.tree.leaves(adversaries[2].sources),
+            strict=True,
+        ):
+            np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=1e-3, atol=1e-4)
 
         # The host-held running sum is the device sum.
         on_device, _, _ = step_grads(0, on_host=False)

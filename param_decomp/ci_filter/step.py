@@ -16,7 +16,7 @@ import optax
 from jax.sharding import PartitionSpec as P
 from jaxtyping import Array, Float, Int, PRNGKeyArray
 
-from param_decomp.ci_filter.config import CIFilterConfig
+from param_decomp.ci_filter.config import CIFilterConfig, CIMaskedRecon
 from param_decomp.ci_filter.objective import objective_rows, row_scores
 from param_decomp.core.ci_fn import CI, PlacedCIFn, ci_for_role, evaluate_ci
 from param_decomp.core.components import ComponentStacks
@@ -54,7 +54,7 @@ def output_ci(
     )
 
 
-def _count_above(ci_lower: dict[str, Array], threshold: float | Array) -> Array:
+def count_above(ci_lower: dict[str, Array], threshold: float | Array) -> Array:
     """Components above `threshold` per token, summed over sites, averaged over `(B, T)`."""
     return sum(
         (jnp.mean(jnp.sum(v > threshold, axis=-1, dtype=jnp.float32)) for v in ci_lower.values()),
@@ -115,6 +115,8 @@ def make_micro_grads(config: CIFilterConfig) -> MicroGrads:
     objective = config.objective
     imp = config.imp_min
     scale = 1.0 / config.n_microbatches
+    assert isinstance(config.recon, CIMaskedRecon), config.recon
+    recon_coeff = config.recon.coeff
 
     @eqx.filter_jit
     def micro_grads(
@@ -155,14 +157,14 @@ def make_micro_grads(config: CIFilterConfig) -> MicroGrads:
                 None if imp.frequency_coeff is None else imp.reference_datapoint_count,
                 imp.normalize_at_one,
             )
-            total = config.recon_coeff * recon + impmin_coeff * activity + freq_coeff * freq
+            total = recon_coeff * recon + impmin_coeff * activity + freq_coeff * freq
             metrics = {
                 "loss": total,
                 "recon": recon,
                 "imp_activity": activity,
                 "imp_freq": freq,
-                "l0": _count_above(ci.lower, 0.0),
-                "l0_alive": _count_above(ci.lower, config.alive_threshold),
+                "l0": count_above(ci.lower, 0.0),
+                "l0_alive": count_above(ci.lower, config.alive_threshold),
             }
             return scale * total, metrics
 
@@ -179,17 +181,33 @@ def accumulate(acc: Trainable, grads: Trainable) -> Trainable:
     return jax.tree.map(lambda a, g: a + g, acc, grads)
 
 
-def batch_gradients(
+type MicroCall = Callable[[int, np.ndarray], tuple[Trainable, dict[str, Array], dict[str, Array]]]
+"""`(microbatch index, prompt indices) -> (grads, 1/n-scaled metrics, schedules)`."""
+
+
+def ci_masked_micro_call(
     micro_grads: MicroGrads,
     placed: PlacedModel,
     prepared: Prepared,
     ci_fn: PlacedCIFn,
     tokens_all: Int[Array, "N T"],
-    idx: np.ndarray,
     answer_ids: Int[Array, " K"],
     train_frac: Array,
-    microbatch_size: int,
-    on_host: bool,
+) -> MicroCall:
+    """The deterministic CI-masked step's microbatch call for `batch_gradients`."""
+
+    def call(
+        _k: int, micro_idx: np.ndarray
+    ) -> tuple[Trainable, dict[str, Array], dict[str, Array]]:
+        return micro_grads(
+            placed, prepared, ci_fn, tokens_all, jnp.asarray(micro_idx), answer_ids, train_frac
+        )
+
+    return call
+
+
+def batch_gradients(
+    micro_call: MicroCall, idx: np.ndarray, microbatch_size: int, on_host: bool
 ) -> tuple[Trainable, dict[str, Array], dict[str, Array]]:
     """One step's summed gradient over consecutive microbatches of `idx`, with the summed
     (already `1 / n`-scaled) metrics and the step's schedule values. `on_host` keeps the running
@@ -199,17 +217,9 @@ def batch_gradients(
     metrics: dict[str, Array] = {}
     schedules: dict[str, Array] = {}
     starts = range(0, len(idx), microbatch_size)
-    for start in starts:
-        g, m, schedules = micro_grads(
-            placed,
-            prepared,
-            ci_fn,
-            tokens_all,
-            jnp.asarray(idx[start : start + microbatch_size]),
-            answer_ids,
-            train_frac,
-        )
-        metrics = {k: metrics[k] + v if metrics else v for k, v in m.items()}
+    for k, start in enumerate(starts):
+        g, m, schedules = micro_call(k, idx[start : start + microbatch_size])
+        metrics = {name: metrics[name] + v if metrics else v for name, v in m.items()}
         if on_host and start != starts[-1]:
             host_g = jax.tree.map(np.array, g)  # writable host copies
             del g

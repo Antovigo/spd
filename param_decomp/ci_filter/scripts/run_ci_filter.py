@@ -21,20 +21,24 @@ from jax.sharding import PartitionSpec as P
 from param_decomp.ci_filter.checkpoint import restore_ci_fn, save_ci_fn
 from param_decomp.ci_filter.config import (
     CIFilterConfig,
+    CIMaskedRecon,
     InitFromCIFilter,
     InitFromRun,
     LastPositionIntegerKL,
     LastPositionKL,
     MaskScores,
+    MergedPPGDRecon,
     PoolEval,
     resolve_run_dir,
 )
 from param_decomp.ci_filter.grid import collect_operation, write_applet, write_operation
 from param_decomp.ci_filter.paths import CIFilterOutputs, new_ci_filter_id
 from param_decomp.ci_filter.pool import answer_token_ids, build_pool, load_tokenizer
+from param_decomp.ci_filter.ppgd import PPGDStep, init_adversary
 from param_decomp.ci_filter.step import (
     RowArrays,
     batch_gradients,
+    ci_masked_micro_call,
     index_batches,
     make_apply_update,
     make_eval_batch,
@@ -236,9 +240,19 @@ def run_ci_filter(config: CIFilterConfig, data_root: Path, filter_id: str) -> Pa
         optimizer = make_optimizer(config)
         lr = optax_schedule(config.lr_schedule, config.steps)
         opt_state = optimizer.init(trainable(ci_fn))
-        micro_grads = make_micro_grads(config)
         apply_update = make_apply_update(optimizer)
         micro = config.microbatch_size or config.batch_size
+        match config.recon:
+            case CIMaskedRecon():
+                micro_grads = make_micro_grads(config)
+                ppgd_step, adversary = None, None
+            case MergedPPGDRecon():
+                micro_grads = None
+                ppgd_step = PPGDStep.build(config)
+                adversary = init_adversary(
+                    placed, config.batch_size, pool.seq_len, jax.random.PRNGKey(config.seed + 2)
+                )
+        step_key = jax.random.PRNGKey(config.seed + 3)
 
         with outputs.metrics.open("w") as sink:
             t_start = time.time()
@@ -246,18 +260,29 @@ def run_ci_filter(config: CIFilterConfig, data_root: Path, filter_id: str) -> Pa
             for i in range(config.steps):
                 idx = sample_batch(pool.n_prompts, config.batch_size, config.seed, i)
                 train_frac = jnp.float32(i / max(config.steps - 1, 1))
-                grads, metrics, schedules = batch_gradients(
-                    micro_grads,
-                    placed,
-                    prepared,
-                    ci_fn,
-                    tokens_all,
-                    idx,
-                    answer_ids,
-                    train_frac,
-                    micro,
-                    config.accumulate_on_host,
-                )
+                if ppgd_step is None:
+                    assert micro_grads is not None
+                    call = ci_masked_micro_call(
+                        micro_grads, placed, prepared, ci_fn, tokens_all, answer_ids, train_frac
+                    )
+                    grads, metrics, schedules = batch_gradients(
+                        call, idx, micro, config.accumulate_on_host
+                    )
+                else:
+                    assert adversary is not None
+                    grads, metrics, schedules, adversary = ppgd_step(
+                        placed,
+                        prepared,
+                        ci_fn,
+                        tokens_all,
+                        idx,
+                        answer_ids,
+                        train_frac,
+                        adversary,
+                        jax.random.fold_in(step_key, i),
+                        micro,
+                        config.accumulate_on_host,
+                    )
                 ci_fn, opt_state, grad_norm = apply_update(ci_fn, opt_state, grads)
                 del grads
                 if i % config.log_every == 0 or i == config.steps - 1:
@@ -287,7 +312,7 @@ def run_ci_filter(config: CIFilterConfig, data_root: Path, filter_id: str) -> Pa
                 ):
                     evaluate(i + 1, ci_fn, references=False)
 
-        del opt_state
+        del opt_state, adversary
         save_ci_fn(outputs.ci_fn, ci_fn)
         logger.info(f"CI fn saved to {outputs.ci_fn}")
         final, site_max = evaluate(config.steps, ci_fn, references=True)

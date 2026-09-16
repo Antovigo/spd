@@ -17,7 +17,30 @@ microbatch_size: null  # hardware-only; set to what one forward/backward fits
 eval_batch_size: 1000
 seed: 0
 remat: true
-recon_coeff: 1.5  # the decomposition's output-recon coefficient
+# The decomposition's own target-pass recon (MergedStochasticSubsetPPGDReconLoss, weight delta ON),
+# scored by this filter's objective: the H100 recipe. A 1x L40 only fits
+# `recon: {kind: ci_masked, coeff: 1.5}` (deterministic CI masks, delta off).
+recon:
+  kind: merged_stochastic_ppgd
+  coeff: 1.5
+  adv_fraction:
+    max_val: 0.3333333
+    points:
+      - {at: 0.0, frac: 0.0}
+      - {at: 0.05, frac: 1.0}
+      - {at: 1.0, frac: 1.0}
+  n_warmup_steps: 2
+  optimizer:
+    type: adam
+    beta1: 0.5
+    beta2: 0.99
+    eps: 1.0e-08
+    lr_schedule:
+      max_val: 0.01
+      points:
+        - {at: 0.0, frac: 0.0}
+        - {at: 0.0125, frac: 1.0}
+        - {at: 1.0, frac: 1.0}
 imp_min:
   # The decomposition's imp-min schedules, replayed over this run: 4x at step 0, down to
   # the final value at 25% and held.

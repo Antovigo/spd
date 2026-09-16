@@ -6,6 +6,7 @@ from typing import Annotated, Literal, Self
 from pydantic import Discriminator, NonNegativeInt, PositiveFloat, PositiveInt, model_validator
 
 from param_decomp.core.base_config import BaseConfig, Probability
+from param_decomp.core.configs import AdamPGDConfig
 from param_decomp.core.schedule import Knot, ScheduleConfig
 
 # ----------------------------------- references -----------------------------------
@@ -93,6 +94,48 @@ class LastPositionIntegerKL(BaseConfig):
 
 
 Objective = Annotated[LastPositionKL | LastPositionIntegerKL, Discriminator("kind")]
+
+
+class CIMaskedRecon(BaseConfig):
+    """The objective under the deterministic masks `lower-leaky CI`, weight delta OFF."""
+
+    kind: Literal["ci_masked"] = "ci_masked"
+    coeff: PositiveFloat = 1.5
+    """1.5 is the decomposition's output-recon coefficient."""
+
+
+def _ramp(max_val: float, ramp_until: float) -> ScheduleConfig:
+    return ScheduleConfig(
+        max_val=max_val,
+        points=(Knot(at=0.0, frac=0.0), Knot(at=ramp_until, frac=1.0), Knot(at=1.0, frac=1.0)),
+    )
+
+
+class MergedPPGDRecon(BaseConfig):
+    """The decomposition's own `MergedStochasticSubsetPPGDReconLoss` (SPEC S34), scored by the
+    filter's objective. Per step and batch element, `adv_fraction` of the rows take the
+    persistent adversary's sources routed through every site, the rest fresh `U[0,1]` sources
+    routed per a uniform-k site subset; masks are `ci + (1 - ci) * source` and the WEIGHT
+    DELTA IS ON (its mask is the source's delta channel). The adversary keeps one source per
+    (batch slot, position, component + delta), Adam-ascended `n_warmup_steps` times per step
+    against the all-adversarial forward with the CI detached, then once more from the main
+    backward. Defaults are addsub-all-layers-4xh100-05's target-pass values."""
+
+    kind: Literal["merged_stochastic_ppgd"] = "merged_stochastic_ppgd"
+    coeff: PositiveFloat = 1.5
+    adv_fraction: ScheduleConfig = _ramp(0.3333333, 0.05)
+    n_warmup_steps: NonNegativeInt = 2
+    optimizer: AdamPGDConfig = AdamPGDConfig(
+        beta1=0.5, beta2=0.99, eps=1.0e-8, lr_schedule=_ramp(0.01, 0.0125)
+    )
+
+    @model_validator(mode="after")
+    def validate_adv_fraction(self) -> Self:
+        assert self.adv_fraction.max_val <= 1.0, self.adv_fraction
+        return self
+
+
+Recon = Annotated[CIMaskedRecon | MergedPPGDRecon, Discriminator("kind")]
 
 
 class ImpMinConfig(BaseConfig):
@@ -184,8 +227,7 @@ class CIFilterConfig(BaseConfig):
     seed: int = 0
     remat: bool = True
 
-    recon_coeff: PositiveFloat = 1.5
-    """Weight of the objective's KL; 1.5 is the decomposition's output-recon coefficient."""
+    recon: Recon = CIMaskedRecon()
     imp_min: ImpMinConfig
     lr_schedule: ScheduleConfig = _constant_then_cosine(4.0e-5)
     betas: tuple[float, float] = (0.9, 0.999)
