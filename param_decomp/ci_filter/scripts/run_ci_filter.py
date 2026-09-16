@@ -194,29 +194,18 @@ def run_ci_filter(config: CIFilterConfig, data_root: Path, filter_id: str) -> Pa
             )
             return result, site_max
 
+        # The optimizer state (2x the CI fn) is allocated BEFORE the first evaluation: allocated
+        # after it, it fragmented the pool enough that a microbatch measured to fit on its own
+        # OOMed (job 11804, 1x L40, microbatch 256).
         optimizer = make_optimizer(config)
         lr = optax_schedule(config.lr_schedule, config.steps)
         opt_state = optimizer.init(trainable(ci_fn))
+        jax.block_until_ready(opt_state)
+        evaluate(0, ci_fn, references=True)
+
         micro_grads = make_micro_grads(config)
         apply_update = make_apply_update(optimizer)
         micro = config.microbatch_size or config.batch_size
-        # Warm the training step (result discarded) BEFORE the first evaluation, so its large
-        # temporary arena is carved from an unfragmented pool: evaluating first OOMed microbatches
-        # that fit on their own (jobs 11804 at 256 and 11809 at 512, 1x L40).
-        jax.block_until_ready(
-            micro_grads(
-                placed,
-                prepared,
-                ci_fn,
-                tokens_all,
-                jnp.asarray(
-                    sample_batch(pool.n_prompts, config.batch_size, config.seed, 0)[:micro]
-                ),
-                answer_ids,
-                jnp.float32(0.0),
-            )
-        )
-        evaluate(0, ci_fn, references=True)
 
         with outputs.metrics.open("w") as sink:
             t_start = time.time()
