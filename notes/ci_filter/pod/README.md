@@ -6,24 +6,37 @@ Runs both CI filter objectives (`param_decomp/ci_filter`) on `addsub-all-layers-
 `$DATA_ROOT/runs/p-ba5a0c05/analysis/ci_filter/step_40000/<cf-id>/` and are pulled back into
 the cluster copy of the run.
 
+## Recipe
+
+The template seats (`param_decomp/ci_filter/configs/`) train with the decomposition's own
+target-pass recon, `recon: {kind: merged_stochastic_ppgd}` (SPEC S34: stochastic-subset draws plus
+a 1/3 persistent-PGD adversarial share, WEIGHT DELTA ON, 2 warmup ascents + the final ascent per
+step), scored by the filter objective at the last position. Evaluations stay deterministic
+(CI masks, delta off). Every run logs live to the wandb project `arithmetic` (needs
+`WANDB_API_KEY` in `/workspace/secrets.env`).
+
 ## Why one H100 and not the L40s
 
-One L40 does not fit at any microbatch (128/256/512 all OOM once the gradient accumulator is
-live; jobs 11804, 11810, 11812, 2026-09-16). Static memory on one device is ~31 GB (Llama bf16
-16, prepared components 3.7, CI fn fp32 3.6, Adam 7.2) plus 3.6 GB of gradients per
-microbatch. Measured on an L40 without accumulation: a 512-prompt microbatch fits in a
-43.8 GB pool with an 8.6 GiB step arena, 1024 does not. On an 80 GB H100 (76 GB pool) the
-whole 1024-prompt batch should run as ONE microbatch (no accumulator at all), at an estimated
-~50-55 GB peak; the pool evaluation at 1000 prompts and grid chunks of 1000 should also fit.
-These are extrapolations — the smoke checks them before the long stages.
+A 1x L40 only fits the deterministic recon (`ci_masked`) at microbatch 256 with the gradient sum
+held on the host, at 12.8 s/step (~18 h per objective), and the persistent adversary does not fit
+beside it. Static memory on one device is ~31 GB (Llama bf16 16, prepared components 3.7, CI fn
+fp32 3.6, Adam 7.2); the adversary adds ~3.9 GB (fp32 sources + Adam moments for 1024 x 5 x
+62,688) and its source gradient 1.3 GB. Measured on an L40, one 512-prompt forward/backward needs
+an 8.6 GiB arena, so a 1024-prompt step needs ~17 GB; the warmup ascents and the main step are
+separate jits, so they do not stack. On an 80 GB H100 (76 GB pool) that is ~55-60 GB at the
+whole batch in one microbatch — an extrapolation the smoke checks first. If it OOMs: `MICRO=512`
+(the adversary is sliced per microbatch; every ascent still updates the whole bundle once).
 
 ## 1. Pod
 
 - 1x H100 80 GB (SXM or PCIe: single GPU, no collectives). Host driver >= r570 (CUDA 12.8).
 - Volume: >= 60 GB (venv ~7, Llama weights 16, checkpoint 10, XLA cache, outputs ~10 incl.
   two saved CI fns at ~3.9 GB each).
-- Expected time: ~2-3 h per objective on H100 (L40 measured 3.0 s per 1024-prompt step at
-  microbatch 512; H100 is typically 2-3x faster), plus a few minutes per pool evaluation (6 per objective) and ~15-30 min for the grid.
+- Expected time (estimate): each step is 3 masked forward/backward passes (2 warmup ascents +
+  the main step) plus the clean forwards, ~3x the deterministic step (L40: 3.0 s per 1024-prompt
+  step at microbatch 512; H100 is typically 2-3x faster), so ~3-4 s/step, ~5 h per objective,
+  plus a few minutes per pool evaluation (6 per objective), ~15-30 min for the grid and ~5 min for
+  the two PGD evals.
 
 ## 2. Code, environment, weights, secrets
 
@@ -78,7 +91,10 @@ the first failing stage. What to look for in the log:
 
 - `eval @ 0`: pre-training pool scores. Reference on this checkpoint (full-vocab KL, last
   position): continuous CI 0.058, rounded CI 0.051, alive set (12,473 components) 0.086,
-  all on 0.0245. The smoke's pool (1..30) gives different numbers.
+  all on 0.0245 (0.0139 over all positions = the decomposition's UnmaskedReconLoss). The
+  smoke's pool (1..30) gives different numbers.
+- `step N: ...`: `train/adv_fraction` ramps 0 -> 1/3 over the first 5%, `train/source_lr`
+  0 -> 0.01 over the first 1.25% (wandb).
 - `step N: ... X s/step`: the first logged step includes compilation.
 - `RESOURCE_EXHAUSTED` at the first step: rerun with a microbatch, e.g.
   `MICRO=512 ./run_pipeline.sh`. At an evaluation: `EVAL_BATCH=500`. In the grid pass:
