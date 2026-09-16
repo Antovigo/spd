@@ -249,7 +249,9 @@ def _exercise_placed(tmp_path: Path, mesh: Mesh, sharding: str) -> None:
             ppgd_config = config.model_copy(
                 update={
                     "microbatch_size": batch // split,
-                    "recon": MergedPPGDRecon(adv_fraction=ScheduleConfig.constant(1e-12)),
+                    "recon": MergedPPGDRecon(
+                        adv_fraction=ScheduleConfig.constant(1e-12), n_warmup_steps=2
+                    ),
                 }
             )
             ppgd_grads, ppgd_metrics, ppgd_schedules, adversary = PPGDStep.build(ppgd_config)(

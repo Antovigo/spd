@@ -29,7 +29,7 @@ recon:
       - {at: 0.0, frac: 0.0}
       - {at: 0.05, frac: 1.0}
       - {at: 1.0, frac: 1.0}
-  n_warmup_steps: 2
+  n_warmup_steps: 0  # the target stream repeats (20k prompts), so the per-step final ascent may suffice
   optimizer:
     type: adam
     beta1: 0.5

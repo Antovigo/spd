@@ -10,8 +10,8 @@ the cluster copy of the run.
 
 The template seats (`param_decomp/ci_filter/configs/`) train with the decomposition's own
 target-pass recon, `recon: {kind: merged_stochastic_ppgd}` (SPEC S34: stochastic-subset draws plus
-a 1/3 persistent-PGD adversarial share, WEIGHT DELTA ON, 2 warmup ascents + the final ascent per
-step), scored by the filter objective at the last position. Evaluations stay deterministic
+a 1/3 persistent-PGD adversarial share, WEIGHT DELTA ON; the adversary ascends once per step, from
+the main backward — `n_warmup_steps: 0`, where -05 used 2, since the 20k-prompt pool repeats), scored by the filter objective at the last position. Evaluations stay deterministic
 (CI masks, delta off). Every run logs live to the wandb project `arithmetic` (needs
 `WANDB_API_KEY` in `/workspace/secrets.env`).
 
@@ -32,11 +32,11 @@ whole batch in one microbatch — an extrapolation the smoke checks first. If it
 - 1x H100 80 GB (SXM or PCIe: single GPU, no collectives). Host driver >= r570 (CUDA 12.8).
 - Volume: >= 60 GB (venv ~7, Llama weights 16, checkpoint 10, XLA cache, outputs ~10 incl.
   two saved CI fns at ~3.9 GB each).
-- Expected time (estimate): each step is 3 masked forward/backward passes (2 warmup ascents +
-  the main step) plus the clean forwards, ~3x the deterministic step (L40: 3.0 s per 1024-prompt
-  step at microbatch 512; H100 is typically 2-3x faster), so ~3-4 s/step, ~5 h per objective,
-  plus a few minutes per pool evaluation (6 per objective), ~15-30 min for the grid and ~5 min for
-  the two PGD evals.
+- Expected time (estimate): with no warmup ascents a step is one clean forward plus one masked
+  forward/backward, like the deterministic step (L40: 3.0 s per 1024-prompt step at microbatch
+  512; H100 is typically 2-3x faster), so ~1.5 s/step, ~2-2.5 h per objective, plus a few minutes
+  per pool evaluation (6 per objective), ~15-30 min for the grid and ~5 min for the two PGD evals.
+  Each warmup step (`n_warmup_steps`) adds another masked forward/backward.
 
 ## 2. Code, environment, weights, secrets
 

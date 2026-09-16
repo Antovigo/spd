@@ -119,12 +119,14 @@ class MergedPPGDRecon(BaseConfig):
     DELTA IS ON (its mask is the source's delta channel). The adversary keeps one source per
     (batch slot, position, component + delta), Adam-ascended `n_warmup_steps` times per step
     against the all-adversarial forward with the CI detached, then once more from the main
-    backward. Defaults are addsub-all-layers-4xh100-05's target-pass values."""
+    backward. Defaults are addsub-all-layers-4xh100-05's target-pass values, except
+    `n_warmup_steps` (-05: 2): the arithmetic pool repeats, so the final ascent alone may keep
+    the adversary current."""
 
     kind: Literal["merged_stochastic_ppgd"] = "merged_stochastic_ppgd"
     coeff: PositiveFloat = 1.5
     adv_fraction: ScheduleConfig = _ramp(0.3333333, 0.05)
-    n_warmup_steps: NonNegativeInt = 2
+    n_warmup_steps: NonNegativeInt = 0
     optimizer: AdamPGDConfig = AdamPGDConfig(
         beta1=0.5, beta2=0.99, eps=1.0e-8, lr_schedule=_ramp(0.01, 0.0125)
     )
