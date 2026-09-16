@@ -104,6 +104,8 @@ param_decomp = [
     "experiments/**/*.yaml",
     "experiments/**/*.html",  # the ab-grid applet a snapshot ships next to
     "pretrain/configs/**/*.yaml",
+    "ci_filter/configs/*.yaml",
+    "ci_filter/*.html",  # the CI filter's grid applet
 ]
 
 [tool.setuptools.packages.find]

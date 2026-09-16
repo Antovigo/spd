@@ -1,0 +1,57 @@
+# CI filter, objective 1: full-vocabulary KL at the last prompt position.
+# Fine-tunes the output CI fn of addsub-all-layers-4xh100-05 (components frozen, weight delta
+# off, deterministic CI masks) on both operations of the 1..100 addition/subtraction grid.
+# Template seat: every field spelled out; parse-gated by tests/ci_filter/test_ci_filter.py.
+run: {kind: id, id: p-ba5a0c05}
+step: 40000
+init: {kind: run}
+pool:
+  operations: [add, sub]
+  a_range: [1, 100]
+  b_range: [1, 100]
+objective: {kind: last_position_kl}
+steps: 5000
+batch_size: 1024
+microbatch_size: null  # hardware-only; set to what one forward/backward fits
+eval_batch_size: 1000
+seed: 0
+remat: true
+recon_coeff: 1.5  # the decomposition's output-recon coefficient
+imp_min:
+  # The decomposition's imp-min schedules, replayed over this run: 4x at step 0, down to
+  # the final value at 25% and held.
+  coeff:
+    max_val: 2.0e-04
+    points:
+      - {at: 0.0, frac: 1.0}
+      - {at: 0.25, frac: 0.25}
+      - {at: 1.0, frac: 0.25}
+  # Re-annealed over the last half so switched-off components can leave and CI ends binary.
+  gamma:
+    max_val: 1.0
+    points:
+      - {at: 0.0, frac: 1.0}
+      - {at: 0.5, frac: 1.0}
+      - {at: 1.0, frac: 0.01}
+  normalize_at_one: true
+  frequency_coeff:
+    max_val: 1.0e-04
+    points:
+      - {at: 0.0, frac: 1.0}
+      - {at: 0.25, frac: 0.25}
+      - {at: 1.0, frac: 0.25}
+  reference_datapoint_count: 640
+lr_schedule:
+  max_val: 4.0e-05
+  points:
+    - {at: 0.0, frac: 1.0}
+    - {at: 1.0, frac: 0.1, interp: cosine}
+betas: [0.9, 0.999]
+grad_clip_norm: null
+alive_threshold: 0.01
+eval_every: 1000
+log_every: 10
+grid:
+  mean_ci_floor: 0.05
+  chunk_prompts: 1000
+compilation_cache_dir: ~/.cache/param-decomp/xla

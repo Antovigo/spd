@@ -10,7 +10,7 @@ For other work, start with the smallest relevant source of truth:
 - [`README.md`](README.md) — installation, runnable entry points, datasets, packaging, and development commands.
 - [`CONFIGS.md`](CONFIGS.md) — which configurations belong in the repository and how they stay portable.
 - [`param_decomp/core/SPEC.md`](param_decomp/core/SPEC.md) — the trainer's normative numerical contract.
-- The nearest module-level `CLAUDE.md` — local architecture and interfaces. These exist under `core`, `experiments`, `experiments/lm/pretrain`, and `clustering`; `targets` carries a `README.md`.
+- The nearest module-level `CLAUDE.md` — local architecture and interfaces. These exist under `core`, `experiments`, `experiments/lm/pretrain`, `clustering`, and `ci_filter`; `targets` carries a `README.md`.
 
 ## Repository-wide constraints
 
