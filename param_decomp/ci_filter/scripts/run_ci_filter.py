@@ -17,8 +17,6 @@ import jax.numpy as jnp
 import numpy as np
 import wandb
 from jax.sharding import PartitionSpec as P
-from jaxtyping import Array
-from transformers import AutoTokenizer
 
 from param_decomp.ci_filter.checkpoint import restore_ci_fn, save_ci_fn
 from param_decomp.ci_filter.config import (
@@ -33,9 +31,8 @@ from param_decomp.ci_filter.config import (
 )
 from param_decomp.ci_filter.grid import collect_operation, write_applet, write_operation
 from param_decomp.ci_filter.paths import CIFilterOutputs, new_ci_filter_id
-from param_decomp.ci_filter.pool import Tokenizer, answer_token_ids, build_pool
+from param_decomp.ci_filter.pool import answer_token_ids, build_pool, load_tokenizer
 from param_decomp.ci_filter.step import (
-    Prepared,
     RowArrays,
     batch_gradients,
     index_batches,
@@ -46,30 +43,17 @@ from param_decomp.ci_filter.step import (
     make_pgd_eval,
     make_score_fixed_masks,
     pgd_eval_batches,
+    prepare_components,
     sample_batch,
     trainable,
 )
 from param_decomp.core.ci_fn import PlacedCIFn
-from param_decomp.core.components import ComponentStacks
 from param_decomp.core.log import logger, setup_console_logger
-from param_decomp.core.model import PlacedModel, prepare_compute_weights
 from param_decomp.core.run_state import optax_schedule
 from param_decomp.experiments.lm.load_run import restore_jax_run
 from param_decomp.experiments.lm.resolved import TargetConfig
 from param_decomp.experiments.lm.training import enable_persistent_compilation_cache
 from param_decomp.infra.wandb import init_wandb, try_wandb
-from param_decomp.targets.glu_transformer import hf_snapshot_dir
-
-
-@eqx.filter_jit
-def _prepare(placed: PlacedModel, components: ComponentStacks) -> tuple[Prepared, dict[str, Array]]:
-    v_norms = {
-        site: jax.sharding.reshard(
-            jnp.linalg.norm(components.site(site).V.astype(jnp.float32), axis=0), P()
-        )
-        for site in placed.site_names
-    }
-    return prepare_compute_weights(placed, components), v_norms
 
 
 def _mask_scores(rows: dict[str, np.ndarray]) -> MaskScores:
@@ -137,15 +121,7 @@ def run_ci_filter(config: CIFilterConfig, data_root: Path, filter_id: str) -> Pa
             tags=[config.objective.kind, config.init.kind],
         )
 
-    tokenizer = cast(
-        Tokenizer,
-        cast(
-            object,
-            AutoTokenizer.from_pretrained(
-                str(hf_snapshot_dir(target.model_name)), local_files_only=True
-            ),
-        ),
-    )
+    tokenizer = load_tokenizer(target.model_name)
     pool = build_pool(config.pool, tokenizer)
     include_minus = (
         config.objective.include_minus
@@ -161,7 +137,7 @@ def run_ci_filter(config: CIFilterConfig, data_root: Path, filter_id: str) -> Pa
         assert size % mesh.size == 0, f"batch {size} must tile the {mesh.size}-device mesh"
 
     with jax.set_mesh(mesh):
-        prepared, v_norms = _prepare(placed, restored.components)
+        prepared, v_norms = prepare_components(placed, restored.components)
         ci_fn = restored.ci_fn
         del restored
         match config.init:

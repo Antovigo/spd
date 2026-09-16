@@ -3,7 +3,7 @@
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, cast
 
 import numpy as np
 
@@ -96,3 +96,13 @@ def answer_token_ids(tokenizer: Tokenizer, include_minus: bool) -> np.ndarray:
         assert len(minus) == 1, f"'-' is not a single token: {minus}"
         ids.add(minus[0])
     return np.asarray(sorted(ids), dtype=np.int32)
+
+
+def load_tokenizer(model_name: str) -> Tokenizer:
+    """The HF target's tokenizer from its local snapshot (the weights load already staged it)."""
+    from transformers import AutoTokenizer
+
+    from param_decomp.targets.glu_transformer import hf_snapshot_dir
+
+    loaded = AutoTokenizer.from_pretrained(str(hf_snapshot_dir(model_name)), local_files_only=True)
+    return cast(Tokenizer, cast(object, loaded))

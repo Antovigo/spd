@@ -12,6 +12,7 @@ import pytest
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 
+from param_decomp.ci_filter.ablation import MASKINGS, ablation_rows
 from param_decomp.ci_filter.checkpoint import restore_ci_fn, save_ci_fn
 from param_decomp.ci_filter.config import (
     ArithmeticPoolConfig,
@@ -274,6 +275,12 @@ def _exercise_placed(tmp_path: Path, mesh: Mesh, sharding: str) -> None:
             placed, prepared, ci_fn, tokens_all, jnp.asarray(pgd_batches[0]), jax.random.PRNGKey(0)
         )
         assert np.isfinite(float(pgd)) and float(pgd) >= 0.0
+        alive = {s.name: (jnp.arange(s.C) % 2).astype(jnp.float32) for s in sites}
+        ablations = ablation_rows(placed, prepared, ci_fn, alive, tokens_all, eval_idx, 0.01)
+        assert set(ablations) == set(MASKINGS)
+        for reductions in ablations.values():
+            assert np.asarray(reductions["last"]).shape == (micro,)
+            assert np.all(np.asarray(reductions["all_positions"]) >= -1e-6)
         on = {s.name: jnp.ones(s.C, jnp.float32) for s in sites}
         scored = make_score_fixed_masks(config)(
             placed, prepared, on, tokens_all, eval_idx, answer_ids

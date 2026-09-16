@@ -19,9 +19,15 @@ from jaxtyping import Array, Float, Int, PRNGKeyArray
 from param_decomp.ci_filter.config import CIFilterConfig
 from param_decomp.ci_filter.objective import objective_rows, row_scores
 from param_decomp.core.ci_fn import CI, PlacedCIFn, ci_for_role, evaluate_ci
+from param_decomp.core.components import ComponentStacks
 from param_decomp.core.decomposed_linear import constrain_component_activation
 from param_decomp.core.losses import importance_minimality_terms, scheduled_value_at
-from param_decomp.core.model import BATCH_AXES, MaterializedMasking, PlacedModel
+from param_decomp.core.model import (
+    BATCH_AXES,
+    MaterializedMasking,
+    PlacedModel,
+    prepare_compute_weights,
+)
 from param_decomp.core.precision import COMPUTE_DT
 from param_decomp.core.recon_eval import FreshPGDReconEval, fresh_pgd_recon_loss
 from param_decomp.core.run_state import clip_by_global_norm_with_eps, optax_schedule
@@ -54,6 +60,21 @@ def _count_above(ci_lower: dict[str, Array], threshold: float | Array) -> Array:
         (jnp.mean(jnp.sum(v > threshold, axis=-1, dtype=jnp.float32)) for v in ci_lower.values()),
         start=jnp.zeros((), jnp.float32),
     )
+
+
+@eqx.filter_jit
+def prepare_components(
+    placed: PlacedModel, components: ComponentStacks
+) -> tuple[Prepared, dict[str, Array]]:
+    """The components in compute form and each component's `||V_c||` (for the grid's
+    normalized inner activations), replicated."""
+    v_norms = {
+        site: jax.sharding.reshard(
+            jnp.linalg.norm(components.site(site).V.astype(jnp.float32), axis=0), P()
+        )
+        for site in placed.site_names
+    }
+    return prepare_compute_weights(placed, components), v_norms
 
 
 def trainable(ci_fn: PlacedCIFn) -> Trainable:
