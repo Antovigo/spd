@@ -208,7 +208,9 @@ def batch_gradients(
 def make_apply_update(
     optimizer: optax.GradientTransformation,
 ) -> Callable[[PlacedCIFn, optax.OptState, Trainable], tuple[PlacedCIFn, optax.OptState, Array]]:
-    @eqx.filter_jit(donate="all-except-first")
+    # Everything donated, the CI fn included: its masters are rewritten in place each step
+    # instead of reallocated beside the old copy, which fragments a tight single-GPU pool.
+    @eqx.filter_jit(donate="all")
     def apply_update(
         ci_fn: PlacedCIFn, opt_state: optax.OptState, grads: Trainable
     ) -> tuple[PlacedCIFn, optax.OptState, Array]:
