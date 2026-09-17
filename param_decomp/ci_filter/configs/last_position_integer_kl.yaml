@@ -82,7 +82,7 @@ pgd_eval:
   step_size: 0.1
   n_batches: 4
   batch_size: 128
-wandb: {project: arithmetic, entity: null}
+wandb: {project: param-decomp-llama, entity: null}
 grid:
   mean_ci_floor: 0.05
   chunk_prompts: 1000

@@ -12,7 +12,7 @@ The template seats (`param_decomp/ci_filter/configs/`) train with the decomposit
 target-pass recon, `recon: {kind: merged_stochastic_ppgd}` (SPEC S34: stochastic-subset draws plus
 a 1/3 persistent-PGD adversarial share, WEIGHT DELTA ON; the adversary ascends once per step, from
 the main backward — `n_warmup_steps: 0`, where -05 used 2, since the 20k-prompt pool repeats), scored by the filter objective at the last position. Evaluations stay deterministic
-(CI masks, delta off). Every run logs live to the wandb project `arithmetic` (needs
+(CI masks, delta off). Every run logs live to the wandb project `param-decomp-llama` (needs
 `WANDB_API_KEY` in `/workspace/secrets.env`).
 
 ## Why one H100 and not the L40s
