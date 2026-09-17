@@ -67,6 +67,25 @@
 # `runtime.compilation_cache_dir` + `compiler_options`, the explicit `replicate` mesh
 # axis in place of `dp`/`gpus_per_node`, and `sharding: ddp` in place of `zero1`.
 #
+# MIGRATED AGAIN 2026-09-17: `decomposition.sites.initialization` set to
+# `neuron_aligned_zero_u` (was `neuron_aligned_targeted`) — the SAME harvested
+# `neuron_ranks` top-C coordinates, but seeded under `zero_u`'s discipline: `U` zeroed so
+# the component sum is exactly zero at init and the delta carries all of `W`, while
+# `x @ V` still reads the selected coordinates. `neuron_ranks` is unchanged (still
+# `addsub1-100_llama31-8b_unit-energy`) — only which of `V`/`U` the alignment writes to.
+#
+# MIGRATED AGAIN 2026-09-11 for the S35 amendment (fdbb7f9a6): `pd.hidden.normalization`
+# set to `per_position` (floor_fraction left at its 0.01 default). The field's default
+# (`batch`) is the ORIGINAL S35 form — one ratio over the whole batch, so a position
+# holding most of a point's clean energy (Llama's BOS massive activation at layers 0, 1,
+# 31 — see `notes/dual_objective` all-layers hidden-pass diagnosis) is the whole
+# measurement and every other position is silenced. `per_position` scores each (batch,
+# position) entry against its own clean scale before averaging, so BOS can no longer
+# dilute the rest of the sequence; shared automatically with `nontarget.hidden`, which has
+# no `normalization` field of its own (`HiddenPassConfig`'s points/normalization cover
+# both passes — SPEC T12). Byte-inert for the recipe's numbers otherwise: this is a
+# denominator change on the hidden recon term only.
+#
 # MIGRATED AGAIN 2026-09-04 for the upstream #1001 merge, three edits — the recipe's
 # NUMBERS are untouched, but one of them is not a pure rename:
 #   1. `SmoothL0ImportanceMinimalityLoss` -> `ImportanceMinimalityLoss`. #1001 deleted the
@@ -85,9 +104,12 @@
 #      this file as it now stands does not. Set `initialization: neuron_aligned_targeted`
 #      (+ `neuron_ranks`) for the aligned arm; there is no way to spell `coupled` again.
 #
-# `run_name` is left at the generic seat name deliberately: `addsub-L18-16-ntmerged-bsc`
-# already owns a `runs/by-name/` symlink, and reusing it would collide.
-run_name: addsub-L18-23-neuronaligned
+# `run_name` moved to `addsub-L18-24-zerou-perpos` 2026-09-17, incrementing off the prior
+# `addsub-L18-23-neuronaligned` seat (whose `runs/by-name/` symlink is already claimed by
+# p-6540dfdd) now that this file's recipe has actually changed twice since that pin
+# (`pd.hidden.normalization: per_position`, `initialization: neuron_aligned_zero_u`) — a
+# reused name would either collide or silently mislabel a differently-configured run.
+run_name: addsub-L18-24-zerou-perpos
 decomposition:
   sites:
     kind: glu_transformer
@@ -103,7 +125,7 @@ decomposition:
       gate: 456
       up: 456
       down: 512
-    initialization: neuron_aligned_targeted
+    initialization: neuron_aligned_zero_u
     neuron_ranks: {kind: name, name: addsub1-100_llama31-8b_unit-energy}
   ci:
     type: chunkwise_transformer
@@ -216,6 +238,11 @@ pd:
       - layers.29.mlp.down_proj.out
       - layers.30.mlp.down_proj.out
       - layers.31.mlp.down_proj.out
+    # Per-(batch, position) relative error, not one ratio over the whole batch (S35
+    # amended 2026-09-11) — BOS's massive activation at layers 0/1/31 can no longer
+    # silence the rest of the sequence. Shared with `nontarget.hidden` (SPEC T12).
+    normalization:
+      kind: per_position
     # 4x the final 5.0e-05 at step 0, linear to 5.0e-05 at 50%, then held.
     impmin_coeff:
       max_val: 2.0e-04
