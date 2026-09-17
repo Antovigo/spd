@@ -32,7 +32,7 @@ def main() -> None:
     raw["grid"]["chunk_prompts"] = int(os.environ.get("GRID_CHUNK", "1000"))
     match args.stage:
         case "smoke":
-            raw |= {"steps": 30, "eval_every": 10}
+            raw |= {"steps": 30, "eval_every": 10, "wandb": None}
             raw["pool"] |= {"a_range": [1, 30], "b_range": [1, 30]}
         case "obj1":
             pass

@@ -7,6 +7,7 @@ the run id, named datasets and target caches."""
 
 import argparse
 import json
+import secrets
 import time
 from pathlib import Path
 from typing import cast
@@ -109,9 +110,11 @@ def run_ci_filter(config: CIFilterConfig, data_root: Path, filter_id: str) -> Pa
     config.to_file(outputs.config)
     logger.info(f"ci filter {filter_id}: run {run_dir} step {step} -> {outputs.root}")
     if config.wandb is not None:
+        # The wandb id is fresh on every launch: wandb refuses to recreate a deleted run's id,
+        # so a rerun under the same filter name must not reuse it. The name is the filter id.
         init_wandb(
             config.wandb.project,
-            filter_id,
+            f"{filter_id}-{secrets.token_hex(3)}",
             {
                 **config.model_dump(mode="json"),
                 "run_dir": str(run_dir),

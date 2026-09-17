@@ -185,7 +185,7 @@ class PGDEvalConfig(BaseConfig):
 
 
 class WandbConfig(BaseConfig):
-    """Live wandb logging; the wandb run id is the filter id."""
+    """Live wandb logging; the wandb run is named by the filter id (its wandb id is fresh)."""
 
     project: str
     entity: str | None = None
