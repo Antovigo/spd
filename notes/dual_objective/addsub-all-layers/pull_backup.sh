@@ -18,7 +18,8 @@
 #   * the newest COMPLETE checkpoint, if it is newer than the newest one already here.
 #     "Complete" = the step directory contains `_CHECKPOINT_METADATA`, which orbax writes at
 #     finalize, so a checkpoint being written right now is skipped rather than half-copied.
-#     ~20 GB per checkpoint at 32 blocks; --keep prunes older ones locally.
+#     53 GB per checkpoint at 32 blocks (MEASURED on p-ba5a0c05: decomposition 10 GB +
+#     training 43 GB); --keep prunes older ones locally, so --keep 2 is ~106 GB.
 #
 # To resume from a backup on a FRESH pod: re-stage code, datasets, weights and secrets per
 # the guide, then push `<run id>/{launch_config.yaml,ckpts/<step>/}` back to
@@ -88,7 +89,7 @@ pass_once() {
   if [ -z "$newest" ]; then echo "no complete checkpoint on the pod yet"; return 0; fi
   have=$(ls "$OUT/ckpts" 2>/dev/null | sort -n | tail -1 || true)
   if [ "$newest" = "${have:-}" ]; then echo "newest checkpoint $newest already backed up"; return 0; fi
-  echo "pulling checkpoint step $newest (~20 GB; have ${have:-none})"
+  echo "pulling checkpoint step $newest (~53 GB; have ${have:-none})"
   mkdir -p "$OUT/ckpts"
   if rsync -a --partial --info=progress2 -e "${SSH[*]}" \
        "$REMOTE:$RUN_REMOTE/ckpts/$newest" "$OUT/ckpts/"; then

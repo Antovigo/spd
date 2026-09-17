@@ -129,14 +129,35 @@ Budget, either way:
 | XLA compilation cache (`/workspace/xla-cache`; ~1 GB per distinct compiled step) | 3 |
 | datasets `fineweb_llama_tok_64` + `_eval` (1.7 GB each) | 3.4 |
 | neuron ranks `addsub1-100_llama31-8b_unit-energy` | 0.01 |
-| real run checkpoints: ~20 GB each (4-block: 2.5 GB for 233M params → 1.86G params here), `keep_last 2` + one transient during save/prune | 60 |
+| real run checkpoints: **53 GB each** (MEASURED, see below), `keep_last 2` + one transient during save/prune | 159 |
 | real run misc: `hlo/` dump ~1, `ab_grids/` 10 x ~0.2, wandb, logs | 4 |
-| ladder: AB-grid smoke + resume smoke checkpoints (2 kept x ~20 GB each; delete before the real run) | 80 |
+| ladder: AB-grid smoke + resume smoke checkpoints (2 kept x 53 GB each; delete before the real run) | 106 |
 | ladder misc: `hlo/` dumps (~1 GB per trial), logs | 5 |
-| **total** | **~185** |
+| **total** | **~308** |
 
-→ **250 GB** volume disk (200 GB is workable if you delete the ladder's checkpoints before
-launching the real run, step 6b).
+→ **400 GB** if you run the ladder; **250 GB is the floor**, and only if you skip the ladder
+or delete its checkpoints before launching (real run alone peaks at ~197 GB, leaving ~50 GB
+of headroom).
+
+**Checkpoints are 53 GB, not 20.** MEASURED from p-ba5a0c05's backup 2026-09-17:
+`decomposition` 10 GB + `training` 43 GB, the Adam state on 1.86G params dominating. The
+pre-run estimate of 20 GB, extrapolated from the 4-block run, was 2.65x too low. At
+`keep_last 2` the run holds two plus one being written, so 159 GB is the steady-state
+high-water mark — it is the whole budget, and it is what a too-small volume dies on, at the
+FIRST save (step 4000).
+
+**Verify the volume is really a network volume, and really yours.** `df -h /workspace` can
+report a 250 GB "size" that is the SHARED host array, not your allocation — on a pod checked
+2026-09-17 it read 250 GB with 181 GB already used by other tenants and only 70 GB reachable,
+while `du -xsh /workspace` was 0. Two checks before staging anything:
+
+```bash
+grep md /proc/self/mountinfo   # a bind mount of <host array>/volumes/<id>/_data = LOCAL volume disk
+df -h /workspace; du -xsh /workspace   # "used" >> your own usage = you are sharing the array
+```
+
+If `used` is large while `du` is ~0, the space is other pods' and nothing you delete recovers
+it; that headroom can also shrink mid-run as neighbours grow. Redeploy elsewhere.
 
 ---
 
@@ -437,7 +458,7 @@ train/perf/step_time_s=... train/mem/peak_gb_per_rank=...` every ~100 steps. AB 
 at step 4000 (`$DATA_ROOT/runs/p-a1132b01/ab_grids/step_4000.js`). wandb: the run is
 `param-decomp-llama/addsub-all-layers-8xh100-01` (id `p-a1132b01`). Close the shell and the laptop;
 the runner survives (`setsid nohup`). The hang watchdog fuse is 60 min for the real run
-(`WATCHDOG_FUSE=3600`): the trainer logs every 100 steps (~8–10 min), a slow eval + 20 GB
+(`WATCHDOG_FUSE=3600`): the trainer logs every 100 steps (~8–10 min), a slow eval + 53 GB
 save can be 20–30 min, a cold compile 20–40 min.
 
 **Expected wall clock and cost.** Anchoring on the measured single-block (3.3 s/step, 7
@@ -454,7 +475,7 @@ from the trial that won, is in `summary.md` and supersedes this.
 **Start this first, before the long run, and leave it running.** On volume disk the pod is a
 single point of failure (step 1), so the backup is not optional bookkeeping: it is what
 turns "the pod died" from losing the run into losing one checkpoint interval. Run it on the
-cluster or your laptop, wherever you have room for a few 20 GB checkpoints:
+cluster or your laptop, wherever you have room for a few 53 GB checkpoints (`--keep 2` = ~106 GB):
 
 ```bash
 cd <your checkout>/notes/dual_objective/addsub-all-layers
@@ -470,7 +491,7 @@ COMPLETE checkpoint if it is newer than the one already backed up. Completeness 
 `_CHECKPOINT_METADATA` inside the step directory, which orbax writes at finalize, so a
 checkpoint mid-write is skipped rather than half-copied. `--keep 2` prunes older local
 copies. At `save_every 4000` a new checkpoint appears every 8 to 11 hours, so an hourly
-interval mostly transfers a few megabytes and occasionally 20 GB.
+interval mostly transfers a few megabytes and occasionally 53 GB.
 
 **Restoring onto a fresh pod.** Re-stage code, datasets, weights and secrets per steps 2 to
 4, then push the run directory back and launch:
@@ -500,7 +521,7 @@ open ./addsub-all-layers-8xh100-01/ab_grids/index.html        # file:// works; t
 eval $RS $R/runs/p-a1132b01/metrics.jsonl $R/runs/p-a1132b01/launch_config.yaml ./addsub-all-layers-8xh100-01/
 eval $RS $R/ladder/summary.md $R/ladder/'*.log' ./addsub-all-layers-8xh100-01/ladder/
 eval $RS $R/logs/ ./addsub-all-layers-8xh100-01/logs/
-# optional, ~20 GB per step dir (decomposition ~7 GB + training ~13 GB):
+# optional, ~53 GB per step dir (decomposition ~10 GB + training ~43 GB):
 eval $RS $R/runs/p-a1132b01/ckpts/<step>/ ./addsub-all-layers-8xh100-01/ckpts/<step>/
 ```
 
@@ -556,8 +577,8 @@ backup first (step 7): `ls $DEST/<run id>/ckpts` should show a recent step.
 1. Run one final `./pull_backup.sh --profile 8xh100 --once`, then confirm
    `ls ~/out/pod-backup/p-a1132b01/ckpts` shows step 40000. The hourly loop already holds
    `ab_grids/`, `metrics.jsonl`, `launch_config.yaml`, the logs and `ladder/summary.md`;
-   this last pass is what gets the FINAL checkpoint (~20 GB; the `decomposition` item alone,
-   ~7 GB, is what every consumer restores). Stop the backup loop afterwards.
+   this last pass is what gets the FINAL checkpoint (53 GB; the `decomposition` item alone,
+   ~10 GB, is what every consumer restores). Stop the backup loop afterwards.
 2. Delete on the volume: every ladder trial's run dir,
    `awk -F'\t' '!/^#/ {print $2}' trials/manifest.tsv | while read -r id; do rm -rf "$DATA_ROOT/runs/$id"; done`, plus `$DATA_ROOT/runs/p-a1132b01/hlo`,
    `$DATA_ROOT/tmp/*`, `$VOLUME/uv-cache`.
