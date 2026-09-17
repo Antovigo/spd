@@ -17,6 +17,10 @@ switch off per prompt. Target stream only: no non-target pass, no hidden-activat
 - `ppgd.py` — the alternative recon, the decomposition's own merged stochastic-subset
   persistent-PGD term (SPEC S34, weight delta ON) scored by the filter objective: the
   persistent adversary, its warmup ascents, the main microbatch gradient and the final ascent.
+- `attribution.py` + `scripts/run_attribution.py` — helpers vs interferers on the TRUE answer:
+  the first-order screen (`-sum_t m * d log p(correct) / d m`, every component in one backward)
+  and the causal single-component ablation of the extremes. POSITIVE = ablating it raises the
+  correct answer's probability (interferes).
 - `ablation.py` + `scripts/mask_ablations.py` — KL (last position and all positions) of a run's
   or a filter's CI fn under all-on / alive-union / dead-only / per-prompt / per-prompt+dead
   masks, weight delta off.

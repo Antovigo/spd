@@ -13,6 +13,11 @@ from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 
 from param_decomp.ci_filter.ablation import MASKINGS, ablation_rows
+from param_decomp.ci_filter.attribution import (
+    answer_targets,
+    make_ablation_scores,
+    make_attribution_batch,
+)
 from param_decomp.ci_filter.checkpoint import (
     restore_ci_fn,
     save_ci_fn,
@@ -408,6 +413,50 @@ def _exercise_placed(tmp_path: Path, mesh: Mesh, sharding: str) -> None:
             placed, prepared, on, tokens_all, eval_idx, answer_ids
         )
         assert np.all(np.asarray(scored["kl"]) >= -1e-6)
+
+        # Attribution: the first-order effect predicts a SMALL real mask change (the gradient
+        # check that makes the screen meaningful), and ablating a component is its keep vector.
+        targets = answer_targets(pool, FakeTokenizer(), answers)
+        assert targets.values.shape == (pool.n_prompts,)
+        assert np.array_equal(answers[targets.indices], targets.token_ids)
+        target_all = jnp.asarray(targets.indices)
+        rows = make_attribution_batch(False)(
+            placed, prepared, ci_fn, constraints, tokens_all, eval_idx, answer_ids, target_all
+        )
+        assert np.asarray(rows.score).shape == (micro,)
+        assert np.all(np.asarray(rows.score) <= 1e-6) and np.all(
+            np.isfinite(np.asarray(rows.score))
+        )
+        assert set(rows.effect) == set(placed.site_names)
+        for site in placed.site_names:
+            np.testing.assert_array_equal(np.asarray(rows.effect[site])[:, 1::2], 0.0)
+
+        ablation = make_ablation_scores()
+        ones = {s.name: jnp.ones(s.C, jnp.float32) for s in sites}
+        base, base_correct = ablation(
+            placed, prepared, ci_fn, constraints, tokens_all, eval_idx, answer_ids, target_all, ones
+        )
+        np.testing.assert_allclose(np.asarray(base), np.asarray(rows.score), rtol=1e-4, atol=1e-5)
+        assert np.all(np.isin(np.asarray(base_correct), (0.0, 1.0)))
+        site0 = placed.site_names[0]
+        eps = 0.01
+        scaled = dict(ones)
+        scaled[site0] = ones[site0].at[0].set(1.0 - eps)
+        nudged, _ = ablation(
+            placed,
+            prepared,
+            ci_fn,
+            constraints,
+            tokens_all,
+            eval_idx,
+            answer_ids,
+            target_all,
+            scaled,
+        )
+        predicted = eps * np.asarray(rows.effect[site0])[:, 0]
+        np.testing.assert_allclose(
+            np.asarray(nudged) - np.asarray(base), predicted, rtol=0.05, atol=1e-3
+        )
 
         # Floor 0 saves every component; each slice's mean CI is its saved columns' mean.
         block = pool.blocks[1]
