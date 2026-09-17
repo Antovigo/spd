@@ -1,0 +1,213 @@
+# addsub-L18-24-outputs-only: UNTESTED. addsub-L18-24.yaml (see its header) with the hidden
+# pass removed: `decomposition.ci.dual: false`, and no `pd.hidden` or `nontarget.hidden`, so
+# no hidden recon terms and no e2e KL riders. The CI-scaled weight decay reads the target
+# stream's OUTPUT-head CI instead (there is no hidden head). Everything else is identical.
+run_name: addsub-L18-24-outputs-only
+decomposition:
+  sites:
+    kind: glu_transformer
+    layers:
+      kind: list
+      indices:
+        - 18
+    cs:
+      q: 144
+      k: 144
+      v: 256
+      o: 512
+      gate: 912
+      up: 912
+      down: 1024
+    initialization: neuron_aligned_zero_u
+    neuron_ranks: {kind: name, name: addsub1-100_llama31-8b_unit-energy}
+  ci:
+    type: chunkwise_transformer
+    blocks_per_chunk: 1
+    input_tap: all_block_taps
+    d_model: 512
+    n_blocks: 4
+    attention:
+      kind: mha
+      n_heads: 8
+      attention_implementation: xla
+    ffn:
+      kind: gelu
+      hidden: 2048
+    zero_init_readout: true
+    dual: false
+pd:
+  seed: 0
+  steps: 20000
+  batch_size: 128
+  ci_scaled_weight_decay: 0.2
+  ci_scaled_weight_decay_stream: target
+  ci_scaled_weight_decay_role: output
+  ci_scaled_weight_decay_quantile: 1.0
+  components_optimizer:
+    lr_schedule:
+      max_val: 8.0e-05
+      points:
+        - {at: 0.0, frac: 1.0}
+        - {at: 1.0, frac: 0.1, interp: cosine}
+    betas: [0.9, 0.999]
+    weight_decay: 0.0
+    grad_clip_norm: 0.01
+  ci_fn_optimizer:
+    lr_schedule:
+      max_val: 4.0e-05
+      points:
+        - {at: 0.0, frac: 1.0}
+        - {at: 1.0, frac: 0.1, interp: cosine}
+    betas: [0.9, 0.999]
+    weight_decay: 0.0
+    grad_clip_norm: null
+  loss_metrics:
+    - type: ImportanceMinimalityLoss
+      coeff:
+        max_val: 2.0e-04
+        points:
+          - {at: 0.0, frac: 1.0}
+          - {at: 0.5, frac: 0.25}
+          - {at: 1.0, frac: 0.25}
+      normalize_at_one: true
+      gamma:
+        max_val: 1.0
+        points:
+          - {at: 0.0, frac: 1.0}
+          - {at: 0.5, frac: 1.0}
+          - {at: 1.0, frac: 0.01}
+      frequency:
+        coeff:
+          max_val: 1.0e-04
+          points:
+            - {at: 0.0, frac: 1.0}
+            - {at: 0.5, frac: 0.25}
+            - {at: 1.0, frac: 0.25}
+        reference_datapoint_count: auto
+    - type: MergedStochasticSubsetPPGDReconLoss
+      coeff: 1.5
+      adv_fraction:
+        max_val: 0.3333333
+        points:
+          - {at: 0.0, frac: 0.0}
+          - {at: 0.005, frac: 1.0}
+          - {at: 1.0, frac: 1.0}
+      n_warmup_steps: 2
+      routing:
+        type: uniform_k_subset
+      optimizer:
+        type: adam
+        beta1: 0.5
+        beta2: 0.99
+        eps: 1.0e-08
+        lr_schedule:
+          max_val: 0.01
+          points:
+            - {at: 0.0, frac: 0.0}
+            - {at: 0.025, frac: 1.0}
+            - {at: 1.0, frac: 1.0}
+      source_shape: bsc
+    - type: UnmaskedReconLoss
+      coeff: 0.5
+prompts:
+  kind: prompts_file
+  path: param_decomp/experiments/lm/prompts/addition_subtraction_1-100.txt
+nontarget:
+  batch_size: 96
+  impmin_coeff:
+    max_val: 8.0e-04
+    points:
+      - {at: 0.0, frac: 1.0}
+      - {at: 0.5, frac: 0.25}
+      - {at: 1.0, frac: 0.25}
+  recon:
+    - type: MergedStochasticSubsetPPGDReconLoss
+      coeff: 1.0
+      adv_fraction:
+        max_val: 0.4736842
+        points:
+          - {at: 0.0, frac: 0.0}
+          - {at: 0.005, frac: 1.0}
+          - {at: 1.0, frac: 1.0}
+      n_warmup_steps: 1
+      routing:
+        type: uniform_k_subset
+      optimizer:
+        type: adam
+        beta1: 0.5
+        beta2: 0.99
+        eps: 1.0e-08
+        lr_schedule:
+          max_val: 0.01
+          points:
+            - {at: 0.0, frac: 0.0}
+            - {at: 0.025, frac: 1.0}
+            - {at: 1.0, frac: 1.0}
+      source_shape: bsc
+eval:
+  batch_size: 128
+  n_steps: 10
+  every: 500
+  slow_every: 4000
+  slow_on_first_step: true
+  metrics:
+    - type: CIMaskedReconLoss
+    - type: CEandKLLosses
+      rounding_threshold: 0.0
+    - type: CI_L0
+      ci_alive_threshold: 0.0
+      groups:
+        total: ["*"]
+    - type: PGDReconLoss
+      init: random
+      source_shape: c
+      n_steps: 20
+      step_size: 0.1
+      n_batches: 4
+    - type: TwoStreamCIMeanPerComponent
+    - type: WeightMagnitude
+    - type: ABGridDataset
+      mean_ci_floor: 0.05
+      operation: add
+      a_range: [1, 100]
+      b_range: [1, 100]
+      positions: null
+      chunk_prompts: 1000
+cadence:
+  train_log_every: 100
+  checkpointing:
+    kind: periodic
+    save_every: 5000
+    retention:
+      kind: keep_last
+      n: 2
+target:
+  attention_implementation: xla
+  spec:
+    kind: hf_weights_in_vendored
+    model_class: param_decomp.experiments.lm.vendored.llama_3_1.model.VendoredLlama
+    model_name: meta-llama/Llama-3.1-8B
+  weights_dtype: bfloat16
+data:
+  train:
+    kind: name
+    name: fineweb_llama_tok_64
+  eval:
+    kind: name
+    name: fineweb_llama_tok_64_eval
+runtime:
+  compilation_cache_dir: ~/.cache/param-decomp/xla
+  compiler_options: tuned-v1
+  replicate: 2
+  fsdp: 1
+  tp: 1
+  sharding: ddp
+  remat_recon_forwards: true
+  remat_ci_fn: true
+  sequential_passes: true
+  launch_env:
+    xla_python_client_mem_fraction: 0.97
+    env:
+      NCCL_NVLS_ENABLE: "0"
+wandb:
+  project: param-decomp-llama
