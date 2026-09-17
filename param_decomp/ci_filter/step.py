@@ -361,17 +361,26 @@ def make_score_fixed_masks(config: CIFilterConfig) -> ScoreFixedMasks:
 
 
 type PGDEval = Callable[
-    [PlacedModel, Prepared, PlacedCIFn, Int[Array, "N T"], Int[Array, " B"], PRNGKeyArray],
+    [
+        PlacedModel,
+        Prepared,
+        PlacedCIFn,
+        Int[Array, "N T"],
+        Int[Array, " B"],
+        Int[Array, " K"],
+        PRNGKeyArray,
+    ],
     Array,
 ]
 
 
 def make_pgd_eval(config: CIFilterConfig) -> PGDEval:
     """One batch of the decomposition's fresh-PGD reconstruction eval (`PGDEvalConfig`),
-    on the prepared component weights: the kernel is `core.recon_eval.fresh_pgd_recon_loss`,
-    with the delta channel attacked and the target's own full-sequence recon loss."""
+    on the prepared component weights and scored by the filter's objective at the LAST
+    position: the kernel is `core.recon_eval.fresh_pgd_recon_loss`, delta channel attacked."""
     assert config.pgd_eval is not None
     probe = FreshPGDReconEval(n_steps=config.pgd_eval.n_steps, step_size=config.pgd_eval.step_size)
+    objective = config.objective
 
     @eqx.filter_jit
     def pgd_eval(
@@ -380,21 +389,23 @@ def make_pgd_eval(config: CIFilterConfig) -> PGDEval:
         ci_fn: PlacedCIFn,
         tokens_all: Int[Array, "N T"],
         idx: Int[Array, " B"],
+        answer_ids: Int[Array, " K"],
         key: PRNGKeyArray,
     ) -> Array:
         tokens = gather_rows(tokens_all, idx)
         clean = placed.clean_forward(tokens, capture_keys=ci_fn.capture_keys)
+        clean_last = clean.output[:, -1, :]
         ci_lower = output_ci(placed, ci_fn, clean.captures, remat=False).lower
         leading = next(iter(ci_lower.values())).shape[:-1]
 
         def loss_at_masks(masks: dict[str, Array], delta_masks: dict[str, Array]) -> Array:
-            masked = placed.masked_forward(
+            masked_last = placed.masked_forward(
                 prepared,
                 tokens,
                 masking=MaterializedMasking(component_masks=masks, weight_delta_masks=delta_masks),
                 remat=config.remat,
-            )
-            return placed.recon_loss_fn(masked.output, clean.output)
+            ).output[:, -1, :]
+            return jnp.mean(objective_rows(objective, masked_last, clean_last, answer_ids))
 
         return fresh_pgd_recon_loss(placed.sites, ci_lower, leading, key, probe, loss_at_masks)
 

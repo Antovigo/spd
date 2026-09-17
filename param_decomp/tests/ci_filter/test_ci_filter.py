@@ -323,7 +323,13 @@ def _exercise_placed(tmp_path: Path, mesh: Mesh, sharding: str) -> None:
         pgd_batches = pgd_eval_batches(pool.n_prompts, pgd_config)
         assert len(pgd_batches) == 2 and len(set(np.concatenate(pgd_batches).tolist())) == 2 * micro
         pgd = make_pgd_eval(pgd_config)(
-            placed, prepared, ci_fn, tokens_all, jnp.asarray(pgd_batches[0]), jax.random.PRNGKey(0)
+            placed,
+            prepared,
+            ci_fn,
+            tokens_all,
+            jnp.asarray(pgd_batches[0]),
+            answer_ids,
+            jax.random.PRNGKey(0),
         )
         assert np.isfinite(float(pgd)) and float(pgd) >= 0.0
         alive = {s.name: (jnp.arange(s.C) % 2).astype(jnp.float32) for s in sites}

@@ -169,6 +169,7 @@ def run_ci_filter(config: CIFilterConfig, data_root: Path, filter_id: str) -> Pa
                         ci_fn,
                         tokens_all,
                         jnp.asarray(idx),
+                        answer_ids,
                         jax.random.fold_in(key, b),
                     )
                 )
