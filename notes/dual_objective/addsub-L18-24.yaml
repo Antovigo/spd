@@ -20,16 +20,16 @@
 #     pd.hidden 0.5 -> 0.25 (KL at 0.75 against the term's 3.0), nontarget.hidden 1.0 -> 0.5.
 #   CI-scaled weight decay (0.2) reads the TARGET stream's HIDDEN-head CI only, max over the batch
 #     (quantile 1.0).
-#   non-target merged terms (output and hidden): steady-state PGD:stochastic 0.9:1 instead of 1:1,
-#     adv_fraction 0.5 -> 0.4736842 (= 0.9/1.9) at unchanged total coeff. The target-stream merged
-#     terms keep -05's 1:2 (adv_fraction 1/3).
+#   every merged stochastic+PPGD term (target and non-target, output and hidden): steady-state
+#     PGD:stochastic 0.9:1, adv_fraction 0.4736842 (= 0.9/1.9) at unchanged total coeff. -05 had
+#     1:2 on the target stream (adv_fraction 1/3) and 1:1 on the non-target stream (0.5).
 #
 # DIFFERENCES FROM addsub-L18-sota.yaml, therefore: init neuron_aligned_zero_u; hidden
 # normalization per_position; C doubled (q/k 144, v 256, o 512, gate/up 912, down 1024); LR
 # 8.0e-05 / 4.0e-05 (-05's, 4x lower than the SOTA's 3.2e-04 / 1.6e-04); ci_scaled_weight_decay
-# 0.3 (all CI) -> 0.2 (target hidden CI); target stochastic+PPGD pairs merged (output 1.5 at 1/3,
-# hidden 3.0 at 1/3); hidden output_coeff riders added; non-target impmin 2e-04 -> 8e-04 (both
-# passes), non-target merged terms source_shape c -> bsc, n_warmup_steps 0 -> 1, ratio 0.9;
+# 0.3 (all CI) -> 0.2 (target hidden CI); target stochastic+PPGD pairs merged (output 1.5, hidden
+# 3.0, both at PGD:stochastic 0.9); hidden output_coeff riders added; non-target impmin 2e-04 -> 8e-04 (both
+# passes), non-target merged terms source_shape c -> bsc, n_warmup_steps 0 -> 1, PGD:stochastic 1 -> 0.9;
 # NCCL_NVLS_ENABLE=0.
 run_name: addsub-L18-24
 decomposition:
@@ -116,7 +116,7 @@ pd:
     - type: MergedStochasticSubsetPPGDReconLoss
       coeff: 1.5
       adv_fraction:
-        max_val: 0.3333333
+        max_val: 0.4736842
         points:
           - {at: 0.0, frac: 0.0}
           - {at: 0.005, frac: 1.0}
@@ -167,7 +167,7 @@ pd:
         name: HiddenMergedStochasticPPGDRecon
         coeff: 3.0
         adv_fraction:
-          max_val: 0.3333333
+          max_val: 0.4736842
           points:
             - {at: 0.0, frac: 0.0}
             - {at: 0.005, frac: 1.0}

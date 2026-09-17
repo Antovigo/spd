@@ -87,7 +87,7 @@ pd:
     - type: MergedStochasticSubsetPPGDReconLoss
       coeff: 1.5
       adv_fraction:
-        max_val: 0.3333333
+        max_val: 0.4736842
         points:
           - {at: 0.0, frac: 0.0}
           - {at: 0.005, frac: 1.0}
