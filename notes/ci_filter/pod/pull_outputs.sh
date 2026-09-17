@@ -5,7 +5,7 @@
 #     POD_HOST=<ip> POD_PORT=<port> KEY=~/.ssh/<key> ./pull_outputs.sh [--no-ci-fn]
 set -euo pipefail
 : "${POD_HOST:?}" "${POD_PORT:?}" "${KEY:?}"
-EXCLUDE=()
+EXCLUDE=(--exclude "cf-smoke/")
 [ "${1:-}" = --no-ci-fn ] && EXCLUDE=(--exclude "training/ci_fn/")
 DEST="${DEST:-$HOME/out/pod-backup/p-ba5a0c05/analysis/ci_filter/}"
 SSH="ssh -p $POD_PORT -i $KEY -o StrictHostKeyChecking=accept-new"
