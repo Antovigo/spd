@@ -73,4 +73,6 @@ class CIFilterOutputs:
 
 
 def new_ci_filter_id() -> str:
+    """A fresh `cf-<8 hex>` id; any explicit name is equally valid (it names the output dir and
+    the wandb run)."""
     return f"cf-{secrets.token_hex(4)}"

@@ -6,6 +6,7 @@
 # `cf-smoke` and is deleted when it passes. Objective 2 starts from objective 1's CI fn: from
 # the id this pipeline just produced, or from --init-id when run with `--only obj2`.
 # Hardware knobs (env): MICRO, EVAL_BATCH, GRID_CHUNK — see make_config.py.
+# Filter ids (output dir + wandb run name/id): OBJ1_ID, OBJ2_ID; they fail closed if taken.
 # Follow: tail -f $DATA_ROOT/logs/ci_filter.latest.log
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -23,6 +24,8 @@ while [ $# -gt 0 ]; do
 done
 
 RUN_ID=p-ba5a0c05
+OBJ1_ID="${OBJ1_ID:-addsub-05-filter-last-pos}"
+OBJ2_ID="${OBJ2_ID:-addsub-05-filter-integers}"
 STEP=40000
 OUT_ROOT="$DATA_ROOT/runs/$RUN_ID/analysis/ci_filter/step_$STEP"
 CONFIGS="$DATA_ROOT/ci_filter/configs"
@@ -55,7 +58,6 @@ run_stage() {  # <stage> <filter id> [--init-id id]
     --config "$CONFIGS/$stage-$id.yaml" --data_root "$DATA_ROOT" --filter_id "$id")
   echo "=== $stage $id done $(date -Is)"
 }
-new_id() { echo "cf-$(od -vAn -N4 -tx1 /dev/urandom | tr -d ' \n')"; }
 
 if [ "$SMOKE" = 1 ] && [ -z "$ONLY" ]; then
   rm -rf "$OUT_ROOT/cf-smoke"
@@ -63,14 +65,12 @@ if [ "$SMOKE" = 1 ] && [ -z "$ONLY" ]; then
   rm -rf "$OUT_ROOT/cf-smoke"
 fi
 if [ -z "$ONLY" ] || [ "$ONLY" = obj1 ]; then
-  OBJ1_ID="$(new_id)"
   echo "$OBJ1_ID" > "$DATA_ROOT/ci_filter/obj1.id"
   run_stage obj1 "$OBJ1_ID"
   INIT_ID="$OBJ1_ID"
 fi
 if [ -z "$ONLY" ] || [ "$ONLY" = obj2 ]; then
   : "${INIT_ID:?objective 2 needs --init-id, the objective-1 filter id}"
-  OBJ2_ID="$(new_id)"
   echo "$OBJ2_ID" > "$DATA_ROOT/ci_filter/obj2.id"
   run_stage obj2 "$OBJ2_ID" --init-id "$INIT_ID"
 fi

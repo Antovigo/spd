@@ -101,11 +101,11 @@ the first failing stage. What to look for in the log:
   `GRID_CHUNK=500`. Knobs are read when each stage's config is generated
   (`$DATA_ROOT/ci_filter/configs/`).
 
-Restarting a single stage: `./run_pipeline.sh --only obj1`, or
-`./run_pipeline.sh --only obj2 --init-id <objective-1 id>` (ids in `$DATA_ROOT/ci_filter/obj1.id`
-and `obj2.id`). A failed stage leaves its output dir behind; delete it before rerunning with
-the same id (new ids are minted on every launch, so this only matters for `cf-smoke`, which the
-pipeline removes itself).
+The two filters are named `addsub-05-filter-last-pos` and `addsub-05-filter-integers` (output dir
+and wandb run; override with `OBJ1_ID` / `OBJ2_ID`). Restarting a single stage:
+`./run_pipeline.sh --only obj1`, or `./run_pipeline.sh --only obj2 --init-id addsub-05-filter-last-pos`.
+Output dirs fail closed: delete a failed stage's dir (and its wandb run) before rerunning it
+under the same name. The smoke (`cf-smoke`) removes its own dir.
 
 ## 5. Pull the outputs back (from the cluster)
 

@@ -120,7 +120,7 @@ def run_ci_filter(config: CIFilterConfig, data_root: Path, filter_id: str) -> Pa
             },
             resume=False,
             entity=config.wandb.entity,
-            name=f"{run_dir.name}-{config.objective.kind}-{filter_id}",
+            name=filter_id,
             group=run_dir.name,
             tags=[config.objective.kind, config.init.kind],
         )
