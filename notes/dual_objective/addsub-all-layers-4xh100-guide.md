@@ -535,9 +535,10 @@ tail -f ~/out/pod-backup.log
 
 Each hourly pass pulls `metrics.jsonl`, `launch_config.yaml`, the whole `ab_grids/`
 directory, the ladder summary and every log, all of which are small, plus the newest
-COMPLETE checkpoint if it is newer than the one already backed up. Completeness is decided by
-`_CHECKPOINT_METADATA` inside the step directory, which orbax writes at finalize, so a
-checkpoint mid-write is skipped rather than half-copied. `--keep 2` prunes older local
+COMPLETE checkpoint if it is newer than the one already backed up. Completeness is decided by the
+directory NAME being the step number alone: orbax writes into `<step>.orbax-checkpoint-tmp/`
+and renames at finalize. (`_CHECKPOINT_METADATA` is not a completeness signal — orbax writes
+it inside the tmp directory, which is how a mid-write checkpoint got pulled on 2026-09-17.) `--keep 2` prunes older local
 copies. At `save_every 4000` a new checkpoint appears every 8 to 11 hours, so an hourly
 interval mostly transfers a few megabytes and occasionally 53 GB.
 

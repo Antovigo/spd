@@ -16,8 +16,11 @@
 #   * metrics.jsonl, launch_config.yaml, neuron_alignment.json, the ab_grids/ directory, the
 #     ladder summary and every log — all small, every pass
 #   * the newest COMPLETE checkpoint, if it is newer than the newest one already here.
-#     "Complete" = the step directory contains `_CHECKPOINT_METADATA`, which orbax writes at
-#     finalize, so a checkpoint being written right now is skipped rather than half-copied.
+#     "Complete" = the directory is named with the STEP NUMBER ALONE. Orbax writes into
+#     `<step>.orbax-checkpoint-tmp/` and RENAMES at finalize, so the name is the only honest
+#     signal. `_CHECKPOINT_METADATA` is NOT one: orbax writes it inside the tmp directory
+#     before finalizing (observed on p-ba6a0c06 2026-09-17, which is what this guard used to
+#     test and why a mid-write checkpoint got pulled).
 #     53 GB per checkpoint at 32 blocks (MEASURED on p-ba5a0c05: decomposition 10 GB +
 #     training 43 GB); --keep prunes older ones locally, so --keep 2 is ~106 GB.
 #
@@ -85,7 +88,8 @@ pass_once() {
 
   # 2. the newest COMPLETE checkpoint, if we do not already have it.
   local newest have
-  newest=$("${SSH[@]}" "$REMOTE" "for d in $RUN_REMOTE/ckpts/*/; do [ -f \"\$d/_CHECKPOINT_METADATA\" ] && basename \$d; done | sort -n | tail -1" 2>/dev/null || true)
+  # Digits-only basename: skips `<step>.orbax-checkpoint-tmp`, the in-flight save.
+  newest=$("${SSH[@]}" "$REMOTE" "for d in $RUN_REMOTE/ckpts/*/; do b=\$(basename \$d); case \$b in ''|*[!0-9]*) continue;; esac; [ -f \"\$d/_CHECKPOINT_METADATA\" ] && echo \$b; done | sort -n | tail -1" 2>/dev/null || true)
   if [ -z "$newest" ]; then echo "no complete checkpoint on the pod yet"; return 0; fi
   have=$(ls "$OUT/ckpts" 2>/dev/null | sort -n | tail -1 || true)
   if [ "$newest" = "${have:-}" ]; then echo "newest checkpoint $newest already backed up"; return 0; fi
