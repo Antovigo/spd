@@ -2,10 +2,11 @@
 # -05 (`p-ba5a0c05`, the canonical 32-block addsub run) with exactly two recipe changes, and
 # `run_name`. The -05 sota file is left untouched as the reference; this is a separate file,
 # so `PROFILES['4xh100']` in addsub-all-layers/make_trials.py still names the sota and still
-# carries `run_id: p-ba5a0c05`. LAUNCH THIS ONE EXPLICITLY, with a NEW run id — resume
-# byte-compares the pinned config, so reusing -05's id is not an option:
+# carries `run_id: p-ba5a0c05`. LAUNCH THIS ONE EXPLICITLY, with ITS OWN run id — resume
+# byte-compares the pinned config, so reusing -05's id is not an option. The id is
+# `p-ba6a0c06`, the ladder's convention continued (-01..-05 were p-ba1a0c01..p-ba5a0c05):
 #   python -m param_decomp.experiments.lm.run_targeted \
-#     notes/dual_objective/addsub-all-layers-4xh100-06.yaml <data_root> 4 --run_id <new id>
+#     notes/dual_objective/addsub-all-layers-4xh100-06.yaml <data_root> 4 --run_id p-ba6a0c06
 # Guide (pod setup, mesh, monitoring, pulling results): addsub-all-layers-4xh100-guide.md —
 # everything in it applies unchanged except the config path and the run id.
 #
