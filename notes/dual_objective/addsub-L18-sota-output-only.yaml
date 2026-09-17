@@ -1,4 +1,4 @@
-# addsub-L18-24-zerou-perpos-outputonly: `addsub-L18-sota.yaml` (see that file's
+# addsub-L18-24-outputs-only: `addsub-L18-sota.yaml` (see that file's
 # header for the full recipe history) with the hidden pass removed entirely — an
 # OUTPUT-ONLY control for whatever the dual run's hidden-activation reconstruction is
 # suspected of buying.
@@ -17,7 +17,7 @@
 # Nothing else moves: sites, cs, initialization, neuron_ranks, the target-stream output
 # recon terms, the nontarget output recon terms, eval, cadence, target, data, runtime,
 # and wandb are byte-identical to addsub-L18-sota.yaml.
-run_name: addsub-L18-24-zerou-perpos-outputonly
+run_name: addsub-L18-24-outputs-only
 decomposition:
   sites:
     kind: glu_transformer
