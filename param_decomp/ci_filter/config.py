@@ -215,10 +215,17 @@ class CIFilterConfig(BaseConfig):
     CI every consumer reads (training masks, imp-min, evaluations, alive list, grid) is the
     minimum of the trained CI fn's and the STARTING CI's, so the narrower objective can only
     switch components off. The starting CI is the decomposition's CI fn for `init: run`, and the
-    source filter's effective CI for `init: ci_filter` (its CI fn, capped by its own ceilings
+    source filter's effective CI for `init: ci_filter` (its CI fn, capped by its own constraints
     when it had `ci_ceiling`). Each ceiling holds one frozen compute-precision copy of a CI fn
     and costs one extra CI forward (no backward) wherever CI is read. Over the cap only a
     gradient that lowers the CI reaches the trained fn."""
+    prune_dead: bool = False
+    """Remove, before the first step, every component whose STARTING CI (with the start's own
+    constraints) never exceeds `alive_threshold` at any position of any pool prompt: its CI is
+    forced to 0 and its U and V are zeroed, so it cannot come back, and with the weight delta on
+    (PPGD) its weight lies in the delta `W - UV` as if deleted. Removal is inherited: a filter
+    initialized from one that removed components keeps them removed. Shapes are unchanged
+    (removal is by zeroing), so this does not make the step cheaper."""
     pool: ArithmeticPoolConfig = ArithmeticPoolConfig()
     objective: Objective
 
@@ -302,7 +309,12 @@ class PoolEval(BaseConfig):
     alive_set: MaskScores | None = None
     """Every alive component on for every prompt and position (a global mask)."""
     all_on: MaskScores | None = None
-    """Every component on (reference: the decomposition with the delta off)."""
+    """Every component on (reference: the decomposition with the delta off); every KEPT one
+    when components were removed."""
+    n_kept: int | None = None
+    """Components not removed (`prune_dead`, here or upstream); `None` when none were. A
+    `prune_dead` filter logs two step-0 evaluations: before removal (`None`, jsonl only) and
+    after."""
     pgd_recon: float | None = None
     """`PGDEvalConfig`'s adversarial reconstruction KL (final evaluation only; the starting
     CI fn's value is in `eval/pgd_recon.json`)."""

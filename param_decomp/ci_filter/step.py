@@ -6,6 +6,7 @@ are read off the closure. Pool arrays are replicated and gathered in-jit over th
 
 import functools
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import cast
 
 import equinox as eqx
@@ -19,7 +20,7 @@ from jaxtyping import Array, Float, Int, PRNGKeyArray
 from param_decomp.ci_filter.config import CIFilterConfig, CIMaskedRecon
 from param_decomp.ci_filter.objective import objective_rows, row_scores
 from param_decomp.core.ci_fn import CI, PlacedCIFn, ci_for_role, evaluate_ci
-from param_decomp.core.components import ComponentStacks
+from param_decomp.core.components import ComponentStacks, SiteSlots
 from param_decomp.core.decomposed_linear import constrain_component_activation
 from param_decomp.core.losses import importance_minimality_terms, scheduled_value_at
 from param_decomp.core.model import (
@@ -33,9 +34,6 @@ from param_decomp.core.recon_eval import FreshPGDReconEval, fresh_pgd_recon_loss
 from param_decomp.core.run_state import clip_by_global_norm_with_eps, optax_schedule
 
 type Prepared = dict[str, dict[str, Array]]
-type Ceilings = tuple[PlacedCIFn, ...]
-"""Frozen CI fns whose output CI caps the trained one's (`CIFilterConfig.ci_ceiling`),
-compute-precision copies; `()` leaves the CI uncapped."""
 type Trainable = optax.Params
 """The CI fn's floating arrays with `None` elsewhere: the optimized leaves and their grads."""
 
@@ -43,6 +41,23 @@ type Trainable = optax.Params
 def gather_rows(tokens_all: Int[Array, "N T"], idx: Int[Array, " B"]) -> Int[Array, "B T"]:
     """A batch of the replicated pool, sharded over the batch axes. In-jit only."""
     return tokens_all.at[idx].get(out_sharding=P(BATCH_AXES, None))
+
+
+@jax.tree_util.register_dataclass
+@dataclass(frozen=True)
+class CIConstraints:
+    """What bounds the trained CI fn's output CI, applied at every CI read (`output_ci`)."""
+
+    ceilings: tuple[PlacedCIFn, ...]
+    """Frozen compute-precision CI fns whose output CI caps the trained one's entrywise
+    (`CIFilterConfig.ci_ceiling`); `()` leaves the CI uncapped."""
+    kept: dict[str, Array] | None
+    """`{site: (C,)}` 1.0 for a kept component, 0.0 for a removed one, whose CI is forced to 0
+    (`CIFilterConfig.prune_dead`; its U and V are zeroed by `remove_components`); `None` keeps
+    every component."""
+
+
+UNCONSTRAINED = CIConstraints(ceilings=(), kept=None)
 
 
 @jax.custom_vjp
@@ -68,15 +83,16 @@ _capped.defvjp(_capped_fwd, _capped_bwd)
 def output_ci(
     placed: PlacedModel,
     ci_fn: PlacedCIFn,
-    ceilings: Ceilings,
+    constraints: CIConstraints,
     captures: dict[str, Array],
     remat: bool,
 ) -> CI:
     """The output head's CI bundle, capped entrywise by every ceiling's output CI (the
     squashings are monotone, so capping the preactivation, lower and upper CI alike is capping
-    the preactivation), pinned to the placement's component-activation layout."""
+    the preactivation), zero on removed components, pinned to the placement's
+    component-activation layout."""
     ci = ci_for_role(evaluate_ci(ci_fn, captures, remat=remat), "output")
-    for ceiling in ceilings:
+    for ceiling in constraints.ceilings:
         cap = jax.lax.stop_gradient(
             ci_for_role(evaluate_ci(ceiling, captures, remat=False), "output")
         )
@@ -87,11 +103,41 @@ def output_ci(
             lower={k: _capped(v, cap.lower[k]) for k, v in ci.lower.items()},
             upper={k: _capped(v, cap.upper[k]) for k, v in ci.upper.items()},
         )
+    if constraints.kept is not None:
+        kept = constraints.kept
+        ci = CI(
+            preactivations={
+                k: jnp.where(kept[k] > 0, v, jnp.minimum(v, 0.0))
+                for k, v in ci.preactivations.items()
+            },
+            lower={k: v * kept[k].astype(v.dtype) for k, v in ci.lower.items()},
+            upper={k: v * kept[k].astype(v.dtype) for k, v in ci.upper.items()},
+        )
     return CI(
         preactivations=ci.preactivations,
         lower={k: constrain_component_activation(v, placed.placement) for k, v in ci.lower.items()},
         upper={k: constrain_component_activation(v, placed.placement) for k, v in ci.upper.items()},
     )
+
+
+@eqx.filter_jit
+def remove_components(components: ComponentStacks, kept: dict[str, Array]) -> ComponentStacks:
+    """Zero every removed component's V column and U row (`CIConstraints.kept`): it then
+    contributes nothing under any mask, and with the weight delta on its weight lies in the
+    delta `W - UV`, exactly as if the component had been deleted."""
+    stacks = dict(components.stacks)
+    for group, (Vs, Us) in components.stacks.items():
+        slots = _group_slots(components.site_slots, group)
+        assert len(slots) == Vs.shape[0], (group, slots)
+        keep = jnp.stack([kept[name] for name in slots]).astype(Vs.dtype)
+        stacks[group] = (Vs * keep[:, None, :], Us * keep[:, :, None])
+    return ComponentStacks(stacks=stacks, site_slots=components.site_slots)
+
+
+def _group_slots(site_slots: SiteSlots, group: str) -> list[str]:
+    """The group's site names in slot order."""
+    by_slot = {slot: name for name, g, slot in site_slots if g == group}
+    return [by_slot[i] for i in range(len(by_slot))]
 
 
 def count_above(ci_lower: dict[str, Array], threshold: float | Array) -> Array:
@@ -139,7 +185,7 @@ type MicroGrads = Callable[
         PlacedModel,
         Prepared,
         PlacedCIFn,
-        Ceilings,
+        CIConstraints,
         Int[Array, "N T"],
         Int[Array, " B"],
         Int[Array, " K"],
@@ -150,7 +196,7 @@ type MicroGrads = Callable[
 
 
 def make_micro_grads(config: CIFilterConfig) -> MicroGrads:
-    """`(model, prepared, ci_fn, ceilings, pool, idx, answer_ids, train_frac) -> (grads, metrics,
+    """`(model, prepared, ci_fn, constraints, pool, idx, answer_ids, train_frac) -> (grads, metrics,
     schedules)` for one microbatch. The loss and metrics are scaled by `1 / n_microbatches`, so
     summing them over the microbatches gives batch means."""
     objective = config.objective
@@ -164,7 +210,7 @@ def make_micro_grads(config: CIFilterConfig) -> MicroGrads:
         placed: PlacedModel,
         prepared: Prepared,
         ci_fn: PlacedCIFn,
-        ceilings: Ceilings,
+        constraints: CIConstraints,
         tokens_all: Int[Array, "N T"],
         idx: Int[Array, " B"],
         answer_ids: Int[Array, " K"],
@@ -186,7 +232,7 @@ def make_micro_grads(config: CIFilterConfig) -> MicroGrads:
             ci = output_ci(
                 placed,
                 cast(PlacedCIFn, eqx.combine(params, ci_fn)),
-                ceilings,
+                constraints,
                 captures,
                 config.remat,
             )
@@ -236,7 +282,7 @@ def ci_masked_micro_call(
     placed: PlacedModel,
     prepared: Prepared,
     ci_fn: PlacedCIFn,
-    ceilings: Ceilings,
+    constraints: CIConstraints,
     tokens_all: Int[Array, "N T"],
     answer_ids: Int[Array, " K"],
     train_frac: Array,
@@ -250,7 +296,7 @@ def ci_masked_micro_call(
             placed,
             prepared,
             ci_fn,
-            ceilings,
+            constraints,
             tokens_all,
             jnp.asarray(micro_idx),
             answer_ids,
@@ -327,7 +373,7 @@ type EvalBatch = Callable[
         PlacedModel,
         Prepared,
         PlacedCIFn,
-        Ceilings,
+        CIConstraints,
         Int[Array, "N T"],
         Int[Array, " B"],
         Int[Array, " K"],
@@ -348,7 +394,7 @@ def make_eval_batch(config: CIFilterConfig) -> EvalBatch:
         placed: PlacedModel,
         prepared: Prepared,
         ci_fn: PlacedCIFn,
-        ceilings: Ceilings,
+        constraints: CIConstraints,
         tokens_all: Int[Array, "N T"],
         idx: Int[Array, " B"],
         answer_ids: Int[Array, " K"],
@@ -356,7 +402,7 @@ def make_eval_batch(config: CIFilterConfig) -> EvalBatch:
         tokens = gather_rows(tokens_all, idx)
         clean = placed.clean_forward(tokens, capture_keys=ci_fn.capture_keys)
         clean_last = clean.output[:, -1, :]
-        ci = output_ci(placed, ci_fn, ceilings, clean.captures, remat=False)
+        ci = output_ci(placed, ci_fn, constraints, clean.captures, remat=False)
         maskings = {
             "ci": ci.lower,
             "rounded": {k: (v > threshold).astype(COMPUTE_DT) for k, v in ci.lower.items()},
@@ -428,7 +474,7 @@ type PGDEval = Callable[
         PlacedModel,
         Prepared,
         PlacedCIFn,
-        Ceilings,
+        CIConstraints,
         Int[Array, "N T"],
         Int[Array, " B"],
         Int[Array, " K"],
@@ -451,7 +497,7 @@ def make_pgd_eval(config: CIFilterConfig) -> PGDEval:
         placed: PlacedModel,
         prepared: Prepared,
         ci_fn: PlacedCIFn,
-        ceilings: Ceilings,
+        constraints: CIConstraints,
         tokens_all: Int[Array, "N T"],
         idx: Int[Array, " B"],
         answer_ids: Int[Array, " K"],
@@ -460,7 +506,7 @@ def make_pgd_eval(config: CIFilterConfig) -> PGDEval:
         tokens = gather_rows(tokens_all, idx)
         clean = placed.clean_forward(tokens, capture_keys=ci_fn.capture_keys)
         clean_last = clean.output[:, -1, :]
-        ci_lower = output_ci(placed, ci_fn, ceilings, clean.captures, remat=False).lower
+        ci_lower = output_ci(placed, ci_fn, constraints, clean.captures, remat=False).lower
         leading = next(iter(ci_lower.values())).shape[:-1]
 
         def loss_at_masks(masks: dict[str, Array], delta_masks: dict[str, Array]) -> Array:

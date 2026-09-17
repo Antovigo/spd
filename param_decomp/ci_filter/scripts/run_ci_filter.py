@@ -17,7 +17,7 @@ import numpy as np
 import wandb
 from jax.sharding import PartitionSpec as P
 
-from param_decomp.ci_filter.checkpoint import save_ci_fn, starting_ci
+from param_decomp.ci_filter.checkpoint import save_ci_fn, save_kept, starting_ci
 from param_decomp.ci_filter.config import (
     CIFilterConfig,
     CIMaskedRecon,
@@ -34,6 +34,8 @@ from param_decomp.ci_filter.paths import CIFilterOutputs, new_ci_filter_id
 from param_decomp.ci_filter.pool import answer_token_ids, build_pool, load_tokenizer
 from param_decomp.ci_filter.ppgd import PPGDStep, init_adversary
 from param_decomp.ci_filter.step import (
+    CIConstraints,
+    Prepared,
     RowArrays,
     batch_gradients,
     ci_masked_micro_call,
@@ -46,10 +48,12 @@ from param_decomp.ci_filter.step import (
     make_score_fixed_masks,
     pgd_eval_batches,
     prepare_components,
+    remove_components,
     sample_batch,
     trainable,
 )
 from param_decomp.core.ci_fn import PlacedCIFn
+from param_decomp.core.components import ComponentStacks
 from param_decomp.core.log import logger, setup_console_logger
 from param_decomp.core.run_state import optax_schedule
 from param_decomp.experiments.lm.load_run import restore_jax_run
@@ -81,12 +85,18 @@ def _flat_eval(result: PoolEval) -> dict[str, float]:
     """`eval/<masking>/<score>` scalars of a pool evaluation (per-site alive counts stay in
     the jsonl)."""
     out: dict[str, float] = {}
-    for key, value in result.model_dump(exclude={"step", "alive_per_site"}).items():
+    for key, value in result.model_dump(exclude={"step", "alive_per_site", "n_kept"}).items():
         if isinstance(value, dict):
             out |= {f"eval/{key}/{k}": float(v) for k, v in value.items()}
         elif value is not None:
             out[f"eval/{key}"] = float(value)
     return out
+
+
+def _n_kept(constraints: CIConstraints) -> int | None:
+    if constraints.kept is None:
+        return None
+    return int(sum(float(np.asarray(k).sum()) for k in constraints.kept.values()))
 
 
 def _wandb_log(values: dict[str, float], step: int) -> None:
@@ -142,13 +152,25 @@ def run_ci_filter(config: CIFilterConfig, data_root: Path, filter_id: str) -> Pa
         assert size % mesh.size == 0, f"batch {size} must tile the {mesh.size}-device mesh"
 
     with jax.set_mesh(mesh):
-        prepared, v_norms = prepare_components(placed, restored.components)
-        ci_fn, ceilings = starting_ci(config, run_dir, step, restored.ci_fn)
+        ci_fn, constraints = starting_ci(config, run_dir, step, restored.ci_fn)
+        components = restored.components
         del restored
         if isinstance(config.init, InitFromCIFilter):
             source = CIFilterOutputs.for_run(run_dir, step, config.init.id)
             logger.info(f"CI fn initialized from {source.root}")
-        logger.info(f"CI capped by {len(ceilings)} frozen CI fn(s)")
+
+        def prepare(
+            components: ComponentStacks, constraints: CIConstraints
+        ) -> tuple[Prepared, dict[str, jax.Array]]:
+            if constraints.kept is None:
+                return prepare_components(placed, components)
+            return prepare_components(placed, remove_components(components, constraints.kept))
+
+        prepared, v_norms = prepare(components, constraints)
+        logger.info(
+            f"CI capped by {len(constraints.ceilings)} frozen CI fn(s); "
+            f"{_n_kept(constraints)} components kept"
+        )
         tokens_all = jax.sharding.reshard(jnp.asarray(pool.tokens), P())
         answer_ids = jax.sharding.reshard(jnp.asarray(answers), P())
 
@@ -165,7 +187,7 @@ def run_ci_filter(config: CIFilterConfig, data_root: Path, filter_id: str) -> Pa
                         placed,
                         prepared,
                         ci_fn,
-                        ceilings,
+                        constraints,
                         tokens_all,
                         jnp.asarray(idx),
                         answer_ids,
@@ -177,7 +199,7 @@ def run_ci_filter(config: CIFilterConfig, data_root: Path, filter_id: str) -> Pa
             return float(np.mean(values))
 
         def evaluate(
-            at_step: int, ci_fn: PlacedCIFn, references: bool
+            at_step: int, ci_fn: PlacedCIFn, references: bool, log_wandb: bool = True
         ) -> tuple[PoolEval, dict[str, np.ndarray]]:
             t0 = time.time()
             parts: dict[str, list[RowArrays]] = {"ci": [], "rounded": []}
@@ -186,7 +208,7 @@ def run_ci_filter(config: CIFilterConfig, data_root: Path, filter_id: str) -> Pa
             site_max: dict[str, np.ndarray] = {}
             for idx, real in index_batches(pool.n_prompts, config.eval_batch_size):
                 rows, smax, l0 = eval_batch(
-                    placed, prepared, ci_fn, ceilings, tokens_all, jnp.asarray(idx), answer_ids
+                    placed, prepared, ci_fn, constraints, tokens_all, jnp.asarray(idx), answer_ids
                 )
                 for name, r in rows.items():
                     parts[name].append(r)
@@ -219,8 +241,10 @@ def run_ci_filter(config: CIFilterConfig, data_root: Path, filter_id: str) -> Pa
                 all_on=fixed({k: np.ones_like(v) for k, v in alive.items()})
                 if references and at_step == 0
                 else None,
+                n_kept=_n_kept(constraints),
             )
-            _wandb_log(_flat_eval(result), at_step)
+            if log_wandb:
+                _wandb_log(_flat_eval(result), at_step)
             with outputs.pool_evals.open("a") as sink:
                 sink.write(result.model_dump_json() + "\n")
             logger.info(
@@ -231,6 +255,26 @@ def run_ci_filter(config: CIFilterConfig, data_root: Path, filter_id: str) -> Pa
             )
             return result, site_max
 
+        if config.prune_dead:
+            _, start_max = evaluate(0, ci_fn, references=True, log_wandb=False)
+            kept = {
+                site: jax.sharding.reshard(
+                    jnp.asarray(m > config.alive_threshold, jnp.float32), P()
+                )
+                for site, m in start_max.items()
+            }
+            constraints = CIConstraints(ceilings=constraints.ceilings, kept=kept)
+            del prepared, v_norms
+            prepared, v_norms = prepare(components, constraints)
+            logger.info(
+                f"removed the dead components: {_n_kept(constraints)} of "
+                f"{sum(m.size for m in start_max.values())} kept"
+            )
+        if constraints.kept is not None:
+            save_kept(
+                outputs.kept, {site: np.asarray(k) > 0 for site, k in constraints.kept.items()}
+            )
+        del components
         evaluate(0, ci_fn, references=True)
         # The starting CI fn's PGD eval runs up front, so a crash in it surfaces before training.
         # (On a 1x L40 its adversarial backward left too little memory for the training step,
@@ -272,7 +316,7 @@ def run_ci_filter(config: CIFilterConfig, data_root: Path, filter_id: str) -> Pa
                         placed,
                         prepared,
                         ci_fn,
-                        ceilings,
+                        constraints,
                         tokens_all,
                         answer_ids,
                         train_frac,
@@ -286,7 +330,7 @@ def run_ci_filter(config: CIFilterConfig, data_root: Path, filter_id: str) -> Pa
                         placed,
                         prepared,
                         ci_fn,
-                        ceilings,
+                        constraints,
                         tokens_all,
                         idx,
                         answer_ids,
@@ -359,7 +403,7 @@ def run_ci_filter(config: CIFilterConfig, data_root: Path, filter_id: str) -> Pa
                 placed,
                 prepared,
                 ci_fn,
-                ceilings,
+                constraints,
                 v_norms,
                 tokens_all,
                 block,

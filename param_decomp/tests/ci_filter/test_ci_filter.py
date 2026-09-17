@@ -13,7 +13,13 @@ from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 
 from param_decomp.ci_filter.ablation import MASKINGS, ablation_rows
-from param_decomp.ci_filter.checkpoint import restore_ci_fn, save_ci_fn, starting_ci, trained_ci
+from param_decomp.ci_filter.checkpoint import (
+    restore_ci_fn,
+    save_ci_fn,
+    save_kept,
+    starting_ci,
+    trained_ci,
+)
 from param_decomp.ci_filter.config import (
     ArithmeticPoolConfig,
     CIFilterConfig,
@@ -28,6 +34,8 @@ from param_decomp.ci_filter.paths import CIFilterOutputs
 from param_decomp.ci_filter.pool import answer_token_ids, build_pool
 from param_decomp.ci_filter.ppgd import PPGDStep, init_adversary
 from param_decomp.ci_filter.step import (
+    UNCONSTRAINED,
+    CIConstraints,
     _capped,
     batch_gradients,
     ci_masked_micro_call,
@@ -39,6 +47,7 @@ from param_decomp.ci_filter.step import (
     make_pgd_eval,
     make_score_fixed_masks,
     pgd_eval_batches,
+    remove_components,
     sample_batch,
     trainable,
 )
@@ -52,6 +61,7 @@ from param_decomp.core.ci_fn import (
     resolve_ci_placement,
 )
 from param_decomp.core.components import SiteC
+from param_decomp.core.configs import AdamPGDConfig
 from param_decomp.core.init_placed import (
     init_model_component_stacks_placed,
     random_component_initializer,
@@ -228,9 +238,25 @@ def _exercise_placed(tmp_path: Path, mesh: Mesh, sharding: str) -> None:
     micro = mesh.size if mesh.size > 1 else 2
     config = _config(micro)
     with jax.set_mesh(mesh):
-        components = init_model_component_stacks_placed(
+        # Training and every read below run under both constraints: the starting CI fn caps the
+        # trained one (`ci_ceiling`) and every odd component is removed (`prune_dead`).
+        start_ci_fn = ci_fn
+        kept = {s.name: (jnp.arange(s.C) % 2 == 0).astype(jnp.float32) for s in sites}
+        constraints = CIConstraints(ceilings=(cast_floating(ci_fn, COMPUTE_DT),), kept=kept)
+        full_components = init_model_component_stacks_placed(
             placed, jax.random.PRNGKey(1), rules, random_component_initializer
         )
+        components = remove_components(full_components, kept)
+        for site in placed.site_names:
+            V, U = (np.asarray(x) for x in (components.site(site).V, components.site(site).U))
+            full_V, full_U = (
+                np.asarray(x) for x in (full_components.site(site).V, full_components.site(site).U)
+            )
+            np.testing.assert_array_equal(V[:, 1::2], 0.0)
+            np.testing.assert_array_equal(U[1::2], 0.0)
+            np.testing.assert_array_equal(V[:, ::2], full_V[:, ::2])
+            np.testing.assert_array_equal(U[::2], full_U[::2])
+        del full_components
         prepared = prepare_compute_weights(placed, components)
         v_norms = {
             site: jax.sharding.reshard(jnp.linalg.norm(components.site(site).V, axis=0), P())
@@ -239,9 +265,6 @@ def _exercise_placed(tmp_path: Path, mesh: Mesh, sharding: str) -> None:
         tokens_all = jax.sharding.reshard(jnp.asarray(pool.tokens), P())
         answer_ids = jax.sharding.reshard(jnp.asarray(answers), P())
 
-        # The starting CI fn caps the trained one (`ci_ceiling`) through training and the PPGD step.
-        start_ci_fn = ci_fn
-        ceilings = (cast_floating(ci_fn, COMPUTE_DT),)
         optimizer = make_optimizer(config)
         opt_state = optimizer.init(trainable(ci_fn))
         micro_grads = make_micro_grads(config)
@@ -253,7 +276,7 @@ def _exercise_placed(tmp_path: Path, mesh: Mesh, sharding: str) -> None:
             idx = sample_batch(pool.n_prompts, config.batch_size, config.seed, i)
             frac = jnp.float32(i / (config.steps - 1))
             call = ci_masked_micro_call(
-                micro_grads, placed, prepared, ci_fn, ceilings, tokens_all, answer_ids, frac
+                micro_grads, placed, prepared, ci_fn, constraints, tokens_all, answer_ids, frac
             )
             return batch_gradients(call, idx, micro, on_host)
 
@@ -268,8 +291,17 @@ def _exercise_placed(tmp_path: Path, mesh: Mesh, sharding: str) -> None:
             ppgd_config = config.model_copy(
                 update={
                     "microbatch_size": batch // split,
+                    # eps 1e-4: Adam turns a float-noise gradient (removed components'
+                    # neighbours sit near 0) into a full-lr step whose sign depends on the split.
                     "recon": MergedPPGDRecon(
-                        adv_fraction=ScheduleConfig.constant(1e-12), n_warmup_steps=2
+                        adv_fraction=ScheduleConfig.constant(1e-12),
+                        n_warmup_steps=2,
+                        optimizer=AdamPGDConfig(
+                            beta1=0.5,
+                            beta2=0.99,
+                            eps=1e-4,
+                            lr_schedule=ScheduleConfig.constant(0.01),
+                        ),
                     ),
                 }
             )
@@ -277,7 +309,7 @@ def _exercise_placed(tmp_path: Path, mesh: Mesh, sharding: str) -> None:
                 placed,
                 prepared,
                 ci_fn,
-                ceilings,
+                constraints,
                 tokens_all,
                 idx_all,
                 answer_ids,
@@ -332,21 +364,17 @@ def _exercise_placed(tmp_path: Path, mesh: Mesh, sharding: str) -> None:
         eval_idx = jnp.asarray(index_batches(pool.n_prompts, micro)[-1][0])
         eval_batch = make_eval_batch(config)
         rows, site_max, l0 = eval_batch(
-            placed, prepared, ci_fn, ceilings, tokens_all, eval_idx, answer_ids
+            placed, prepared, ci_fn, constraints, tokens_all, eval_idx, answer_ids
         )
+        # The start under its OWN constraints is the ceiling (same jit signature: one compile).
         _, start_max, _ = eval_batch(
-            placed, prepared, start_ci_fn, (), tokens_all, eval_idx, answer_ids
-        )
-        _, uncapped_max, _ = eval_batch(
-            placed, prepared, ci_fn, (), tokens_all, eval_idx, answer_ids
+            placed, prepared, start_ci_fn, constraints, tokens_all, eval_idx, answer_ids
         )
         for site in site_max:
             np.testing.assert_array_less(
                 np.asarray(site_max[site]), np.asarray(start_max[site]) + 1e-6
             )
-            np.testing.assert_array_less(
-                np.asarray(site_max[site]), np.asarray(uncapped_max[site]) + 1e-6
-            )
+            np.testing.assert_array_equal(np.asarray(site_max[site])[1::2], 0.0)
         assert set(rows) == {"ci", "rounded"}
         assert np.asarray(rows["ci"]["kl"]).shape == (micro,)
         assert set(site_max) == set(placed.site_names)
@@ -360,7 +388,7 @@ def _exercise_placed(tmp_path: Path, mesh: Mesh, sharding: str) -> None:
             placed,
             prepared,
             ci_fn,
-            ceilings,
+            constraints,
             tokens_all,
             jnp.asarray(pgd_batches[0]),
             answer_ids,
@@ -369,7 +397,7 @@ def _exercise_placed(tmp_path: Path, mesh: Mesh, sharding: str) -> None:
         assert np.isfinite(float(pgd)) and float(pgd) >= 0.0
         alive = {s.name: (jnp.arange(s.C) % 2).astype(jnp.float32) for s in sites}
         ablations = ablation_rows(
-            placed, prepared, ci_fn, ceilings, alive, tokens_all, eval_idx, 0.01
+            placed, prepared, ci_fn, constraints, alive, tokens_all, eval_idx, 0.01
         )
         assert set(ablations) == set(MASKINGS)
         for reductions in ablations.values():
@@ -384,7 +412,16 @@ def _exercise_placed(tmp_path: Path, mesh: Mesh, sharding: str) -> None:
         # Floor 0 saves every component; each slice's mean CI is its saved columns' mean.
         block = pool.blocks[1]
         slices = collect_operation(
-            placed, prepared, ci_fn, ceilings, v_norms, tokens_all, block, pool.seq_len, micro, 0.0
+            placed,
+            prepared,
+            ci_fn,
+            constraints,
+            v_norms,
+            tokens_all,
+            block,
+            pool.seq_len,
+            micro,
+            0.0,
         )
         assert len(slices.snapshots) == pool.seq_len
         site = placed.site_names[0]
@@ -409,25 +446,32 @@ def _exercise_placed(tmp_path: Path, mesh: Mesh, sharding: str) -> None:
         for a, b in zip(jax.tree.leaves(restored), jax.tree.leaves(ci_fn), strict=True):
             np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
 
-        # Ceiling resolution: a capped objective 1 from the run, then objective 2 from it.
+        # Constraint resolution: a capped, pruned objective 1 from the run, then objective 2
+        # from it (one more ceiling; the removal is inherited).
         run_dir = tmp_path / "run"
         run_ci_fn = _setup(mesh, sharding)[3]
         obj1 = CIFilterOutputs.for_run(run_dir, 0, "obj1")
         obj1.create()
-        obj1_config = config.model_copy(update={"ci_ceiling": True})
+        obj1_config = config.model_copy(update={"ci_ceiling": True, "prune_dead": True})
         obj1_config.to_file(obj1.config)
         save_ci_fn(obj1.ci_fn, ci_fn)
-        assert starting_ci(config, run_dir, 0, run_ci_fn) == (run_ci_fn, ())
+        save_kept(obj1.kept, {site: np.asarray(k) > 0 for site, k in kept.items()})
+        start, unconstrained = starting_ci(config, run_dir, 0, run_ci_fn)
+        assert start is run_ci_fn and unconstrained == UNCONSTRAINED
         start, capped_by = starting_ci(obj1_config, run_dir, 0, run_ci_fn)
-        assert start is run_ci_fn and len(capped_by) == 1
+        assert start is run_ci_fn and len(capped_by.ceilings) == 1 and capped_by.kept is None
         obj2_config = config.model_copy(
             update={"ci_ceiling": True, "init": InitFromCIFilter(id="obj1")}
         )
         trained, inherited = trained_ci(run_dir, 0, "obj1", run_ci_fn)
-        assert len(inherited) == 1
+        assert len(inherited.ceilings) == 1 and inherited.kept is not None
+        for site, k in kept.items():
+            np.testing.assert_array_equal(np.asarray(inherited.kept[site]), np.asarray(k))
         start, capped_by = starting_ci(obj2_config, run_dir, 0, run_ci_fn)
-        assert len(capped_by) == 2
+        assert len(capped_by.ceilings) == 2 and capped_by.kept is not None
         for a, b in zip(jax.tree.leaves(start), jax.tree.leaves(trained), strict=True):
             np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
-        for a, b in zip(jax.tree.leaves(capped_by[1]), jax.tree.leaves(ci_fn), strict=True):
+        for a, b in zip(
+            jax.tree.leaves(capped_by.ceilings[1]), jax.tree.leaves(ci_fn), strict=True
+        ):
             assert a.dtype == COMPUTE_DT or not jnp.issubdtype(b.dtype, jnp.floating)

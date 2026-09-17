@@ -22,7 +22,7 @@ from jaxtyping import Array, Int
 
 from param_decomp.ci_filter.pool import ArithmeticPool, OperationBlock
 from param_decomp.ci_filter.step import (
-    Ceilings,
+    CIConstraints,
     Prepared,
     gather_rows,
     index_batches,
@@ -44,7 +44,7 @@ GATHER_INDEX_MULTIPLE = 64
 def _chunk_ci_sums(
     placed: PlacedModel,
     ci_fn: PlacedCIFn,
-    ceilings: Ceilings,
+    constraints: CIConstraints,
     tokens_all: Int[Array, "N T"],
     idx: Int[Array, " B"],
     n_real: Array,
@@ -52,7 +52,7 @@ def _chunk_ci_sums(
     """`{site: (T, C)}` lower CI summed over the chunk's real rows."""
     tokens = gather_rows(tokens_all, idx)
     clean = placed.clean_forward(tokens, capture_keys=ci_fn.capture_keys)
-    lower = output_ci(placed, ci_fn, ceilings, clean.captures, remat=False).lower
+    lower = output_ci(placed, ci_fn, constraints, clean.captures, remat=False).lower
     real = (jnp.arange(tokens.shape[0]) < n_real)[:, None, None]
     return {
         site: jax.sharding.reshard(jnp.where(real, v.astype(jnp.float32), 0.0).sum(axis=0), P())
@@ -65,7 +65,7 @@ def _chunk_columns(
     placed: PlacedModel,
     prepared: Prepared,
     ci_fn: PlacedCIFn,
-    ceilings: Ceilings,
+    constraints: CIConstraints,
     v_norms: dict[str, Array],
     tokens_all: Int[Array, "N T"],
     idx: Int[Array, " B"],
@@ -77,7 +77,7 @@ def _chunk_columns(
     clean, acts = placed.component_activation_forward(
         prepared, tokens, capture_keys=ci_fn.capture_keys
     )
-    lower = output_ci(placed, ci_fn, ceilings, clean.captures, remat=False).lower
+    lower = output_ci(placed, ci_fn, constraints, clean.captures, remat=False).lower
     out: dict[str, tuple[Array, Array]] = {}
     for site, cols in columns.items():
         ci = lower[site].astype(jnp.float32).at[:, :, cols].get(out_sharding=P())
@@ -98,7 +98,7 @@ def collect_operation(
     placed: PlacedModel,
     prepared: Prepared,
     ci_fn: PlacedCIFn,
-    ceilings: Ceilings,
+    constraints: CIConstraints,
     v_norms: dict[str, Array],
     tokens_all: Int[Array, "N T"],
     block: OperationBlock,
@@ -112,7 +112,7 @@ def collect_operation(
     totals: dict[str, np.ndarray] = {}
     for idx, real in chunks:
         sums = _chunk_ci_sums(
-            placed, ci_fn, ceilings, tokens_all, jnp.asarray(idx), jnp.asarray(real)
+            placed, ci_fn, constraints, tokens_all, jnp.asarray(idx), jnp.asarray(real)
         )
         for site, value in sums.items():
             totals[site] = np.asarray(value) + totals.get(site, 0.0)
@@ -137,7 +137,7 @@ def collect_operation(
                 placed,
                 prepared,
                 ci_fn,
-                ceilings,
+                constraints,
                 v_norms,
                 tokens_all,
                 jnp.asarray(idx),

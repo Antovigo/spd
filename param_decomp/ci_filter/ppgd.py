@@ -23,7 +23,7 @@ from jaxtyping import Array, Int, PRNGKeyArray
 from param_decomp.ci_filter.config import CIFilterConfig, MergedPPGDRecon
 from param_decomp.ci_filter.objective import objective_rows
 from param_decomp.ci_filter.step import (
-    Ceilings,
+    CIConstraints,
     MicroCall,
     Prepared,
     Trainable,
@@ -90,7 +90,7 @@ type WarmupGrads = Callable[
         PlacedModel,
         Prepared,
         PlacedCIFn,
-        Ceilings,
+        CIConstraints,
         Int[Array, "N T"],
         Int[Array, " B"],
         Int[Array, " K"],
@@ -112,7 +112,7 @@ def make_warmup_grads(config: CIFilterConfig) -> WarmupGrads:
         placed: PlacedModel,
         prepared: Prepared,
         ci_fn: PlacedCIFn,
-        ceilings: Ceilings,
+        constraints: CIConstraints,
         tokens_all: Int[Array, "N T"],
         idx: Int[Array, " B"],
         answer_ids: Int[Array, " K"],
@@ -122,7 +122,7 @@ def make_warmup_grads(config: CIFilterConfig) -> WarmupGrads:
         clean = placed.clean_forward(tokens, capture_keys=ci_fn.capture_keys)
         clean_last = jax.lax.stop_gradient(clean.output[:, -1, :])
         lower = jax.lax.stop_gradient(
-            output_ci(placed, ci_fn, ceilings, clean.captures, remat=False).lower
+            output_ci(placed, ci_fn, constraints, clean.captures, remat=False).lower
         )
 
         def score(sources: Sources) -> Array:
@@ -145,7 +145,7 @@ type PPGDMicroGrads = Callable[
         PlacedModel,
         Prepared,
         PlacedCIFn,
-        Ceilings,
+        CIConstraints,
         Int[Array, "N T"],
         Int[Array, " B"],
         Int[Array, " K"],
@@ -171,7 +171,7 @@ def make_ppgd_micro_grads(config: CIFilterConfig) -> PPGDMicroGrads:
         placed: PlacedModel,
         prepared: Prepared,
         ci_fn: PlacedCIFn,
-        ceilings: Ceilings,
+        constraints: CIConstraints,
         tokens_all: Int[Array, "N T"],
         idx: Int[Array, " B"],
         answer_ids: Int[Array, " K"],
@@ -198,7 +198,7 @@ def make_ppgd_micro_grads(config: CIFilterConfig) -> PPGDMicroGrads:
             ci = output_ci(
                 placed,
                 cast(PlacedCIFn, eqx.combine(params, ci_fn)),
-                ceilings,
+                constraints,
                 captures,
                 config.remat,
             )
@@ -284,7 +284,7 @@ class PPGDStep:
         placed: PlacedModel,
         prepared: Prepared,
         ci_fn: PlacedCIFn,
-        ceilings: Ceilings,
+        constraints: CIConstraints,
         tokens_all: Int[Array, "N T"],
         idx: np.ndarray,
         answer_ids: Int[Array, " K"],
@@ -303,7 +303,7 @@ class PPGDStep:
                     placed,
                     prepared,
                     ci_fn,
-                    ceilings,
+                    constraints,
                     tokens_all,
                     jnp.asarray(idx[start : start + microbatch_size]),
                     answer_ids,
@@ -323,7 +323,7 @@ class PPGDStep:
                 placed,
                 prepared,
                 ci_fn,
-                ceilings,
+                constraints,
                 tokens_all,
                 jnp.asarray(micro_idx),
                 answer_ids,

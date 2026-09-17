@@ -17,7 +17,7 @@ from jax.sharding import PartitionSpec as P
 from jaxtyping import Array, Float, Int
 
 from param_decomp.ci_filter.objective import kl_rows
-from param_decomp.ci_filter.step import Ceilings, Prepared, gather_rows, output_ci
+from param_decomp.ci_filter.step import CIConstraints, Prepared, gather_rows, output_ci
 from param_decomp.core.ci_fn import PlacedCIFn
 from param_decomp.core.model import MaterializedMasking, PlacedModel
 from param_decomp.core.precision import COMPUTE_DT
@@ -30,7 +30,7 @@ def ablation_rows(
     placed: PlacedModel,
     prepared: Prepared,
     ci_fn: PlacedCIFn,
-    ceilings: Ceilings,
+    constraints: CIConstraints,
     alive: dict[str, Float[Array, " C"]],
     tokens_all: Int[Array, "N T"],
     idx: Int[Array, " B"],
@@ -39,7 +39,7 @@ def ablation_rows(
     """`{masking: {"last": (B,), "all_positions": (B,)}}` KLs, replicated."""
     tokens = gather_rows(tokens_all, idx)
     clean = placed.clean_forward(tokens, capture_keys=ci_fn.capture_keys)
-    lower = output_ci(placed, ci_fn, ceilings, clean.captures, remat=False).lower
+    lower = output_ci(placed, ci_fn, constraints, clean.captures, remat=False).lower
     rounded = {k: (v > threshold).astype(COMPUTE_DT) for k, v in lower.items()}
     fixed = {k: v[None, None, :].astype(COMPUTE_DT) for k, v in alive.items()}
     maskings = {
