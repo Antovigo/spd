@@ -29,6 +29,7 @@ from param_decomp.ci_filter.config import (
     ArithmeticPoolConfig,
     CIFilterConfig,
     InitFromCIFilter,
+    LastPositionAnswerCE,
     LastPositionIntegerKL,
     MergedPPGDRecon,
     PGDEvalConfig,
@@ -123,17 +124,34 @@ def test_kl_rows_and_restricted_objective() -> None:
     # The restricted KL ignores every logit outside the answer set...
     moved = masked.at[:, 50].add(100.0)
     objective = LastPositionIntegerKL()
-    a = objective_rows(objective, masked, clean, ids)
-    b = objective_rows(objective, moved, clean, ids)
+    targets = jnp.asarray([0, 1, 3])
+    a = objective_rows(objective, masked, clean, ids, targets)
+    b = objective_rows(objective, moved, clean, ids, targets)
     np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=1e-5)
     # ...and is invariant to a shared shift of the answer logits (renormalization).
     shifted = masked.at[:, ids].add(3.0)
     np.testing.assert_allclose(
-        np.asarray(objective_rows(objective, shifted, clean, ids)), np.asarray(a), rtol=1e-4
+        np.asarray(objective_rows(objective, shifted, clean, ids, targets)),
+        np.asarray(a),
+        rtol=1e-4,
     )
-    scores = row_scores(masked, clean, ids)
+    scores = row_scores(masked, clean, ids, targets)
     assert scores.kl.shape == scores.integer_kl.shape == (3,)
-    assert bool(jnp.all(row_scores(clean, clean, ids).integer_top1))
+
+    # The answer CE is the restricted, renormalized negative log-probability of the TRUE answer
+    # (it ignores the clean model entirely) and its argmax defines `correct`.
+    ce = objective_rows(LastPositionAnswerCE(), masked, clean, ids, targets)
+    logp = jax.nn.log_softmax(np.asarray(masked)[:, np.asarray(ids)], axis=-1)
+    np.testing.assert_allclose(
+        np.asarray(ce), -logp[np.arange(3), np.asarray(targets)], rtol=1e-5, atol=1e-6
+    )
+    np.testing.assert_allclose(np.asarray(scores.answer_ce), np.asarray(ce), rtol=1e-5, atol=1e-6)
+    np.testing.assert_array_equal(
+        np.asarray(scores.correct), logp.argmax(axis=-1) == np.asarray(targets)
+    )
+    unchanged = objective_rows(LastPositionAnswerCE(), masked, moved, ids, targets)
+    np.testing.assert_allclose(np.asarray(unchanged), np.asarray(ce), rtol=1e-6)
+    assert bool(jnp.all(row_scores(clean, clean, ids, targets).integer_top1))
 
 
 def test_pool_blocks_labels_and_answer_tokens() -> None:
@@ -170,14 +188,18 @@ def test_batch_indexing() -> None:
     assert idx.tolist() == sample_batch(20, 8, seed=0, step=3).tolist()
 
 
-@pytest.mark.parametrize("name", ["last_position_kl.yaml", "last_position_integer_kl.yaml"])
+@pytest.mark.parametrize(
+    "name",
+    ["last_position_kl.yaml", "last_position_integer_kl.yaml", "last_position_answer_ce.yaml"],
+)
 def test_template_configs_parse(name: str, tmp_path: Path) -> None:
     config = CIFilterConfig.from_file(CONFIGS / name)
     assert config.n_microbatches == 1
     config.to_file(tmp_path / name)
     assert CIFilterConfig.from_file(tmp_path / name) == config
-    if name == "last_position_integer_kl.yaml":
+    if name != "last_position_kl.yaml":
         assert isinstance(config.init, InitFromCIFilter)
+    assert config.ci_ceiling == config.prune_dead == (name == "last_position_answer_ce.yaml")
 
 
 # ------------------------------------ placed run ------------------------------------
@@ -269,6 +291,8 @@ def _exercise_placed(tmp_path: Path, mesh: Mesh, sharding: str) -> None:
         }
         tokens_all = jax.sharding.reshard(jnp.asarray(pool.tokens), P())
         answer_ids = jax.sharding.reshard(jnp.asarray(answers), P())
+        targets = answer_targets(pool, FakeTokenizer(), answers)
+        target_all = jax.sharding.reshard(jnp.asarray(targets.indices), P())
 
         optimizer = make_optimizer(config)
         opt_state = optimizer.init(trainable(ci_fn))
@@ -281,7 +305,15 @@ def _exercise_placed(tmp_path: Path, mesh: Mesh, sharding: str) -> None:
             idx = sample_batch(pool.n_prompts, config.batch_size, config.seed, i)
             frac = jnp.float32(i / (config.steps - 1))
             call = ci_masked_micro_call(
-                micro_grads, placed, prepared, ci_fn, constraints, tokens_all, answer_ids, frac
+                micro_grads,
+                placed,
+                prepared,
+                ci_fn,
+                constraints,
+                tokens_all,
+                answer_ids,
+                target_all,
+                frac,
             )
             return batch_gradients(call, idx, micro, on_host)
 
@@ -318,6 +350,7 @@ def _exercise_placed(tmp_path: Path, mesh: Mesh, sharding: str) -> None:
                 tokens_all,
                 idx_all,
                 answer_ids,
+                target_all,
                 jnp.float32(0.5),
                 start,
                 jax.random.PRNGKey(6),
@@ -369,11 +402,11 @@ def _exercise_placed(tmp_path: Path, mesh: Mesh, sharding: str) -> None:
         eval_idx = jnp.asarray(index_batches(pool.n_prompts, micro)[-1][0])
         eval_batch = make_eval_batch(config)
         rows, site_max, l0 = eval_batch(
-            placed, prepared, ci_fn, constraints, tokens_all, eval_idx, answer_ids
+            placed, prepared, ci_fn, constraints, tokens_all, eval_idx, answer_ids, target_all
         )
         # The start under its OWN constraints is the ceiling (same jit signature: one compile).
         _, start_max, _ = eval_batch(
-            placed, prepared, start_ci_fn, constraints, tokens_all, eval_idx, answer_ids
+            placed, prepared, start_ci_fn, constraints, tokens_all, eval_idx, answer_ids, target_all
         )
         for site in site_max:
             np.testing.assert_array_less(
@@ -397,6 +430,7 @@ def _exercise_placed(tmp_path: Path, mesh: Mesh, sharding: str) -> None:
             tokens_all,
             jnp.asarray(pgd_batches[0]),
             answer_ids,
+            target_all,
             jax.random.PRNGKey(0),
         )
         assert np.isfinite(float(pgd)) and float(pgd) >= 0.0
@@ -410,16 +444,14 @@ def _exercise_placed(tmp_path: Path, mesh: Mesh, sharding: str) -> None:
             assert np.all(np.asarray(reductions["all_positions"]) >= -1e-6)
         on = {s.name: jnp.ones(s.C, jnp.float32) for s in sites}
         scored = make_score_fixed_masks(config)(
-            placed, prepared, on, tokens_all, eval_idx, answer_ids
+            placed, prepared, on, tokens_all, eval_idx, answer_ids, target_all
         )
         assert np.all(np.asarray(scored["kl"]) >= -1e-6)
 
         # Attribution: the first-order effect predicts a SMALL real mask change (the gradient
         # check that makes the screen meaningful), and ablating a component is its keep vector.
-        targets = answer_targets(pool, FakeTokenizer(), answers)
         assert targets.values.shape == (pool.n_prompts,)
         assert np.array_equal(answers[targets.indices], targets.token_ids)
-        target_all = jnp.asarray(targets.indices)
         rows = make_attribution_batch(False)(
             placed, prepared, ci_fn, constraints, tokens_all, eval_idx, answer_ids, target_all
         )

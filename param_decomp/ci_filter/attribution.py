@@ -24,7 +24,7 @@ import numpy as np
 from jax.sharding import PartitionSpec as P
 from jaxtyping import Array, Float, Int
 
-from param_decomp.ci_filter.objective import restrict
+from param_decomp.ci_filter.objective import answer_logprob_rows, restrict
 from param_decomp.ci_filter.pool import ArithmeticPool, Tokenizer
 from param_decomp.ci_filter.step import CIConstraints, Prepared, gather_rows, output_ci
 from param_decomp.core.ci_fn import PlacedCIFn
@@ -66,14 +66,6 @@ def answer_targets(pool: ArithmeticPool, tokenizer: Tokenizer, answer_ids: np.nd
         f"e.g. {token_ids[~found][:5].tolist()}"
     )
     return Targets(values=np.asarray(values), token_ids=token_ids, indices=indices)
-
-
-def _target_logprob(
-    logits: Float[Array, "B vocab"], answer_ids: Int[Array, " K"], target_idx: Int[Array, " B"]
-) -> Float[Array, " B"]:
-    """`log p(correct answer)` under the answer-restricted, renormalized distribution."""
-    logp = jax.nn.log_softmax(restrict(logits, answer_ids).astype(jnp.float32), axis=-1)
-    return jnp.take_along_axis(logp, target_idx[:, None], axis=1)[:, 0]
 
 
 class AttributionRows(eqx.Module):
@@ -132,7 +124,7 @@ def make_attribution_batch(remat: bool) -> AttributionBatch:
             logits = placed.masked_forward(
                 prepared, tokens, masking=MaterializedMasking(component_masks=masks), remat=remat
             ).output[:, -1, :]
-            return _target_logprob(logits, answer_ids, target_idx)
+            return answer_logprob_rows(logits, answer_ids, target_idx)
 
         score, pullback = jax.vjp(score_of, masks)
         (grads,) = pullback(jnp.ones_like(score))
@@ -143,7 +135,7 @@ def make_attribution_batch(remat: bool) -> AttributionBatch:
         clean_restricted = restrict(clean.output[:, -1, :], answer_ids)
         rows = {
             "score": score,
-            "clean_score": _target_logprob(clean.output[:, -1, :], answer_ids, target_idx),
+            "clean_score": answer_logprob_rows(clean.output[:, -1, :], answer_ids, target_idx),
             "correct": (jnp.argmax(restricted, axis=-1) == target_idx).astype(jnp.float32),
             "clean_correct": (jnp.argmax(clean_restricted, axis=-1) == target_idx).astype(
                 jnp.float32
@@ -207,7 +199,7 @@ def make_ablation_scores() -> AblationScores:
         logits = placed.masked_forward(
             prepared, tokens, masking=MaterializedMasking(component_masks=masked), remat=False
         ).output[:, -1, :]
-        score = _target_logprob(logits, answer_ids, target_idx)
+        score = answer_logprob_rows(logits, answer_ids, target_idx)
         correct = (jnp.argmax(restrict(logits, answer_ids), axis=-1) == target_idx).astype(
             jnp.float32
         )

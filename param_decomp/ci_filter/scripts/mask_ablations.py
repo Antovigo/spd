@@ -62,6 +62,7 @@ def mask_ablations(config: CIFilterConfig, data_root: Path, source: str) -> Path
         del components
         tokens_all = jax.sharding.reshard(jnp.asarray(pool.tokens), P())
         answer_ids = jax.sharding.reshard(jnp.asarray(np.zeros(1, np.int32)), P())
+        targets = jax.sharding.reshard(jnp.zeros(pool.n_prompts, jnp.int32), P())
         batches = index_batches(pool.n_prompts, config.eval_batch_size)
 
         t0 = time.time()
@@ -69,7 +70,14 @@ def mask_ablations(config: CIFilterConfig, data_root: Path, source: str) -> Path
         site_max: dict[str, np.ndarray] = {}
         for idx, _ in batches:
             _, smax, _ = eval_batch(
-                placed, prepared, ci_fn, constraints, tokens_all, jnp.asarray(idx), answer_ids
+                placed,
+                prepared,
+                ci_fn,
+                constraints,
+                tokens_all,
+                jnp.asarray(idx),
+                answer_ids,
+                targets,
             )
             for site, v in smax.items():
                 site_max[site] = np.maximum(site_max.get(site, 0.0), np.asarray(v))

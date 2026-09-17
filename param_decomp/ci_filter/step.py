@@ -189,6 +189,7 @@ type MicroGrads = Callable[
         Int[Array, "N T"],
         Int[Array, " B"],
         Int[Array, " K"],
+        Int[Array, " N"],
         Array,
     ],
     tuple[Trainable, dict[str, Array], dict[str, Array]],
@@ -196,7 +197,7 @@ type MicroGrads = Callable[
 
 
 def make_micro_grads(config: CIFilterConfig) -> MicroGrads:
-    """`(model, prepared, ci_fn, constraints, pool, idx, answer_ids, train_frac) -> (grads, metrics,
+    """`(model, prepared, ci_fn, constraints, pool, idx, answer_ids, targets, train_frac) -> (grads, metrics,
     schedules)` for one microbatch. The loss and metrics are scaled by `1 / n_microbatches`, so
     summing them over the microbatches gives batch means."""
     objective = config.objective
@@ -214,9 +215,11 @@ def make_micro_grads(config: CIFilterConfig) -> MicroGrads:
         tokens_all: Int[Array, "N T"],
         idx: Int[Array, " B"],
         answer_ids: Int[Array, " K"],
+        targets: Int[Array, " N"],
         train_frac: Array,
     ) -> tuple[Trainable, dict[str, Array], dict[str, Array]]:
         tokens = gather_rows(tokens_all, idx)
+        target_idx = targets[idx]
         clean = placed.clean_forward(tokens, capture_keys=ci_fn.capture_keys)
         clean_last = jax.lax.stop_gradient(clean.output[:, -1, :])
         captures = jax.lax.stop_gradient(clean.captures)
@@ -242,7 +245,9 @@ def make_micro_grads(config: CIFilterConfig) -> MicroGrads:
                 masking=MaterializedMasking(component_masks=ci.lower),
                 remat=config.remat,
             ).output[:, -1, :]
-            recon = jnp.mean(objective_rows(objective, masked_last, clean_last, answer_ids))
+            recon = jnp.mean(
+                objective_rows(objective, masked_last, clean_last, answer_ids, target_idx)
+            )
             activity, freq = importance_minimality_terms(
                 ci.upper,
                 gamma,
@@ -285,6 +290,7 @@ def ci_masked_micro_call(
     constraints: CIConstraints,
     tokens_all: Int[Array, "N T"],
     answer_ids: Int[Array, " K"],
+    targets: Int[Array, " N"],
     train_frac: Array,
 ) -> MicroCall:
     """The deterministic CI-masked step's microbatch call for `batch_gradients`."""
@@ -300,6 +306,7 @@ def ci_masked_micro_call(
             tokens_all,
             jnp.asarray(micro_idx),
             answer_ids,
+            targets,
             train_frac,
         )
 
@@ -362,8 +369,9 @@ def _replicated_rows(
     masked_last: Float[Array, "B vocab"],
     clean_last: Float[Array, "B vocab"],
     answer_ids: Int[Array, " K"],
+    target_idx: Int[Array, " B"],
 ) -> RowArrays:
-    scores = row_scores(masked_last, clean_last, answer_ids)
+    scores = row_scores(masked_last, clean_last, answer_ids, target_idx)
     rows = {**scores._asdict(), "objective": objective_value}
     return {k: jax.sharding.reshard(v, P()) for k, v in rows.items()}
 
@@ -377,6 +385,7 @@ type EvalBatch = Callable[
         Int[Array, "N T"],
         Int[Array, " B"],
         Int[Array, " K"],
+        Int[Array, " N"],
     ],
     tuple[dict[str, RowArrays], dict[str, Array], dict[str, Array]],
 ]
@@ -398,8 +407,10 @@ def make_eval_batch(config: CIFilterConfig) -> EvalBatch:
         tokens_all: Int[Array, "N T"],
         idx: Int[Array, " B"],
         answer_ids: Int[Array, " K"],
+        targets: Int[Array, " N"],
     ) -> tuple[dict[str, RowArrays], dict[str, Array], dict[str, Array]]:
         tokens = gather_rows(tokens_all, idx)
+        target_idx = targets[idx]
         clean = placed.clean_forward(tokens, capture_keys=ci_fn.capture_keys)
         clean_last = clean.output[:, -1, :]
         ci = output_ci(placed, ci_fn, constraints, clean.captures, remat=False)
@@ -412,8 +423,8 @@ def make_eval_batch(config: CIFilterConfig) -> EvalBatch:
             masked_last = placed.masked_forward(
                 prepared, tokens, masking=MaterializedMasking(component_masks=masks), remat=False
             ).output[:, -1, :]
-            value = objective_rows(objective, masked_last, clean_last, answer_ids)
-            rows[name] = _replicated_rows(value, masked_last, clean_last, answer_ids)
+            value = objective_rows(objective, masked_last, clean_last, answer_ids, target_idx)
+            rows[name] = _replicated_rows(value, masked_last, clean_last, answer_ids, target_idx)
         site_max = {
             k: jax.sharding.reshard(jnp.max(v.astype(jnp.float32), axis=(0, 1)), P())
             for k, v in ci.lower.items()
@@ -439,6 +450,7 @@ type ScoreFixedMasks = Callable[
         Int[Array, "N T"],
         Int[Array, " B"],
         Int[Array, " K"],
+        Int[Array, " N"],
     ],
     RowArrays,
 ]
@@ -456,15 +468,17 @@ def make_score_fixed_masks(config: CIFilterConfig) -> ScoreFixedMasks:
         tokens_all: Int[Array, "N T"],
         idx: Int[Array, " B"],
         answer_ids: Int[Array, " K"],
+        targets: Int[Array, " N"],
     ) -> RowArrays:
         tokens = gather_rows(tokens_all, idx)
+        target_idx = targets[idx]
         clean_last = placed.clean_forward(tokens).output[:, -1, :]
         broadcast = {k: v[None, None, :].astype(COMPUTE_DT) for k, v in masks.items()}
         masked_last = placed.masked_forward(
             prepared, tokens, masking=MaterializedMasking(component_masks=broadcast), remat=False
         ).output[:, -1, :]
-        value = objective_rows(objective, masked_last, clean_last, answer_ids)
-        return _replicated_rows(value, masked_last, clean_last, answer_ids)
+        value = objective_rows(objective, masked_last, clean_last, answer_ids, target_idx)
+        return _replicated_rows(value, masked_last, clean_last, answer_ids, target_idx)
 
     return score
 
@@ -478,6 +492,7 @@ type PGDEval = Callable[
         Int[Array, "N T"],
         Int[Array, " B"],
         Int[Array, " K"],
+        Int[Array, " N"],
         PRNGKeyArray,
     ],
     Array,
@@ -501,9 +516,11 @@ def make_pgd_eval(config: CIFilterConfig) -> PGDEval:
         tokens_all: Int[Array, "N T"],
         idx: Int[Array, " B"],
         answer_ids: Int[Array, " K"],
+        targets: Int[Array, " N"],
         key: PRNGKeyArray,
     ) -> Array:
         tokens = gather_rows(tokens_all, idx)
+        target_idx = targets[idx]
         clean = placed.clean_forward(tokens, capture_keys=ci_fn.capture_keys)
         clean_last = clean.output[:, -1, :]
         ci_lower = output_ci(placed, ci_fn, constraints, clean.captures, remat=False).lower
@@ -516,7 +533,9 @@ def make_pgd_eval(config: CIFilterConfig) -> PGDEval:
                 masking=MaterializedMasking(component_masks=masks, weight_delta_masks=delta_masks),
                 remat=config.remat,
             ).output[:, -1, :]
-            return jnp.mean(objective_rows(objective, masked_last, clean_last, answer_ids))
+            return jnp.mean(
+                objective_rows(objective, masked_last, clean_last, answer_ids, target_idx)
+            )
 
         return fresh_pgd_recon_loss(placed.sites, ci_lower, leading, key, probe, loss_at_masks)
 

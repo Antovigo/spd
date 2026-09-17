@@ -94,6 +94,7 @@ type WarmupGrads = Callable[
         Int[Array, "N T"],
         Int[Array, " B"],
         Int[Array, " K"],
+        Int[Array, " N"],
         Sources,
     ],
     Sources,
@@ -116,9 +117,11 @@ def make_warmup_grads(config: CIFilterConfig) -> WarmupGrads:
         tokens_all: Int[Array, "N T"],
         idx: Int[Array, " B"],
         answer_ids: Int[Array, " K"],
+        targets: Int[Array, " N"],
         sources: Sources,
     ) -> Sources:
         tokens = gather_rows(tokens_all, idx)
+        target_idx = targets[idx]
         clean = placed.clean_forward(tokens, capture_keys=ci_fn.capture_keys)
         clean_last = jax.lax.stop_gradient(clean.output[:, -1, :])
         lower = jax.lax.stop_gradient(
@@ -133,7 +136,9 @@ def make_warmup_grads(config: CIFilterConfig) -> WarmupGrads:
                 masking=MaterializedMasking(component_masks=masks, weight_delta_masks=delta_masks),
                 remat=config.remat,
             ).output[:, -1, :]
-            return scale * jnp.mean(objective_rows(objective, masked_last, clean_last, answer_ids))
+            return scale * jnp.mean(
+                objective_rows(objective, masked_last, clean_last, answer_ids, target_idx)
+            )
 
         return jax.grad(score)(sources)
 
@@ -149,6 +154,7 @@ type PPGDMicroGrads = Callable[
         Int[Array, "N T"],
         Int[Array, " B"],
         Int[Array, " K"],
+        Int[Array, " N"],
         Array,
         Sources,
         PRNGKeyArray,
@@ -175,11 +181,13 @@ def make_ppgd_micro_grads(config: CIFilterConfig) -> PPGDMicroGrads:
         tokens_all: Int[Array, "N T"],
         idx: Int[Array, " B"],
         answer_ids: Int[Array, " K"],
+        targets: Int[Array, " N"],
         train_frac: Array,
         sources: Sources,
         key: PRNGKeyArray,
     ) -> tuple[Trainable, Sources, dict[str, Array], dict[str, Array]]:
         tokens = gather_rows(tokens_all, idx)
+        target_idx = targets[idx]
         clean = placed.clean_forward(tokens, capture_keys=ci_fn.capture_keys)
         clean_last = jax.lax.stop_gradient(clean.output[:, -1, :])
         captures = jax.lax.stop_gradient(clean.captures)
@@ -213,7 +221,9 @@ def make_ppgd_micro_grads(config: CIFilterConfig) -> PPGDMicroGrads:
                 ),
                 remat=config.remat,
             ).output[:, -1, :]
-            recon_value = jnp.mean(objective_rows(objective, masked_last, clean_last, answer_ids))
+            recon_value = jnp.mean(
+                objective_rows(objective, masked_last, clean_last, answer_ids, target_idx)
+            )
             activity, freq = importance_minimality_terms(
                 ci.upper,
                 gamma,
@@ -288,6 +298,7 @@ class PPGDStep:
         tokens_all: Int[Array, "N T"],
         idx: np.ndarray,
         answer_ids: Int[Array, " K"],
+        targets: Int[Array, " N"],
         train_frac: Array,
         adversary: Adversary,
         key: PRNGKeyArray,
@@ -307,6 +318,7 @@ class PPGDStep:
                     tokens_all,
                     jnp.asarray(idx[start : start + microbatch_size]),
                     answer_ids,
+                    targets,
                     _rows(adversary.sources, start, start + microbatch_size),
                 )
                 for start in starts
@@ -327,6 +339,7 @@ class PPGDStep:
                 tokens_all,
                 jnp.asarray(micro_idx),
                 answer_ids,
+                targets,
                 train_frac,
                 _rows(adversary.sources, start, start + microbatch_size),
                 random.fold_in(key, k),

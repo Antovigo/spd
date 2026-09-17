@@ -17,11 +17,13 @@ import numpy as np
 import wandb
 from jax.sharding import PartitionSpec as P
 
+from param_decomp.ci_filter.attribution import answer_targets
 from param_decomp.ci_filter.checkpoint import save_ci_fn, save_kept, starting_ci
 from param_decomp.ci_filter.config import (
     CIFilterConfig,
     CIMaskedRecon,
     InitFromCIFilter,
+    LastPositionAnswerCE,
     LastPositionIntegerKL,
     LastPositionKL,
     MaskScores,
@@ -68,6 +70,8 @@ def _mask_scores(rows: dict[str, np.ndarray]) -> MaskScores:
         integer_kl=float(rows["integer_kl"].mean()),
         top1=float(rows["top1"].mean()),
         integer_top1=float(rows["integer_top1"].mean()),
+        answer_ce=float(rows["answer_ce"].mean()),
+        accuracy=float(rows["correct"].mean()),
         max_prompt_objective=float(rows["objective"].max()),
     )
 
@@ -140,10 +144,11 @@ def run_ci_filter(config: CIFilterConfig, data_root: Path, filter_id: str) -> Pa
     pool = build_pool(config.pool, tokenizer)
     include_minus = (
         config.objective.include_minus
-        if isinstance(config.objective, LastPositionIntegerKL)
+        if isinstance(config.objective, LastPositionIntegerKL | LastPositionAnswerCE)
         else True
     )
     answers = answer_token_ids(tokenizer, include_minus)
+    targets = answer_targets(pool, tokenizer, answers)
     logger.info(
         f"pool {pool.tokens.shape} ({[b.operation for b in pool.blocks]}), "
         f"{answers.size} answer tokens, objective {config.objective.kind}"
@@ -173,6 +178,7 @@ def run_ci_filter(config: CIFilterConfig, data_root: Path, filter_id: str) -> Pa
         )
         tokens_all = jax.sharding.reshard(jnp.asarray(pool.tokens), P())
         answer_ids = jax.sharding.reshard(jnp.asarray(answers), P())
+        target_all = jax.sharding.reshard(jnp.asarray(targets.indices), P())
 
         eval_batch = make_eval_batch(config)
         score_fixed = make_score_fixed_masks(config)
@@ -191,6 +197,7 @@ def run_ci_filter(config: CIFilterConfig, data_root: Path, filter_id: str) -> Pa
                         tokens_all,
                         jnp.asarray(idx),
                         answer_ids,
+                        target_all,
                         jax.random.fold_in(key, b),
                     )
                 )
@@ -208,7 +215,14 @@ def run_ci_filter(config: CIFilterConfig, data_root: Path, filter_id: str) -> Pa
             site_max: dict[str, np.ndarray] = {}
             for idx, real in index_batches(pool.n_prompts, config.eval_batch_size):
                 rows, smax, l0 = eval_batch(
-                    placed, prepared, ci_fn, constraints, tokens_all, jnp.asarray(idx), answer_ids
+                    placed,
+                    prepared,
+                    ci_fn,
+                    constraints,
+                    tokens_all,
+                    jnp.asarray(idx),
+                    answer_ids,
+                    target_all,
                 )
                 for name, r in rows.items():
                     parts[name].append(r)
@@ -222,7 +236,13 @@ def run_ci_filter(config: CIFilterConfig, data_root: Path, filter_id: str) -> Pa
                 device_masks = {k: jnp.asarray(v, jnp.float32) for k, v in masks.items()}
                 fixed_parts = [
                     score_fixed(
-                        placed, prepared, device_masks, tokens_all, jnp.asarray(idx), answer_ids
+                        placed,
+                        prepared,
+                        device_masks,
+                        tokens_all,
+                        jnp.asarray(idx),
+                        answer_ids,
+                        target_all,
                     )
                     for idx, _ in index_batches(pool.n_prompts, config.eval_batch_size)
                 ]
@@ -319,6 +339,7 @@ def run_ci_filter(config: CIFilterConfig, data_root: Path, filter_id: str) -> Pa
                         constraints,
                         tokens_all,
                         answer_ids,
+                        target_all,
                         train_frac,
                     )
                     grads, metrics, schedules = batch_gradients(
@@ -334,6 +355,7 @@ def run_ci_filter(config: CIFilterConfig, data_root: Path, filter_id: str) -> Pa
                         tokens_all,
                         idx,
                         answer_ids,
+                        target_all,
                         train_frac,
                         adversary,
                         jax.random.fold_in(step_key, i),
@@ -396,6 +418,8 @@ def run_ci_filter(config: CIFilterConfig, data_root: Path, filter_id: str) -> Pa
                 title = "last-position KL"
             case LastPositionIntegerKL():
                 title = "last-position integer KL"
+            case LastPositionAnswerCE():
+                title = "last-position answer CE"
         write_applet(outputs.grids, pool, f"{run_dir.name} step {step} · {filter_id} · {title}")
         for block in pool.blocks:
             t0 = time.time()

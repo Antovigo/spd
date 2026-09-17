@@ -93,7 +93,22 @@ class LastPositionIntegerKL(BaseConfig):
     include_minus: bool = True
 
 
-Objective = Annotated[LastPositionKL | LastPositionIntegerKL, Discriminator("kind")]
+class LastPositionAnswerCE(BaseConfig):
+    """Cross-entropy of the TRUE arithmetic result at the last prompt position, over the
+    answer tokens only (restricted logits, renormalized): `-log p(first token of a+b)`.
+
+    Unlike the KL objectives this does not score faithfulness to the target model — it scores
+    getting the arithmetic RIGHT, so the surviving components are the ones that compute the
+    answer rather than the ones the model happens to use, and a filter may end up MORE accurate
+    than the model it decomposes."""
+
+    kind: Literal["last_position_answer_ce"] = "last_position_answer_ce"
+    include_minus: bool = True
+
+
+Objective = Annotated[
+    LastPositionKL | LastPositionIntegerKL | LastPositionAnswerCE, Discriminator("kind")
+]
 
 
 class CIMaskedRecon(BaseConfig):
@@ -290,6 +305,11 @@ class MaskScores(BaseConfig):
     """Agreement of the full-vocabulary argmax with the clean model's."""
     integer_top1: float
     """Agreement of the argmax over answer tokens."""
+    answer_ce: float
+    """Cross-entropy of the TRUE result over the answer tokens (what `last_position_answer_ce`
+    trains); scored for every objective."""
+    accuracy: float
+    """Fraction of prompts whose restricted argmax IS the true result."""
     max_prompt_objective: float
     """The worst single prompt's value of the run's training objective."""
 

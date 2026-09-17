@@ -10,7 +10,9 @@ switch off per prompt. Target stream only: no non-target pass, no hidden-activat
 - `pool.py` — the `operations x a x b` prompt pool (`"<a><op><b>="`, operation blocks in
   config order, each row-major) and the answer-token set (all-digit tokens + `-`).
 - `objective.py` — pure last-position scores: full-vocabulary KL, answer-restricted KL
-  (restricted logits, renormalized), top-1 agreement of both.
+  (restricted logits, renormalized), top-1 agreement of both, and the cross-entropy of the TRUE
+  result (`last_position_answer_ce`: accuracy, not faithfulness — the filter may beat the model).
+  Every jit that scores an objective takes the pool's per-prompt target index vector.
 - `step.py` — the jitted microbatch gradient (deterministic CI-masked recon), gradient
   accumulation (on device or host), the Adam update, the pool evaluation (continuous CI,
   rounded CI, alive-set and all-on global masks), the end-of-run fresh-PGD recon eval.
