@@ -76,7 +76,7 @@ alive_threshold: 0.01
 eval_every: 1000
 log_every: 10
 # The decomposition's 20-step fresh-PGD recon eval, scored by this filter's objective at the last
-# position, on the starting and the final CI fn (both run at the end).
+# position, on the starting CI fn (before training) and the final one (at the end).
 pgd_eval:
   n_steps: 20
   step_size: 0.1

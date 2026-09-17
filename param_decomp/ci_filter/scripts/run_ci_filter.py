@@ -10,9 +10,7 @@ import json
 import secrets
 import time
 from pathlib import Path
-from typing import cast
 
-import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -236,10 +234,15 @@ def run_ci_filter(config: CIFilterConfig, data_root: Path, filter_id: str) -> Pa
             return result, site_max
 
         evaluate(0, ci_fn, references=True)
-        # The starting CI fn's PGD eval runs at the END, beside the final one: run first, its
-        # 20-step adversarial backward left a 1x L40 unable to fit the training step (smoke
-        # 11820). Its masters wait in host memory.
-        initial_ci_fn = jax.tree.map(np.asarray, trainable(ci_fn)) if pgd_eval is not None else None
+        # The starting CI fn's PGD eval runs up front, so a crash in it surfaces before training.
+        # (On a 1x L40 its adversarial backward left too little memory for the training step,
+        # smoke 11820; set `pgd_eval: null` there.)
+        pgd_initial: float | None = None
+        if pgd_eval is not None:
+            t0 = time.time()
+            pgd_initial = pgd_recon(ci_fn)
+            _wandb_log({"eval/pgd_recon_initial": pgd_initial}, 0)
+            logger.info(f"PGD recon initial ({time.time() - t0:.0f}s): {pgd_initial:.4f}")
 
         optimizer = make_optimizer(config)
         lr = optax_schedule(config.lr_schedule, config.steps)
@@ -362,15 +365,9 @@ def run_ci_filter(config: CIFilterConfig, data_root: Path, filter_id: str) -> Pa
             )
             logger.info(f"grid {block.operation} ({time.time() - t0:.0f}s): saved {counts}")
         if pgd_eval is not None:
-            assert initial_ci_fn is not None and config.pgd_eval is not None
+            assert pgd_initial is not None and config.pgd_eval is not None
             t0 = time.time()
             pgd_final = pgd_recon(ci_fn)
-            initial_params = jax.tree.map(
-                lambda host, like: jax.device_put(host, like.sharding),
-                initial_ci_fn,
-                trainable(ci_fn),
-            )
-            pgd_initial = pgd_recon(cast(PlacedCIFn, eqx.combine(initial_params, ci_fn)))
             outputs.pgd.write_text(
                 json.dumps(
                     {"initial": pgd_initial, "final": pgd_final, **config.pgd_eval.model_dump()}
@@ -378,9 +375,7 @@ def run_ci_filter(config: CIFilterConfig, data_root: Path, filter_id: str) -> Pa
             )
             final = final.model_copy(update={"pgd_recon": pgd_final})
             outputs.summary.write_text(final.model_dump_json(indent=2))
-            _wandb_log(
-                {"eval/pgd_recon_initial": pgd_initial, "eval/pgd_recon": pgd_final}, config.steps
-            )
+            _wandb_log({"eval/pgd_recon": pgd_final}, config.steps)
             logger.info(
                 f"PGD recon ({time.time() - t0:.0f}s): initial {pgd_initial:.4f}, final {pgd_final:.4f}"
             )

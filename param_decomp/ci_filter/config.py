@@ -174,9 +174,9 @@ class PGDEvalConfig(BaseConfig):
     filter trains: per-component sources shared by the batch (`source_shape: c`), random init,
     `n_steps` sign-gradient ascents of `step_size` on the masks `ci + (1 - ci) * source` AND the
     weight-delta channel, scored by the filter's objective at the LAST position (the
-    decomposition's own eval averaged the full KL over every position). Scores the starting and
-    the final CI fn on the same fixed `n_batches x batch_size` pool prompts, both at the END of
-    the run (the starting fn waits in host memory); reported as the batch mean."""
+    decomposition's own eval averaged the full KL over every position). Scores the starting CI fn
+    before the first step and the final one after the grid, on the same fixed
+    `n_batches x batch_size` pool prompts; reported as the batch mean."""
 
     n_steps: PositiveInt = 20
     step_size: PositiveFloat = 0.1
