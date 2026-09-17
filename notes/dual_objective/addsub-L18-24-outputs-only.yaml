@@ -45,7 +45,7 @@ pd:
   ci_scaled_weight_decay_quantile: 1.0
   components_optimizer:
     lr_schedule:
-      max_val: 8.0e-05
+      max_val: 3.2e-04
       points:
         - {at: 0.0, frac: 1.0}
         - {at: 1.0, frac: 0.1, interp: cosine}
@@ -54,7 +54,7 @@ pd:
     grad_clip_norm: 0.01
   ci_fn_optimizer:
     lr_schedule:
-      max_val: 4.0e-05
+      max_val: 1.6e-04
       points:
         - {at: 0.0, frac: 1.0}
         - {at: 1.0, frac: 0.1, interp: cosine}
