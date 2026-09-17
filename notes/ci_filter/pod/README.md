@@ -104,7 +104,10 @@ the first failing stage. What to look for in the log:
 The two filters are named `addsub-05-filter-last-pos` and `addsub-05-filter-integers` (output dir
 and wandb run; override with `OBJ1_ID` / `OBJ2_ID`). Restarting a single stage:
 `./run_pipeline.sh --only obj1`, or `./run_pipeline.sh --only obj2 --init-id addsub-05-filter-last-pos`.
-Output dirs fail closed: delete a failed stage's dir before rerunning it under the same name (its
+For the capped comparison of objective 1 (CI can only decrease from the decomposition's,
+`ci_ceiling: true`): `CI_CEILING=1 OBJ1_ID=addsub-05-filter-last-pos-ceiling ./run_pipeline.sh
+--only obj1` (smoke first, then objective 1; the ceiling holds a bf16 copy of the CI fn, ~1.9 GB,
+plus one extra CI forward per step). Output dirs fail closed: delete a failed stage's dir before rerunning it under the same name (its
 wandb run can stay or go; every launch gets a fresh wandb id). The smoke (`cf-smoke`) does not
 log to wandb and removes its own dir.
 

@@ -210,6 +210,15 @@ class CIFilterConfig(BaseConfig):
     step: NonNegativeInt | None = None
     """Checkpoint step; `None` is the latest."""
     init: CIInit = InitFromRun()
+    ci_ceiling: bool = False
+    """CI can only decrease from the starting point's: per prompt, position and component, the
+    CI every consumer reads (training masks, imp-min, evaluations, alive list, grid) is the
+    minimum of the trained CI fn's and the STARTING CI's, so the narrower objective can only
+    switch components off. The starting CI is the decomposition's CI fn for `init: run`, and the
+    source filter's effective CI for `init: ci_filter` (its CI fn, capped by its own ceilings
+    when it had `ci_ceiling`). Each ceiling holds one frozen compute-precision copy of a CI fn
+    and costs one extra CI forward (no backward) wherever CI is read. Over the cap only a
+    gradient that lowers the CI reaches the trained fn."""
     pool: ArithmeticPoolConfig = ArithmeticPoolConfig()
     objective: Objective
 

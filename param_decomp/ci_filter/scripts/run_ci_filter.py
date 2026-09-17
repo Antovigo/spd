@@ -17,12 +17,11 @@ import numpy as np
 import wandb
 from jax.sharding import PartitionSpec as P
 
-from param_decomp.ci_filter.checkpoint import restore_ci_fn, save_ci_fn
+from param_decomp.ci_filter.checkpoint import save_ci_fn, starting_ci
 from param_decomp.ci_filter.config import (
     CIFilterConfig,
     CIMaskedRecon,
     InitFromCIFilter,
-    InitFromRun,
     LastPositionIntegerKL,
     LastPositionKL,
     MaskScores,
@@ -123,7 +122,8 @@ def run_ci_filter(config: CIFilterConfig, data_root: Path, filter_id: str) -> Pa
             entity=config.wandb.entity,
             name=filter_id,
             group=run_dir.name,
-            tags=[config.objective.kind, config.init.kind],
+            tags=[config.objective.kind, config.init.kind]
+            + (["ci_ceiling"] if config.ci_ceiling else []),
         )
 
     tokenizer = load_tokenizer(target.model_name)
@@ -143,15 +143,12 @@ def run_ci_filter(config: CIFilterConfig, data_root: Path, filter_id: str) -> Pa
 
     with jax.set_mesh(mesh):
         prepared, v_norms = prepare_components(placed, restored.components)
-        ci_fn = restored.ci_fn
+        ci_fn, ceilings = starting_ci(config, run_dir, step, restored.ci_fn)
         del restored
-        match config.init:
-            case InitFromRun():
-                pass
-            case InitFromCIFilter(id=source_id):
-                source = CIFilterOutputs.for_run(run_dir, step, source_id)
-                ci_fn = restore_ci_fn(source.ci_fn, ci_fn)
-                logger.info(f"CI fn initialized from {source.root}")
+        if isinstance(config.init, InitFromCIFilter):
+            source = CIFilterOutputs.for_run(run_dir, step, config.init.id)
+            logger.info(f"CI fn initialized from {source.root}")
+        logger.info(f"CI capped by {len(ceilings)} frozen CI fn(s)")
         tokens_all = jax.sharding.reshard(jnp.asarray(pool.tokens), P())
         answer_ids = jax.sharding.reshard(jnp.asarray(answers), P())
 
@@ -168,6 +165,7 @@ def run_ci_filter(config: CIFilterConfig, data_root: Path, filter_id: str) -> Pa
                         placed,
                         prepared,
                         ci_fn,
+                        ceilings,
                         tokens_all,
                         jnp.asarray(idx),
                         answer_ids,
@@ -188,7 +186,7 @@ def run_ci_filter(config: CIFilterConfig, data_root: Path, filter_id: str) -> Pa
             site_max: dict[str, np.ndarray] = {}
             for idx, real in index_batches(pool.n_prompts, config.eval_batch_size):
                 rows, smax, l0 = eval_batch(
-                    placed, prepared, ci_fn, tokens_all, jnp.asarray(idx), answer_ids
+                    placed, prepared, ci_fn, ceilings, tokens_all, jnp.asarray(idx), answer_ids
                 )
                 for name, r in rows.items():
                     parts[name].append(r)
@@ -270,7 +268,14 @@ def run_ci_filter(config: CIFilterConfig, data_root: Path, filter_id: str) -> Pa
                 if ppgd_step is None:
                     assert micro_grads is not None
                     call = ci_masked_micro_call(
-                        micro_grads, placed, prepared, ci_fn, tokens_all, answer_ids, train_frac
+                        micro_grads,
+                        placed,
+                        prepared,
+                        ci_fn,
+                        ceilings,
+                        tokens_all,
+                        answer_ids,
+                        train_frac,
                     )
                     grads, metrics, schedules = batch_gradients(
                         call, idx, micro, config.accumulate_on_host
@@ -281,6 +286,7 @@ def run_ci_filter(config: CIFilterConfig, data_root: Path, filter_id: str) -> Pa
                         placed,
                         prepared,
                         ci_fn,
+                        ceilings,
                         tokens_all,
                         idx,
                         answer_ids,
@@ -353,6 +359,7 @@ def run_ci_filter(config: CIFilterConfig, data_root: Path, filter_id: str) -> Pa
                 placed,
                 prepared,
                 ci_fn,
+                ceilings,
                 v_norms,
                 tokens_all,
                 block,

@@ -2,10 +2,12 @@
 # CI filter pipeline on ONE GPU pod: smoke -> objective 1 -> objective 2, detached.
 #     source /workspace/spd/notes/dual_objective/addsub-all-layers/env.sh
 #     ./run_pipeline.sh [--no-smoke] [--only obj1|obj2] [--init-id cf-xxxxxxxx]
-# Stages run in order and stop at the first failure. The smoke writes to the fixed id
+# Stages run in order and stop at the first failure; `--only obj1` keeps the smoke (skip it with
+# --no-smoke), `--only obj2` never runs it. The smoke writes to the fixed id
 # `cf-smoke` and is deleted when it passes. Objective 2 starts from objective 1's CI fn: from
 # the id this pipeline just produced, or from --init-id when run with `--only obj2`.
-# Hardware knobs (env): MICRO, EVAL_BATCH, GRID_CHUNK — see make_config.py.
+# Hardware knobs (env): MICRO, EVAL_BATCH, GRID_CHUNK; CI_CEILING=1 caps CI at the starting
+# point's — see make_config.py.
 # Filter ids (output dir + wandb run name/id): OBJ1_ID, OBJ2_ID; they fail closed if taken.
 # Follow: tail -f $DATA_ROOT/logs/ci_filter.latest.log
 set -euo pipefail
@@ -59,7 +61,7 @@ run_stage() {  # <stage> <filter id> [--init-id id]
   echo "=== $stage $id done $(date -Is)"
 }
 
-if [ "$SMOKE" = 1 ] && [ -z "$ONLY" ]; then
+if [ "$SMOKE" = 1 ] && [ "$ONLY" != obj2 ]; then
   rm -rf "$OUT_ROOT/cf-smoke"
   run_stage smoke cf-smoke
   rm -rf "$OUT_ROOT/cf-smoke"

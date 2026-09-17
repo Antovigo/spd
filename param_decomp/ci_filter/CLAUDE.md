@@ -22,7 +22,8 @@ switch off per prompt. Target stream only: no non-target pass, no hidden-activat
   masks, weight delta off.
 - `grid.py` + `grids_app.html` — the `(a, b)`-grid applet over every operation x position,
   one lazily loaded file per slice (payload format of `experiments/lm/ab_grid_dataset.py`).
-- `checkpoint.py` — orbax save/restore of the fine-tuned CI fn (chains objective 2 onto 1).
+- `checkpoint.py` — orbax save/restore of the fine-tuned CI fn (chains objective 2 onto 1), and
+  `starting_ci` / `trained_ci`: the CI fn a filter starts from and the ceilings capping it.
 - `paths.py` — `CIFilterOutputs`: `<run_dir>/analysis/ci_filter/step_<step>/<cf-id>/` (layout
   in the module docstring).
 - `scripts/run_ci_filter.py` — entry point.
@@ -38,7 +39,10 @@ The objective is scored at the LAST position only while CI (and the imp-min) cov
 position; the evaluations always use deterministic masks with the delta off. Imp-min is the decomposition's Geman-McClure term on the
 upper-leaky CI with its frequency penalty at a FIXED `a'` (microbatch-invariant). A component
 is alive iff its output CI exceeds `alive_threshold` at any position of any pool prompt; the
-same cut defines the rounded masks.
+same cut defines the rounded masks. With `ci_ceiling`, every CI read (`step.output_ci`) is the
+entrywise minimum of the trained fn's and each frozen ceiling fn's (the starting point's CI,
+chained through `init: ci_filter`), so a filter can only switch components off; ceilings are
+threaded explicitly after `ci_fn` in every jit (`()` = uncapped).
 
 Run: `python -m param_decomp.ci_filter.scripts.run_ci_filter --config <yaml> --data_root <root>
 [--filter_id cf-xxxxxxxx]`. The mesh is fsdp over every visible device (`restore_jax_run`).

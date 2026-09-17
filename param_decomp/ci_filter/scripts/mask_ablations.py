@@ -15,9 +15,8 @@ import numpy as np
 from jax.sharding import PartitionSpec as P
 
 from param_decomp.ci_filter.ablation import MASKINGS, ablation_rows
-from param_decomp.ci_filter.checkpoint import restore_ci_fn
+from param_decomp.ci_filter.checkpoint import trained_ci
 from param_decomp.ci_filter.config import CIFilterConfig, resolve_run_dir
-from param_decomp.ci_filter.paths import CIFilterOutputs
 from param_decomp.ci_filter.pool import build_pool, load_tokenizer
 from param_decomp.ci_filter.step import index_batches, make_eval_batch, prepare_components
 from param_decomp.core.log import logger, setup_console_logger
@@ -43,10 +42,12 @@ def mask_ablations(config: CIFilterConfig, data_root: Path, source: str) -> Path
 
     with jax.set_mesh(mesh):
         prepared, _ = prepare_components(placed, restored.components)
-        ci_fn = restored.ci_fn
+        ci_fn, ceilings = (
+            (restored.ci_fn, ())
+            if source == "run"
+            else trained_ci(run_dir, step, source, restored.ci_fn)
+        )
         del restored
-        if source != "run":
-            ci_fn = restore_ci_fn(CIFilterOutputs.for_run(run_dir, step, source).ci_fn, ci_fn)
         tokens_all = jax.sharding.reshard(jnp.asarray(pool.tokens), P())
         answer_ids = jax.sharding.reshard(jnp.asarray(np.zeros(1, np.int32)), P())
         batches = index_batches(pool.n_prompts, config.eval_batch_size)
@@ -56,7 +57,7 @@ def mask_ablations(config: CIFilterConfig, data_root: Path, source: str) -> Path
         site_max: dict[str, np.ndarray] = {}
         for idx, _ in batches:
             _, smax, _ = eval_batch(
-                placed, prepared, ci_fn, tokens_all, jnp.asarray(idx), answer_ids
+                placed, prepared, ci_fn, ceilings, tokens_all, jnp.asarray(idx), answer_ids
             )
             for site, v in smax.items():
                 site_max[site] = np.maximum(site_max.get(site, 0.0), np.asarray(v))
@@ -70,7 +71,7 @@ def mask_ablations(config: CIFilterConfig, data_root: Path, source: str) -> Path
         }
         for idx, real in batches:
             got = ablation_rows(
-                placed, prepared, ci_fn, alive, tokens_all, jnp.asarray(idx), threshold
+                placed, prepared, ci_fn, ceilings, alive, tokens_all, jnp.asarray(idx), threshold
             )
             for m, reductions in got.items():
                 for r, v in reductions.items():

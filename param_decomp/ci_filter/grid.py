@@ -21,7 +21,13 @@ from jax.sharding import PartitionSpec as P
 from jaxtyping import Array, Int
 
 from param_decomp.ci_filter.pool import ArithmeticPool, OperationBlock
-from param_decomp.ci_filter.step import Prepared, gather_rows, index_batches, output_ci
+from param_decomp.ci_filter.step import (
+    Ceilings,
+    Prepared,
+    gather_rows,
+    index_batches,
+    output_ci,
+)
 from param_decomp.core.ci_fn import PlacedCIFn
 from param_decomp.core.model import PlacedModel
 from param_decomp.experiments.lm.ab_grid_dataset import (
@@ -38,6 +44,7 @@ GATHER_INDEX_MULTIPLE = 64
 def _chunk_ci_sums(
     placed: PlacedModel,
     ci_fn: PlacedCIFn,
+    ceilings: Ceilings,
     tokens_all: Int[Array, "N T"],
     idx: Int[Array, " B"],
     n_real: Array,
@@ -45,7 +52,7 @@ def _chunk_ci_sums(
     """`{site: (T, C)}` lower CI summed over the chunk's real rows."""
     tokens = gather_rows(tokens_all, idx)
     clean = placed.clean_forward(tokens, capture_keys=ci_fn.capture_keys)
-    lower = output_ci(placed, ci_fn, clean.captures, remat=False).lower
+    lower = output_ci(placed, ci_fn, ceilings, clean.captures, remat=False).lower
     real = (jnp.arange(tokens.shape[0]) < n_real)[:, None, None]
     return {
         site: jax.sharding.reshard(jnp.where(real, v.astype(jnp.float32), 0.0).sum(axis=0), P())
@@ -58,6 +65,7 @@ def _chunk_columns(
     placed: PlacedModel,
     prepared: Prepared,
     ci_fn: PlacedCIFn,
+    ceilings: Ceilings,
     v_norms: dict[str, Array],
     tokens_all: Int[Array, "N T"],
     idx: Int[Array, " B"],
@@ -69,7 +77,7 @@ def _chunk_columns(
     clean, acts = placed.component_activation_forward(
         prepared, tokens, capture_keys=ci_fn.capture_keys
     )
-    lower = output_ci(placed, ci_fn, clean.captures, remat=False).lower
+    lower = output_ci(placed, ci_fn, ceilings, clean.captures, remat=False).lower
     out: dict[str, tuple[Array, Array]] = {}
     for site, cols in columns.items():
         ci = lower[site].astype(jnp.float32).at[:, :, cols].get(out_sharding=P())
@@ -90,6 +98,7 @@ def collect_operation(
     placed: PlacedModel,
     prepared: Prepared,
     ci_fn: PlacedCIFn,
+    ceilings: Ceilings,
     v_norms: dict[str, Array],
     tokens_all: Int[Array, "N T"],
     block: OperationBlock,
@@ -102,7 +111,9 @@ def collect_operation(
 
     totals: dict[str, np.ndarray] = {}
     for idx, real in chunks:
-        sums = _chunk_ci_sums(placed, ci_fn, tokens_all, jnp.asarray(idx), jnp.asarray(real))
+        sums = _chunk_ci_sums(
+            placed, ci_fn, ceilings, tokens_all, jnp.asarray(idx), jnp.asarray(real)
+        )
         for site, value in sums.items():
             totals[site] = np.asarray(value) + totals.get(site, 0.0)
     mean_ci = {site: total / n for site, total in totals.items()}
@@ -123,7 +134,14 @@ def collect_operation(
         device_cols = {site: jnp.asarray(p.astype(np.int32)) for site, p in padded.items()}
         for idx, real in chunks:
             got = _chunk_columns(
-                placed, prepared, ci_fn, v_norms, tokens_all, jnp.asarray(idx), device_cols
+                placed,
+                prepared,
+                ci_fn,
+                ceilings,
+                v_norms,
+                tokens_all,
+                jnp.asarray(idx),
+                device_cols,
             )
             for site, (ci, inner) in got.items():
                 k = live[site].size

@@ -23,6 +23,7 @@ from jaxtyping import Array, Int, PRNGKeyArray
 from param_decomp.ci_filter.config import CIFilterConfig, MergedPPGDRecon
 from param_decomp.ci_filter.objective import objective_rows
 from param_decomp.ci_filter.step import (
+    Ceilings,
     MicroCall,
     Prepared,
     Trainable,
@@ -89,6 +90,7 @@ type WarmupGrads = Callable[
         PlacedModel,
         Prepared,
         PlacedCIFn,
+        Ceilings,
         Int[Array, "N T"],
         Int[Array, " B"],
         Int[Array, " K"],
@@ -110,6 +112,7 @@ def make_warmup_grads(config: CIFilterConfig) -> WarmupGrads:
         placed: PlacedModel,
         prepared: Prepared,
         ci_fn: PlacedCIFn,
+        ceilings: Ceilings,
         tokens_all: Int[Array, "N T"],
         idx: Int[Array, " B"],
         answer_ids: Int[Array, " K"],
@@ -118,7 +121,9 @@ def make_warmup_grads(config: CIFilterConfig) -> WarmupGrads:
         tokens = gather_rows(tokens_all, idx)
         clean = placed.clean_forward(tokens, capture_keys=ci_fn.capture_keys)
         clean_last = jax.lax.stop_gradient(clean.output[:, -1, :])
-        lower = jax.lax.stop_gradient(output_ci(placed, ci_fn, clean.captures, remat=False).lower)
+        lower = jax.lax.stop_gradient(
+            output_ci(placed, ci_fn, ceilings, clean.captures, remat=False).lower
+        )
 
         def score(sources: Sources) -> Array:
             masks, delta_masks = masks_from_sources(lower, sources)
@@ -140,6 +145,7 @@ type PPGDMicroGrads = Callable[
         PlacedModel,
         Prepared,
         PlacedCIFn,
+        Ceilings,
         Int[Array, "N T"],
         Int[Array, " B"],
         Int[Array, " K"],
@@ -165,6 +171,7 @@ def make_ppgd_micro_grads(config: CIFilterConfig) -> PPGDMicroGrads:
         placed: PlacedModel,
         prepared: Prepared,
         ci_fn: PlacedCIFn,
+        ceilings: Ceilings,
         tokens_all: Int[Array, "N T"],
         idx: Int[Array, " B"],
         answer_ids: Int[Array, " K"],
@@ -189,7 +196,11 @@ def make_ppgd_micro_grads(config: CIFilterConfig) -> PPGDMicroGrads:
 
         def loss_fn(params: Trainable, sources: Sources) -> tuple[Array, dict[str, Array]]:
             ci = output_ci(
-                placed, cast(PlacedCIFn, eqx.combine(params, ci_fn)), captures, config.remat
+                placed,
+                cast(PlacedCIFn, eqx.combine(params, ci_fn)),
+                ceilings,
+                captures,
+                config.remat,
             )
             masks, delta_masks, merged_routes = mixed_persistent_stochastic_masks(
                 mask_key, ci.lower, sources, tokens.shape, adv_fraction, routes
@@ -273,6 +284,7 @@ class PPGDStep:
         placed: PlacedModel,
         prepared: Prepared,
         ci_fn: PlacedCIFn,
+        ceilings: Ceilings,
         tokens_all: Int[Array, "N T"],
         idx: np.ndarray,
         answer_ids: Int[Array, " K"],
@@ -291,6 +303,7 @@ class PPGDStep:
                     placed,
                     prepared,
                     ci_fn,
+                    ceilings,
                     tokens_all,
                     jnp.asarray(idx[start : start + microbatch_size]),
                     answer_ids,
@@ -310,6 +323,7 @@ class PPGDStep:
                 placed,
                 prepared,
                 ci_fn,
+                ceilings,
                 tokens_all,
                 jnp.asarray(micro_idx),
                 answer_ids,

@@ -33,6 +33,9 @@ from param_decomp.core.recon_eval import FreshPGDReconEval, fresh_pgd_recon_loss
 from param_decomp.core.run_state import clip_by_global_norm_with_eps, optax_schedule
 
 type Prepared = dict[str, dict[str, Array]]
+type Ceilings = tuple[PlacedCIFn, ...]
+"""Frozen CI fns whose output CI caps the trained one's (`CIFilterConfig.ci_ceiling`),
+compute-precision copies; `()` leaves the CI uncapped."""
 type Trainable = optax.Params
 """The CI fn's floating arrays with `None` elsewhere: the optimized leaves and their grads."""
 
@@ -42,11 +45,48 @@ def gather_rows(tokens_all: Int[Array, "N T"], idx: Int[Array, " B"]) -> Int[Arr
     return tokens_all.at[idx].get(out_sharding=P(BATCH_AXES, None))
 
 
+@jax.custom_vjp
+def _capped(x: Array, cap: Array) -> Array:
+    return jnp.minimum(x, cap)
+
+
+def _capped_fwd(x: Array, cap: Array) -> tuple[Array, tuple[Array, Array]]:
+    return jnp.minimum(x, cap), (x, cap)
+
+
+def _capped_bwd(res: tuple[Array, Array], g: Array) -> tuple[Array, Array]:
+    """At or under the cap the gradient passes; over it, only a gradient that LOWERS `x`
+    (`g > 0`) does, so an entry pushed over the cap by one term can still be pulled back by
+    another (imp-min) instead of freezing there. The cap is frozen."""
+    x, cap = res
+    return jnp.where((x <= cap) | (g > 0), g, jnp.zeros_like(g)), jnp.zeros_like(cap)
+
+
+_capped.defvjp(_capped_fwd, _capped_bwd)
+
+
 def output_ci(
-    placed: PlacedModel, ci_fn: PlacedCIFn, captures: dict[str, Array], remat: bool
+    placed: PlacedModel,
+    ci_fn: PlacedCIFn,
+    ceilings: Ceilings,
+    captures: dict[str, Array],
+    remat: bool,
 ) -> CI:
-    """The output head's CI bundle, pinned to the placement's component-activation layout."""
+    """The output head's CI bundle, capped entrywise by every ceiling's output CI (the
+    squashings are monotone, so capping the preactivation, lower and upper CI alike is capping
+    the preactivation), pinned to the placement's component-activation layout."""
     ci = ci_for_role(evaluate_ci(ci_fn, captures, remat=remat), "output")
+    for ceiling in ceilings:
+        cap = jax.lax.stop_gradient(
+            ci_for_role(evaluate_ci(ceiling, captures, remat=False), "output")
+        )
+        ci = CI(
+            preactivations={
+                k: _capped(v, cap.preactivations[k]) for k, v in ci.preactivations.items()
+            },
+            lower={k: _capped(v, cap.lower[k]) for k, v in ci.lower.items()},
+            upper={k: _capped(v, cap.upper[k]) for k, v in ci.upper.items()},
+        )
     return CI(
         preactivations=ci.preactivations,
         lower={k: constrain_component_activation(v, placed.placement) for k, v in ci.lower.items()},
@@ -99,6 +139,7 @@ type MicroGrads = Callable[
         PlacedModel,
         Prepared,
         PlacedCIFn,
+        Ceilings,
         Int[Array, "N T"],
         Int[Array, " B"],
         Int[Array, " K"],
@@ -109,7 +150,7 @@ type MicroGrads = Callable[
 
 
 def make_micro_grads(config: CIFilterConfig) -> MicroGrads:
-    """`(model, prepared, ci_fn, pool, idx, answer_ids, train_frac) -> (grads, metrics,
+    """`(model, prepared, ci_fn, ceilings, pool, idx, answer_ids, train_frac) -> (grads, metrics,
     schedules)` for one microbatch. The loss and metrics are scaled by `1 / n_microbatches`, so
     summing them over the microbatches gives batch means."""
     objective = config.objective
@@ -123,6 +164,7 @@ def make_micro_grads(config: CIFilterConfig) -> MicroGrads:
         placed: PlacedModel,
         prepared: Prepared,
         ci_fn: PlacedCIFn,
+        ceilings: Ceilings,
         tokens_all: Int[Array, "N T"],
         idx: Int[Array, " B"],
         answer_ids: Int[Array, " K"],
@@ -142,7 +184,11 @@ def make_micro_grads(config: CIFilterConfig) -> MicroGrads:
 
         def loss_fn(params: Trainable) -> tuple[Array, dict[str, Array]]:
             ci = output_ci(
-                placed, cast(PlacedCIFn, eqx.combine(params, ci_fn)), captures, config.remat
+                placed,
+                cast(PlacedCIFn, eqx.combine(params, ci_fn)),
+                ceilings,
+                captures,
+                config.remat,
             )
             masked_last = placed.masked_forward(
                 prepared,
@@ -190,6 +236,7 @@ def ci_masked_micro_call(
     placed: PlacedModel,
     prepared: Prepared,
     ci_fn: PlacedCIFn,
+    ceilings: Ceilings,
     tokens_all: Int[Array, "N T"],
     answer_ids: Int[Array, " K"],
     train_frac: Array,
@@ -200,7 +247,14 @@ def ci_masked_micro_call(
         _k: int, micro_idx: np.ndarray
     ) -> tuple[Trainable, dict[str, Array], dict[str, Array]]:
         return micro_grads(
-            placed, prepared, ci_fn, tokens_all, jnp.asarray(micro_idx), answer_ids, train_frac
+            placed,
+            prepared,
+            ci_fn,
+            ceilings,
+            tokens_all,
+            jnp.asarray(micro_idx),
+            answer_ids,
+            train_frac,
         )
 
     return call
@@ -269,7 +323,15 @@ def _replicated_rows(
 
 
 type EvalBatch = Callable[
-    [PlacedModel, Prepared, PlacedCIFn, Int[Array, "N T"], Int[Array, " B"], Int[Array, " K"]],
+    [
+        PlacedModel,
+        Prepared,
+        PlacedCIFn,
+        Ceilings,
+        Int[Array, "N T"],
+        Int[Array, " B"],
+        Int[Array, " K"],
+    ],
     tuple[dict[str, RowArrays], dict[str, Array], dict[str, Array]],
 ]
 
@@ -286,6 +348,7 @@ def make_eval_batch(config: CIFilterConfig) -> EvalBatch:
         placed: PlacedModel,
         prepared: Prepared,
         ci_fn: PlacedCIFn,
+        ceilings: Ceilings,
         tokens_all: Int[Array, "N T"],
         idx: Int[Array, " B"],
         answer_ids: Int[Array, " K"],
@@ -293,7 +356,7 @@ def make_eval_batch(config: CIFilterConfig) -> EvalBatch:
         tokens = gather_rows(tokens_all, idx)
         clean = placed.clean_forward(tokens, capture_keys=ci_fn.capture_keys)
         clean_last = clean.output[:, -1, :]
-        ci = output_ci(placed, ci_fn, clean.captures, remat=False)
+        ci = output_ci(placed, ci_fn, ceilings, clean.captures, remat=False)
         maskings = {
             "ci": ci.lower,
             "rounded": {k: (v > threshold).astype(COMPUTE_DT) for k, v in ci.lower.items()},
@@ -365,6 +428,7 @@ type PGDEval = Callable[
         PlacedModel,
         Prepared,
         PlacedCIFn,
+        Ceilings,
         Int[Array, "N T"],
         Int[Array, " B"],
         Int[Array, " K"],
@@ -387,6 +451,7 @@ def make_pgd_eval(config: CIFilterConfig) -> PGDEval:
         placed: PlacedModel,
         prepared: Prepared,
         ci_fn: PlacedCIFn,
+        ceilings: Ceilings,
         tokens_all: Int[Array, "N T"],
         idx: Int[Array, " B"],
         answer_ids: Int[Array, " K"],
@@ -395,7 +460,7 @@ def make_pgd_eval(config: CIFilterConfig) -> PGDEval:
         tokens = gather_rows(tokens_all, idx)
         clean = placed.clean_forward(tokens, capture_keys=ci_fn.capture_keys)
         clean_last = clean.output[:, -1, :]
-        ci_lower = output_ci(placed, ci_fn, clean.captures, remat=False).lower
+        ci_lower = output_ci(placed, ci_fn, ceilings, clean.captures, remat=False).lower
         leading = next(iter(ci_lower.values())).shape[:-1]
 
         def loss_at_masks(masks: dict[str, Array], delta_masks: dict[str, Array]) -> Array:
