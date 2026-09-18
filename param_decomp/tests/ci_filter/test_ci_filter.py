@@ -15,7 +15,9 @@ from jax.sharding import PartitionSpec as P
 from param_decomp.ci_filter.ablation import MASKINGS, ablation_rows
 from param_decomp.ci_filter.attribution import (
     answer_targets,
+    make_ablation_metrics,
     make_ablation_scores,
+    make_ablation_state,
     make_attribution_batch,
 )
 from param_decomp.ci_filter.checkpoint import (
@@ -246,6 +248,43 @@ def _setup(mesh: Mesh, sharding: str):
     assert isinstance(fn, ChunkwiseTransformerCIFn)
     ci_fn = PlacedCIFn(fn=fn, placement=resolve_ci_placement(arch, rules))
     return rules, placed, sites, ci_fn
+
+
+def test_ablation_sweep_metrics_match_a_single_ablation() -> None:
+    """The sweep's hoisted state + metrics reproduce the one-at-a-time ablation's score, and an
+    all-ones keep vector is the un-ablated baseline."""
+    mesh = single_device_mesh()
+    rules, placed, sites, ci_fn = _setup(mesh, "ddp")
+    pool = build_pool(ArithmeticPoolConfig(a_range=(1, 3), b_range=(1, 3)), FakeTokenizer())
+    answers = answer_token_ids(FakeTokenizer(), include_minus=True)
+    targets = answer_targets(pool, FakeTokenizer(), answers)
+    with jax.set_mesh(mesh):
+        components = init_model_component_stacks_placed(
+            placed, jax.random.PRNGKey(1), rules, random_component_initializer
+        )
+        prepared = prepare_compute_weights(placed, components)
+        tokens_all = jax.sharding.reshard(jnp.asarray(pool.tokens), P())
+        answer_ids = jax.sharding.reshard(jnp.asarray(answers), P())
+        target_all = jax.sharding.reshard(jnp.asarray(targets.indices), P())
+        idx = jnp.asarray(np.arange(4, dtype=np.int32))
+
+        state = make_ablation_state()(placed, ci_fn, UNCONSTRAINED, tokens_all, idx, target_all)
+        metrics = make_ablation_metrics()
+        ones = {s.name: jnp.ones(s.C, jnp.float32) for s in sites}
+        base = metrics(placed, prepared, state, answer_ids, ones)
+        assert set(base) == {"kl", "integer_kl", "answer_ce", "accuracy"}
+        assert float(base["kl"]) >= -1e-6
+
+        site = placed.site_names[0]
+        keep = dict(ones)
+        keep[site] = ones[site].at[3].set(0.0)
+        ablated = metrics(placed, prepared, state, answer_ids, keep)
+        scores, _ = make_ablation_scores()(
+            placed, prepared, ci_fn, UNCONSTRAINED, tokens_all, idx, answer_ids, target_all, keep
+        )
+        np.testing.assert_allclose(
+            float(ablated["answer_ce"]), -float(np.mean(np.asarray(scores))), rtol=1e-4, atol=1e-5
+        )
 
 
 def test_train_eval_grid_and_checkpoint_run_placed(tmp_path: Path) -> None:

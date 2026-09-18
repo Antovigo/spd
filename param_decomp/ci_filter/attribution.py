@@ -8,7 +8,10 @@ component off RAISES the correct answer's probability", i.e. the component inter
 - `attribution_batch` (screen, every component at once): the first-order effect of ablating
   it, `-sum_t m * d(score)/d(m)` at its current CI. One forward/backward per prompt batch;
 - `ablation_scores` (causal, one component at a time): the REAL change in score when that
-  component's mask is zeroed at every position, one forward per component.
+  component's mask is zeroed at every position, one forward per component;
+- `ablation_state` + `ablation_metrics` (the full sweep): the same ablation over a FIXED prompt
+  batch whose clean forward and CI evaluation are hoisted out of the loop, scored on every
+  metric at once (`scripts/ablation_sweep.py`).
 
 The first-order reading is exact only to the linearization; the screen ranks, the ablation
 decides (`scripts/run_attribution.py` runs the screen over the pool, then verifies the
@@ -24,7 +27,7 @@ import numpy as np
 from jax.sharding import PartitionSpec as P
 from jaxtyping import Array, Float, Int
 
-from param_decomp.ci_filter.objective import answer_logprob_rows, restrict
+from param_decomp.ci_filter.objective import answer_logprob_rows, restrict, row_scores
 from param_decomp.ci_filter.pool import ArithmeticPool, Tokenizer
 from param_decomp.ci_filter.step import CIConstraints, Prepared, gather_rows, output_ci
 from param_decomp.core.ci_fn import PlacedCIFn
@@ -156,6 +159,72 @@ def make_attribution_batch(remat: bool) -> AttributionBatch:
         )
 
     return attribution_batch
+
+
+class AblationState(eqx.Module):
+    """What a prompt batch contributes to EVERY component's ablation: the tokens, the CI masks
+    and the clean logits. Computing it once keeps the clean forward and the CI transformer out
+    of the per-component loop (the sweep's inner cost is then one masked forward)."""
+
+    tokens: Int[Array, "B T"]
+    masks: dict[str, Float[Array, "B T C"]]
+    clean_logits: Float[Array, "B vocab"]
+    target_idx: Int[Array, " B"]
+
+
+def make_ablation_state() -> Callable[..., AblationState]:
+    @eqx.filter_jit
+    def ablation_state(
+        placed: PlacedModel,
+        ci_fn: PlacedCIFn,
+        constraints: CIConstraints,
+        tokens_all: Int[Array, "N T"],
+        idx: Int[Array, " B"],
+        target_all: Int[Array, " N"],
+    ) -> AblationState:
+        tokens = gather_rows(tokens_all, idx)
+        clean = placed.clean_forward(tokens, capture_keys=ci_fn.capture_keys)
+        return AblationState(
+            tokens=tokens,
+            masks=output_ci(placed, ci_fn, constraints, clean.captures, remat=False).lower,
+            clean_logits=clean.output[:, -1, :],
+            target_idx=target_all[idx],
+        )
+
+    return ablation_state
+
+
+def make_ablation_metrics() -> Callable[..., dict[str, Array]]:
+    """`(placed, prepared, state, answer_ids, keep) -> {metric: scalar}` of the CI masks scaled
+    by the per-site `(C,)` `keep` vector: full-vocabulary and answer-restricted KL to the clean
+    model, the true answer's cross-entropy, and accuracy. `keep` is traced, so sweeping every
+    component costs ONE compile."""
+
+    @eqx.filter_jit
+    def ablation_metrics(
+        placed: PlacedModel,
+        prepared: Prepared,
+        state: AblationState,
+        answer_ids: Int[Array, " K"],
+        keep: dict[str, Array],
+    ) -> dict[str, Array]:
+        masked = {site: v * keep[site].astype(COMPUTE_DT) for site, v in state.masks.items()}
+        logits = placed.masked_forward(
+            prepared,
+            state.tokens,
+            masking=MaterializedMasking(component_masks=masked),
+            remat=False,
+        ).output[:, -1, :]
+        scores = row_scores(logits, state.clean_logits, answer_ids, state.target_idx)
+        means = {
+            "kl": jnp.mean(scores.kl),
+            "integer_kl": jnp.mean(scores.integer_kl),
+            "answer_ce": jnp.mean(scores.answer_ce),
+            "accuracy": jnp.mean(scores.correct.astype(jnp.float32)),
+        }
+        return {k: jax.sharding.reshard(v, P()) for k, v in means.items()}
+
+    return ablation_metrics
 
 
 type AblationScores = Callable[

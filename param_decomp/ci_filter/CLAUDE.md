@@ -22,7 +22,9 @@ switch off per prompt. Target stream only: no non-target pass, no hidden-activat
 - `attribution.py` + `scripts/run_attribution.py` — helpers vs interferers on the TRUE answer:
   the first-order screen (`-sum_t m * d log p(correct) / d m`, every component in one backward)
   and the causal single-component ablation of the extremes. POSITIVE = ablating it raises the
-  correct answer's probability (interferes).
+  correct answer's probability (interferes). `scripts/ablation_sweep.py` ablates EVERY alive
+  component on a fixed prompt subset (clean forward and CI hoisted out of the loop) and records
+  every metric; `scripts/component_table.py` joins the filters into one TSV per component.
 - `ablation.py` + `scripts/mask_ablations.py` — KL (last position and all positions) of a run's
   or a filter's CI fn under all-on / alive-union / dead-only / per-prompt / per-prompt+dead
   masks, weight delta off.
