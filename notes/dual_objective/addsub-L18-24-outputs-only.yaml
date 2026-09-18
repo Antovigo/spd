@@ -2,6 +2,10 @@
 # pass removed: `decomposition.ci.dual: false`, and no `pd.hidden` or `nontarget.hidden`, so
 # no hidden recon terms and no e2e KL riders. The CI-scaled weight decay reads the target
 # stream's OUTPUT-head CI instead (there is no hidden head). Everything else is identical.
+# `CIMaskedReconLoss` is also dropped from `eval.metrics`: with one CI role it emits only the
+# `ce_kl/kl_ci_masked` arm `CEandKLLosses` already emits, and the evaluator refuses that pair
+# (it is authorable in the dual config because the hidden role gives it a second arm). Killed
+# p-cad72ae0 at convert time, 2026-09-18.
 run_name: addsub-L18-24-outputs-only
 decomposition:
   sites:
@@ -151,7 +155,6 @@ eval:
   slow_every: 4000
   slow_on_first_step: true
   metrics:
-    - type: CIMaskedReconLoss
     - type: CEandKLLosses
       rounding_threshold: 0.0
     - type: CI_L0
