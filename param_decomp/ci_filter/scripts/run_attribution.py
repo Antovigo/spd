@@ -9,8 +9,8 @@ answer's renormalized log-probability — it interferes.
         --source <cf-id|run> [--batch_size 500] [--verify_top 100] [--verify_prompts 1000]
 
 Writes `<run_dir>/analysis/ci_filter/step_<step>/<source>/attribution/` (for `run`, the
-`mask_ablations` sibling): `components.npz` (per-site mean effect, overall and per operation,
-with activity counts), `summary.json` (accuracies, score means) and `verified.json` (the
+`mask_ablations` sibling): `components.npz` (per-site mean effect, the count of prompts where
+ablating HELPS the true answer, and activity counts, each overall and per operation), `summary.json` (accuracies, score means) and `verified.json` (the
 ablated extremes, first-order vs causal)."""
 
 import argparse
@@ -99,6 +99,7 @@ def run_attribution(
         blocks = {block.operation: (block.start, block.stop) for block in pool.blocks}
         totals: dict[str, dict[str, np.ndarray]] = {}
         counts: dict[str, dict[str, np.ndarray]] = {}
+        positives: dict[str, dict[str, np.ndarray]] = {}
         n_rows = {name: 0 for name in ("all", *blocks)}
         scores: list[np.ndarray] = []
         clean_scores: list[np.ndarray] = []
@@ -130,6 +131,7 @@ def run_attribution(
                 active = np.asarray(rows.active[site])[:real] > config.alive_threshold
                 site_totals = totals.setdefault(site, {})
                 site_counts = counts.setdefault(site, {})
+                site_positives = positives.setdefault(site, {})
                 for name, mask in [
                     ("all", np.ones(real, bool)),
                     *[
@@ -139,6 +141,10 @@ def run_attribution(
                 ]:
                     site_totals[name] = site_totals.get(name, 0.0) + effect[mask].sum(axis=0)
                     site_counts[name] = site_counts.get(name, 0.0) + active[mask].sum(axis=0)
+                    # Sign per prompt, not size: "interferes on MOST prompts" is this count.
+                    site_positives[name] = site_positives.get(name, 0.0) + (effect[mask] > 0.0).sum(
+                        axis=0
+                    )
         logger.info(f"screen over the pool: {time.time() - t0:.0f}s")
 
         means = {
@@ -151,7 +157,16 @@ def run_attribution(
             for site, per_name in counts.items()
             for name, count in per_name.items()
         }
-        saved = {**means, **{f"active:{k}": v for k, v in activity.items()}}
+        positive = {
+            f"{site}|{name}": count
+            for site, per_name in positives.items()
+            for name, count in per_name.items()
+        }
+        saved = {
+            **means,
+            **{f"active:{k}": v for k, v in activity.items()},
+            **{f"positive:{k}": v for k, v in positive.items()},
+        }
         np.savez(out_dir / "components.npz", **saved)  # pyright: ignore[reportArgumentType] (numpy savez **kwds stub is strict)
 
         flat_score = np.concatenate(scores)
