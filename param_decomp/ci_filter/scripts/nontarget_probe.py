@@ -2,7 +2,7 @@
 
     python -m param_decomp.ci_filter.scripts.nontarget_probe --config <yaml> --data_root <root>
         --table <components.tsv> [--min_layer 13] [--max_layer 17] [--min_impairs 0.8]
-        [--dataset fineweb_llama_tok_64_eval] [--rows 1024] [--batch_size 64] [--top_k 40]
+        [--dataset fineweb_llama_tok_64_eval] [--rows 8192] [--batch_size 64] [--top_k 40]
 
 Selects components from the classification table (`scripts/component_table.py`), then subtracts
 each one from the FROZEN MODEL over pre-tokenized non-target text (weight delta on, every other
@@ -230,13 +230,28 @@ def nontarget_probe(
                 f"{summary[-1]['top1_flip_frac']:.3%}"
             )
     examples.close()
-    if heatmap:
-        np.savez(
-            out_dir / "heatmap.npz",
-            **{f"{site}|{component}": value for (site, component), value in heatmap.items()},  # pyright: ignore[reportArgumentType] (numpy savez **kwds stub is strict)
-        )
+    if heatmap_rows:
+        arrays = {
+            f"{site}|{component}": np.stack([entry[2] for entry in ranked])
+            for (site, component), ranked in heatmap.items()
+            if ranked
+        }
+        np.savez(out_dir / "heatmap.npz", **arrays)  # pyright: ignore[reportArgumentType] (numpy savez **kwds stub is strict)
         (out_dir / "heatmap_tokens.json").write_text(
-            json.dumps([[tokenizer.decode([int(t)]) for t in row] for row in text[:heatmap_rows]])
+            json.dumps(
+                {
+                    f"{site}|{component}": [
+                        {
+                            "row": entry[1],
+                            "max_kl": entry[0],
+                            "tokens": [tokenizer.decode([int(t)]) for t in text[entry[1]]],
+                        }
+                        for entry in ranked
+                    ]
+                    for (site, component), ranked in heatmap.items()
+                    if ranked
+                }
+            )
         )
     out = out_dir / "summary.tsv"
     out.write_text(
@@ -264,11 +279,14 @@ def main() -> None:
     ap.add_argument("--data_root", type=Path, required=True)
     ap.add_argument("--table", type=Path, required=True, help="components.tsv")
     ap.add_argument("--dataset", default="fineweb_llama_tok_64_eval")
-    ap.add_argument("--rows", type=int, default=1024)
+    ap.add_argument("--rows", type=int, default=8192)
     ap.add_argument("--batch_size", type=int, default=64)
     ap.add_argument("--top_k", type=int, default=40)
     ap.add_argument(
-        "--heatmap_rows", type=int, default=8, help="texts whose per-token KL is saved for plots"
+        "--heatmap_rows",
+        type=int,
+        default=8,
+        help="per component, the top rows by max KL whose per-token KL is saved",
     )
     ap.add_argument("--min_layer", type=int, default=13)
     ap.add_argument("--max_layer", type=int, default=17)
