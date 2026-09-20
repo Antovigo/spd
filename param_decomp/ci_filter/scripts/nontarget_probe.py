@@ -4,14 +4,15 @@
         --table <components.tsv> [--min_layer 13] [--max_layer 17] [--min_impairs 0.8]
         [--dataset fineweb_llama_tok_64_eval] [--rows 1024] [--batch_size 64] [--top_k 40]
 
-Selects components from the classification table (`scripts/component_table.py`), then for each
-one ablates it alone over pre-tokenized non-target text and records, per position, the KL against
-the un-ablated decomposition, the KL against the frozen model, and the argmax tokens of all three
-forwards (`param_decomp/ci_filter/nontarget.py`).
+Selects components from the classification table (`scripts/component_table.py`), then subtracts
+each one from the FROZEN MODEL over pre-tokenized non-target text (weight delta on, every other
+component on), recording per position the KL against the model and both argmax tokens
+(`param_decomp/ci_filter/nontarget.py`).
 
 Writes `<run_dir>/analysis/ci_filter/step_<step>/nontarget_probe/`: `summary.tsv` (one row per
-component: how broadly it acts) and `examples.jsonl` (its `top_k` highest-KL positions with the
-decoded context and the token swap)."""
+component: how broadly it acts), `examples.jsonl` (its `top_k` highest-KL positions with the
+decoded context and the token swap) and `heatmap.npz` + `heatmap_tokens.json` (per-token KL of
+the first `heatmap_rows` texts, for the token-coloured figures)."""
 
 import argparse
 import json
@@ -92,6 +93,7 @@ def nontarget_probe(
     rows: int,
     batch_size: int,
     top_k: int,
+    heatmap_rows: int,
     min_layer: int,
     max_layer: int,
     min_impairs: float,
@@ -132,6 +134,7 @@ def nontarget_probe(
         batches = [text[start : start + batch_size] for start in range(0, len(text), batch_size)]
         batches = [b for b in batches if b.shape[0] == batch_size]
         keys = [(row["site"], int(row["component"])) for row in chosen]
+        heatmap: dict[tuple[str, int], np.ndarray] = {}
         kls: dict[tuple[str, int], list[np.ndarray]] = {k: [] for k in keys}
         flips: dict[tuple[str, int], list[np.ndarray]] = {k: [] for k in keys}
         best: dict[tuple[str, int], list[tuple[float, int, int, int, int]]] = {k: [] for k in keys}
@@ -142,15 +145,17 @@ def nontarget_probe(
         t0 = time.time()
         for batch_index, block in enumerate(batches):
             tokens = jnp.asarray(block)
-            baseline = baseline_of(placed, prepared, tokens)
-            base_top1 = np.asarray(baseline.base_top1)
-            base_kls.append(float(np.mean(np.asarray(baseline.base_kl))))
+            baseline = baseline_of(placed, prepared, tokens, ones)
+            base_top1 = np.asarray(baseline.clean_top1)
+            base_kls.append(float(np.mean(np.asarray(baseline.subtract_nothing_kl))))
             for site, component in keys:
                 keep = dict(ones)
                 keep[site] = ones[site].at[component].set(0.0)
                 got = probe(placed, prepared, tokens, baseline, keep)
-                kl = np.asarray(got["kl_vs_base"])
+                kl = np.asarray(got["kl"])
                 top1 = np.asarray(got["top1"])
+                if batch_index == 0 and heatmap_rows:
+                    heatmap[site, component] = kl[:heatmap_rows].copy()
                 kls[site, component].append(kl.ravel())
                 flips[site, component].append((top1 != base_top1).ravel())
                 flat = kl.ravel()
@@ -171,7 +176,10 @@ def nontarget_probe(
                 f"({time.time() - t0:.0f}s elapsed)"
             )
         base_kl = float(np.mean(base_kls))
-        logger.info(f"decomposition's own KL to the model on this text: {base_kl:.4f}")
+        logger.info(f"subtract-nothing KL (should be ~0, bf16 noise): {base_kl:.2e}")
+        assert base_kl < 1e-2, (
+            f"subtracting no component should reproduce the model, got KL {base_kl:.3f}"
+        )
 
         for row in chosen:
             site, component = row["site"], int(row["component"])
@@ -209,7 +217,7 @@ def nontarget_probe(
                             "kl": kl_value,
                             "position": position,
                             "context": _decode(tokenizer, text[r, : position + 1]),
-                            "base_top1": tokenizer.decode([base_id]),
+                            "model_top1": tokenizer.decode([base_id]),
                             "ablated_top1": tokenizer.decode([ablated_id]),
                         }
                     )
@@ -222,6 +230,14 @@ def nontarget_probe(
                 f"{summary[-1]['top1_flip_frac']:.3%}"
             )
     examples.close()
+    if heatmap:
+        np.savez(
+            out_dir / "heatmap.npz",
+            **{f"{site}|{component}": value for (site, component), value in heatmap.items()},  # pyright: ignore[reportArgumentType] (numpy savez **kwds stub is strict)
+        )
+        (out_dir / "heatmap_tokens.json").write_text(
+            json.dumps([[tokenizer.decode([int(t)]) for t in row] for row in text[:heatmap_rows]])
+        )
     out = out_dir / "summary.tsv"
     out.write_text(
         "\n".join(
@@ -231,7 +247,7 @@ def nontarget_probe(
         + "\n"
     )
     (out_dir / "baseline.json").write_text(
-        json.dumps({"dataset": dataset, "rows": int(text.shape[0]), "base_kl_vs_clean": base_kl})
+        json.dumps({"dataset": dataset, "rows": int(text.shape[0]), "subtract_nothing_kl": base_kl})
     )
     logger.info(f"-> {out}")
     return out
@@ -251,6 +267,9 @@ def main() -> None:
     ap.add_argument("--rows", type=int, default=1024)
     ap.add_argument("--batch_size", type=int, default=64)
     ap.add_argument("--top_k", type=int, default=40)
+    ap.add_argument(
+        "--heatmap_rows", type=int, default=8, help="texts whose per-token KL is saved for plots"
+    )
     ap.add_argument("--min_layer", type=int, default=13)
     ap.add_argument("--max_layer", type=int, default=17)
     ap.add_argument("--min_impairs", type=float, default=0.8)
@@ -263,6 +282,7 @@ def main() -> None:
         args.rows,
         args.batch_size,
         args.top_k,
+        args.heatmap_rows,
         args.min_layer,
         args.max_layer,
         args.min_impairs,
