@@ -158,6 +158,10 @@ def test_kl_rows_and_restricted_objective() -> None:
     )
     unchanged = objective_rows(LastPositionAnswerCE(), masked, moved, ids, targets)
     np.testing.assert_allclose(np.asarray(unchanged), np.asarray(ce), rtol=1e-6)
+    # Mass moved onto NON-answer tokens does not count: the CE is renormalized over the answer
+    # set, so only the relative distribution among integers can change it.
+    elsewhere = objective_rows(LastPositionAnswerCE(), moved, clean, ids, targets)
+    np.testing.assert_allclose(np.asarray(elsewhere), np.asarray(ce), rtol=1e-6)
     assert bool(jnp.all(row_scores(clean, clean, ids, targets).integer_top1))
 
 
