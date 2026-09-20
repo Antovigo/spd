@@ -26,13 +26,16 @@ from param_decomp.core.precision import COMPUTE_DT
 
 
 class ProbeBaseline(eqx.Module):
-    """One text batch's reference forward: the frozen target model."""
+    """One text batch's reference: the SUBTRACT-NOTHING masked forward, which is the model up to
+    bf16 kernel differences. Scoring an ablation against this rather than against
+    `clean_forward` cancels those differences, and they are not small — ~8e-4 KL, larger than a
+    single component's typical effect on general text."""
 
-    clean_logits: Float[Array, "B T V"]
+    logits: Float[Array, "B T V"]
+    top1: Int[Array, "B T"]
+    clean_kl: Float[Array, "B T"]
+    """KL against `clean_forward`: the noise floor this probe cannot see below."""
     clean_top1: Int[Array, "B T"]
-    subtract_nothing_kl: Float[Array, "B T"]
-    """KL of the masked forward that subtracts NOTHING against the clean one: a numerical
-    identity check (bf16 noise), not a model property."""
 
 
 def _per_position_kl(
@@ -70,9 +73,10 @@ def make_probe_baseline() -> Callable[..., ProbeBaseline]:
         clean_logits = placed.clean_forward(tokens).output
         identity = _subtracting(placed, prepared, tokens, keep)
         return ProbeBaseline(
-            clean_logits=clean_logits,
+            logits=identity,
+            top1=jax.sharding.reshard(jnp.argmax(identity, axis=-1), P()),
+            clean_kl=jax.sharding.reshard(_per_position_kl(clean_logits, identity), P()),
             clean_top1=jax.sharding.reshard(jnp.argmax(clean_logits, axis=-1), P()),
-            subtract_nothing_kl=jax.sharding.reshard(_per_position_kl(clean_logits, identity), P()),
         )
 
     return probe_baseline
@@ -93,7 +97,7 @@ def make_probe_component() -> Callable[..., dict[str, Array]]:
     ) -> dict[str, Array]:
         logits = _subtracting(placed, prepared, tokens, keep)
         out = {
-            "kl": _per_position_kl(baseline.clean_logits, logits),
+            "kl": _per_position_kl(baseline.logits, logits),
             "top1": jnp.argmax(logits, axis=-1),
         }
         return {k: jax.sharding.reshard(v, P()) for k, v in out.items()}

@@ -265,11 +265,11 @@ def test_nontarget_probe_isolates_one_component() -> None:
         ones = {s.name: jnp.ones(s.C, jnp.float32) for s in sites}
         baseline = make_probe_baseline()(placed, prepared, tokens, ones)
         # Subtracting NOTHING is the frozen model itself: the delta carries `W - UV`.
-        np.testing.assert_allclose(np.asarray(baseline.subtract_nothing_kl), 0.0, atol=1e-4)
+        np.testing.assert_allclose(np.asarray(baseline.clean_kl), 0.0, atol=1e-4)
         probe = make_probe_component()
         same = probe(placed, prepared, tokens, baseline, ones)
         np.testing.assert_allclose(np.asarray(same["kl"]), 0.0, atol=1e-4)
-        np.testing.assert_array_equal(np.asarray(same["top1"]), np.asarray(baseline.clean_top1))
+        np.testing.assert_array_equal(np.asarray(same["top1"]), np.asarray(baseline.top1))
         site = placed.site_names[0]
         keep = dict(ones)
         keep[site] = ones[site].at[0].set(0.0)
