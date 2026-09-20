@@ -28,7 +28,11 @@ import pyarrow.parquet as pq
 from jax.sharding import PartitionSpec as P
 
 from param_decomp.ci_filter.config import CIFilterConfig, resolve_run_dir
-from param_decomp.ci_filter.nontarget import make_probe_baseline, make_probe_component
+from param_decomp.ci_filter.nontarget import (
+    make_probe_baseline,
+    make_probe_ci,
+    make_probe_component,
+)
 from param_decomp.ci_filter.pool import Tokenizer, load_tokenizer
 from param_decomp.ci_filter.step import prepare_components
 from param_decomp.core.log import logger, setup_console_logger
@@ -129,7 +133,8 @@ def nontarget_probe(
         ci_fn = restored.ci_fn  # only to report how active each probed component is
         del restored
         keys = [(row["site"], int(row["component"])) for row in chosen]
-        baseline_of = make_probe_baseline(tuple(keys))
+        baseline_of = make_probe_baseline()
+        ci_of = make_probe_ci(tuple(keys))
         probe = make_probe_component()
         ones = {
             name: jax.sharding.reshard(jnp.ones(c, jnp.float32), P()) for name, c in site_c.items()
@@ -150,7 +155,8 @@ def nontarget_probe(
         t0 = time.time()
         for batch_index, block in enumerate(batches):
             tokens = jnp.asarray(block)
-            baseline = baseline_of(placed, prepared, ci_fn, tokens, ones)
+            baseline = baseline_of(placed, prepared, tokens, ones)
+            ci_all = np.asarray(ci_of(placed, ci_fn, tokens)) if heatmap_rows else None
             base_top1 = np.asarray(baseline.top1)
             base_kls.append(float(np.mean(np.asarray(baseline.clean_kl))))
             for site, component in keys:
@@ -161,7 +167,7 @@ def nontarget_probe(
                 top1 = np.asarray(got["top1"])
                 if heatmap_rows:
                     ranked = heatmap[site, component]
-                    ci_all = np.asarray(baseline.ci)
+                    assert ci_all is not None
                     for index in np.argsort(kl.max(axis=1))[-heatmap_rows:]:
                         r = int(index)
                         ranked.append(

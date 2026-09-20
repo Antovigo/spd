@@ -37,7 +37,11 @@ from param_decomp.ci_filter.config import (
     PGDEvalConfig,
 )
 from param_decomp.ci_filter.grid import collect_operation, write_applet, write_operation
-from param_decomp.ci_filter.nontarget import make_probe_baseline, make_probe_component
+from param_decomp.ci_filter.nontarget import (
+    make_probe_baseline,
+    make_probe_ci,
+    make_probe_component,
+)
 from param_decomp.ci_filter.objective import kl_rows, objective_rows, row_scores
 from param_decomp.ci_filter.paths import CIFilterOutputs
 from param_decomp.ci_filter.pool import answer_token_ids, build_pool
@@ -264,8 +268,10 @@ def test_nontarget_probe_isolates_one_component() -> None:
         prepared = prepare_compute_weights(placed, components)
         ones = {s.name: jnp.ones(s.C, jnp.float32) for s in sites}
         selection = ((placed.site_names[0], 0), (placed.site_names[1], 1))
-        baseline = make_probe_baseline(selection)(placed, prepared, ci_fn, tokens, ones)
-        assert np.asarray(baseline.ci).shape == (*tokens.shape, len(selection))
+        ci = make_probe_ci(selection)(placed, ci_fn, tokens)
+        assert np.asarray(ci).shape == (*tokens.shape, len(selection))
+        assert np.all((np.asarray(ci) >= 0.0) & (np.asarray(ci) <= 1.0))
+        baseline = make_probe_baseline()(placed, prepared, tokens, ones)
         # Subtracting NOTHING is the frozen model itself: the delta carries `W - UV`.
         np.testing.assert_allclose(np.asarray(baseline.clean_kl), 0.0, atol=1e-4)
         probe = make_probe_component()
