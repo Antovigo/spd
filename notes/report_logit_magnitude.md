@@ -345,3 +345,35 @@ Fig 6 (-24): (a, b) grids of final residual norm ratio and mean logit shift
 Fig 7 (-24): Norm ratios and KL by a+b
 
 ![L18-24 by sum](plots/logit_magnitude/l18-24/fig7_by_sum.png)
+
+### Why these small differences still matter (Antoine, 2026-09-20)
+
+Everything above decomposes ONE block, so every number here is a PER-BLOCK effect measured
+against 31 frozen blocks. "Small" is therefore the wrong reading if the effect is systematic
+in SIGN, which both of these are: the output-only arm's residual excess and its attention-write
+shortfall point the same way in every condition and at every a+b, so across a full-model run
+they compound rather than average out. Zero-mean noise would cancel; a bias does not.
+
+Orders of magnitude, taking the all-comps-on rows (faithfulness alone, no CI masking, so this
+is the decomposition itself and not a sparsity artifact):
+
+| per-block quantity | output-only | dual | naive x32 |
+|---|---|---|---|
+| final residual ratio | 1.018 | 1.001 | 1.77 vs 1.03 |
+| layer+1 residual deficit | 0.958 | 0.998 | 0.26 vs 0.94 |
+| KL at "=" | 0.0049 | 0.0022 | 0.16 vs 0.07 |
+
+The x32 column is deliberately naive — the network re-normalizes, later blocks partly repair
+upstream error (the lens sections above show exactly that), and the errors are not independent,
+so the true scaling is certainly sub-linear. The point is the RATIO: the output-only arm's
+per-block bias is ~20x the dual arm's on the residual and ~2x on KL, and a 35%-of-norm
+attention write means two thirds of each block's attention output is missing. Repeated over
+32 blocks that is a structurally different model, not a rounding difference.
+
+This is a hypothesis, not a measurement: nothing here shows the effect actually compounds.
+The direct test is already available in the 32-block line — `addsub-all-layers-04-block30`
+(the -04 recipe on ONE block, layer 30) against `addsub-all-layers-04` itself (the same recipe
+on all 32). Same protocol, measuring the residual-norm ratio and attention-write ratio per
+decomposed block; if the per-block bias is real and compounding, the 32-block run's ratios
+should be worse than the single-block run's by more than the per-block figure. Until that is
+run, read the -23/-24 conclusion as "no logit-magnitude difference AT ONE BLOCK".
