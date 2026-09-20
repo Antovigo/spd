@@ -37,6 +37,7 @@ from param_decomp.ci_filter.config import (
     PGDEvalConfig,
 )
 from param_decomp.ci_filter.grid import collect_operation, write_applet, write_operation
+from param_decomp.ci_filter.nontarget import make_probe_baseline, make_probe_component
 from param_decomp.ci_filter.objective import kl_rows, objective_rows, row_scores
 from param_decomp.ci_filter.paths import CIFilterOutputs
 from param_decomp.ci_filter.pool import answer_token_ids, build_pool
@@ -248,6 +249,32 @@ def _setup(mesh: Mesh, sharding: str):
     assert isinstance(fn, ChunkwiseTransformerCIFn)
     ci_fn = PlacedCIFn(fn=fn, placement=resolve_ci_placement(arch, rules))
     return rules, placed, sites, ci_fn
+
+
+def test_nontarget_probe_isolates_one_component() -> None:
+    """An all-ones keep vector reproduces the baseline exactly (zero KL, same argmax); zeroing
+    one component moves the prediction somewhere."""
+    mesh = single_device_mesh()
+    rules, placed, sites, _ = _setup(mesh, "ddp")
+    tokens = jnp.asarray(np.array([[0, 11, 5, 12, 7], [0, 12, 6, 11, 7]], np.int32))
+    with jax.set_mesh(mesh):
+        components = init_model_component_stacks_placed(
+            placed, jax.random.PRNGKey(1), rules, random_component_initializer
+        )
+        prepared = prepare_compute_weights(placed, components)
+        baseline = make_probe_baseline()(placed, prepared, tokens)
+        assert np.asarray(baseline.base_kl).shape == tokens.shape
+        probe = make_probe_component()
+        ones = {s.name: jnp.ones(s.C, jnp.float32) for s in sites}
+        same = probe(placed, prepared, tokens, baseline, ones)
+        np.testing.assert_allclose(np.asarray(same["kl_vs_base"]), 0.0, atol=1e-5)
+        np.testing.assert_array_equal(np.asarray(same["top1"]), np.asarray(baseline.base_top1))
+        site = placed.site_names[0]
+        keep = dict(ones)
+        keep[site] = ones[site].at[0].set(0.0)
+        ablated = probe(placed, prepared, tokens, baseline, keep)
+        assert float(np.asarray(ablated["kl_vs_base"]).max()) > 0.0
+        assert np.all(np.asarray(ablated["kl_vs_clean"]) >= -1e-6)
 
 
 def test_ablation_sweep_metrics_match_a_single_ablation() -> None:

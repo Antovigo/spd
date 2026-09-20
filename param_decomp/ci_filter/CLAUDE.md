@@ -25,6 +25,9 @@ switch off per prompt. Target stream only: no non-target pass, no hidden-activat
   correct answer's probability (interferes). `scripts/ablation_sweep.py` ablates EVERY alive
   component on a fixed prompt subset (clean forward and CI hoisted out of the loop) and records
   every metric; `scripts/component_table.py` joins the filters into one TSV per component.
+- `nontarget.py` + `scripts/nontarget_probe.py` — what a component does OUTSIDE arithmetic:
+  ablate it alone over pre-tokenized general text and record, per position, the KL against the
+  all-on decomposition and against the frozen model, plus every forward's argmax token.
 - `ablation.py` + `scripts/mask_ablations.py` — KL (last position and all positions) of a run's
   or a filter's CI fn under all-on / alive-union / dead-only / per-prompt / per-prompt+dead
   masks, weight delta off.
