@@ -33,11 +33,11 @@ the decomposition on this pool) x 46 columns, built by
 | survival | `alive_<f>`, `max_ci_<f>` for each of the five filters |
 | screen | `effect_<s>`, `effect_<s>_add/_sub` (mean first-order effect of ablating) |
 | frequency | `impairs_frac_<s>[_add/_sub]`, `active_frac_<s>` |
-| causal | `swept_d{kl,integer_kl,answer_ce,accuracy}_run` (every component, 512 prompts) |
+| causal | `swept_d{kl,integer_kl,answer_ce,accuracy}_<s>` (every component: 512 prompts for `run`, 256 for the filters) |
 | causal (extremes) | `ablated_dscore_<s>`, `ablated_dacc_<s>` (200 per filter, 1,000 prompts) |
 
 Sources `<s>` are `run` (the decomposition's own CI), `integers` and `ce` (the two narrow
-filters). The sweeps for the two filters are still running; their columns arrive on a rebuild.
+filters), so the same component can be compared raw and under each filter's gating.
 
 ## Method
 
