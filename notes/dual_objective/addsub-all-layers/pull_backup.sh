@@ -15,7 +15,8 @@
 # Each pass pulls, into $DEST/<run id>/:
 #   * metrics.jsonl, launch_config.yaml, neuron_alignment.json, the ab_grids/ directory, the
 #     ladder summary and every log — all small, every pass
-#   * the newest COMPLETE checkpoint, if it is newer than the newest one already here.
+#   * the newest COMPLETE checkpoint, if it is not already here IN FULL (file count and
+#     byte total are compared against the pod; a partial local copy is re-pulled).
 #     "Complete" = the directory is named with the STEP NUMBER ALONE. Orbax writes into
 #     `<step>.orbax-checkpoint-tmp/` and RENAMES at finalize, so the name is the only honest
 #     signal. `_CHECKPOINT_METADATA` is NOT one: orbax writes it inside the tmp directory
@@ -91,8 +92,22 @@ pass_once() {
   # Digits-only basename: skips `<step>.orbax-checkpoint-tmp`, the in-flight save.
   newest=$("${SSH[@]}" "$REMOTE" "for d in $RUN_REMOTE/ckpts/*/; do b=\$(basename \$d); case \$b in ''|*[!0-9]*) continue;; esac; [ -f \"\$d/_CHECKPOINT_METADATA\" ] && echo \$b; done | sort -n | tail -1" 2>/dev/null || true)
   if [ -z "$newest" ]; then echo "no complete checkpoint on the pod yet"; return 0; fi
+  # "Already backed up" means the local copy is COMPLETE, not merely that a directory of
+  # that name exists. A pass killed mid-transfer leaves a partial directory (rsync
+  # --partial), and a name-only test then skips it forever: on p-ba7a0c07 2026-09-20 that
+  # silently left 203 of 262 files, 39.0 of 56.0 GB, reported as backed up. Compare the
+  # file count and byte total against the pod and re-pull on any mismatch.
   have=$(ls "$OUT/ckpts" 2>/dev/null | sort -n | tail -1 || true)
-  if [ "$newest" = "${have:-}" ]; then echo "newest checkpoint $newest already backed up"; return 0; fi
+  if [ "$newest" = "${have:-}" ]; then
+    local_fp=$(find "$OUT/ckpts/$newest" -type f -printf '%s\n' 2>/dev/null \
+      | awk '{n++; s+=$1} END {printf "%d:%.0f", n, s}')
+    remote_fp=$("${SSH[@]}" "$REMOTE" "find $RUN_REMOTE/ckpts/$newest -type f -printf '%s\n' \
+      | awk '{n++; s+=\$1} END {printf \"%d:%.0f\", n, s}'" 2>/dev/null || true)
+    if [ -n "$remote_fp" ] && [ "$local_fp" = "$remote_fp" ]; then
+      echo "newest checkpoint $newest already backed up ($local_fp)"; return 0
+    fi
+    echo "local $newest is INCOMPLETE (local $local_fp vs pod ${remote_fp:-unknown}); re-pulling"
+  fi
   echo "pulling checkpoint step $newest (~53 GB; have ${have:-none})"
   mkdir -p "$OUT/ckpts"
   if rsync -a --partial --info=progress2 -e "${SSH[*]}" \
