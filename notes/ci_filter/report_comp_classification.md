@@ -100,6 +100,61 @@ layer 30 (`mlp.gate_proj` c124: ablating it costs 10 accuracy points).
 Most early impairers hurt **subtraction** about twice as much as addition; L21 `mlp.down_proj` c38
 is the clean exception (addition-specific).
 
+## What the L13–17 candidates do on general text
+
+The probe (`scripts/nontarget_probe.py`) subtracts one component from the model — every other
+component on, weight delta on, so the un-ablated forward IS the model — and scores 1,024 fineweb
+rows (65k tokens) position by position. Selection: layers 13–17 with `impairs_frac_run >= 0.8`,
+13 components.
+
+![probe distribution](figures/probe_distribution.png)
+
+| component | median KL | p99 | max | >1e-3 | argmax flips | arithmetic `d_answer_ce` |
+|---|---|---|---|---|---|---|
+| L13 `self_attn.k_proj` c19 | 8.5e-4 | 7.2e-3 | 0.94 | 42.7% | 2.14% | −0.007 |
+| L13 `self_attn.k_proj` c15 | 6.0e-4 | 4.9e-3 | 0.45 | 27.7% | 1.82% | −0.006 |
+| L13 `self_attn.k_proj` c10 | 4.0e-4 | 2.6e-3 | 0.11 | 15.5% | 1.44% | −0.004 |
+| L17 `mlp.down_proj` c3 | 2.8e-4 | 2.1e-3 | 0.13 | 11.0% | 1.14% | **−0.109** |
+| L17 `mlp.up_proj` c9 | 2.8e-4 | 2.1e-3 | 0.03 | 11.1% | 1.18% | −0.092 |
+| the other MLP candidates | ~3e-4 | ~2.2e-3 | 0.03–0.07 | 11–14% | 1.2–1.4% | −0.02 to −0.05 |
+
+Two readings, and they point in opposite directions:
+
+- **The L13 attention components act broadly on text and barely on arithmetic.** c19 changes the
+  argmax on 2.1% of ordinary tokens and reaches KL 0.94 somewhere, while its arithmetic effect is
+  a rounding error (−0.007 CE). These are general-purpose machinery whose arithmetic harm is
+  incidental.
+- **The L17 MLP pair is the reverse.** L17 c3 is the strongest arithmetic impairer in the whole
+  decomposition below layer 22 (−0.109 CE, +1.2 accuracy points when removed) yet is one of the
+  *quietest* on text (max KL 0.13, argmax flips on 1.1% of tokens, at the population floor). That
+  is the profile you would expect from a narrow mechanism that happens to fire on arithmetic.
+
+![L13 k_proj c19](figures/probe_layers_13_self_attn_k_proj_c19.png)
+
+Each cell is one token, shaded by the KL its subtraction causes there (log scale). For
+`L13 self_attn.k_proj c19` the effect is spread across ordinary prose with sharp peaks on
+structural tokens — the quote opening `"Create New Conversation"`, `entries` after a blog
+header, `search` in a query-syntax instruction. Not an arithmetic story.
+
+![L17 down_proj c3](figures/probe_layers_17_mlp_down_proj_c3.png)
+
+**What this does not settle.** 65k tokens is a first pass; a component that fires on a genuinely
+rare context could still be invisible here (the per-component figures show each component's own
+top-8 sequences by max KL, so rare firings would surface if they existed in this sample). The
+larger pass is the same command with `--rows 16384`.
+
+### Two measurement traps, both hit on the way here
+
+1. **The baseline must include the weight delta.** This run dropped the faithfulness term, so
+   "all components on, delta off" is NOT the model — its KL to Llama on fineweb is 6.3, and its
+   argmax predictions are visibly broken. With the delta mask at 1 and component masks at 1, the
+   masked forward reproduces the model exactly, and subtracting one component is then a clean
+   counterfactual.
+2. **The masked path has a bf16 noise floor of ~8e-4 KL** against `clean_forward`, which is
+   *larger* than a typical single component's effect on text. Scoring against the model's own
+   forward made all 13 components look identical. Scoring against the subtract-nothing masked
+   forward — the identical kernel path — cancels it; the floor is recorded in `baseline.json`.
+
 ## What this cannot answer yet
 
 The motivating question — *if the network were trained only on arithmetic, which mechanisms would
