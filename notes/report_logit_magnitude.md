@@ -259,3 +259,89 @@ from layer 22 on).
 ![lens2 rounded](plots/logit_magnitude/rounded/lens2_mean_vs_std.png)
 ![lens4 rounded](plots/logit_magnitude/rounded/lens4_persistence.png)
 ![lens5 rounded](plots/logit_magnitude/rounded/lens5_grids.png)
+
+## Replication on the addsub-L18-24 pair (added 2026-09-20, jobs 11966/11967/11968)
+
+Same question, same protocol, on the next recipe generation: `addsub-L18-24` (dual,
+p-80e88c2b) vs `addsub-L18-24-outputs-only` (p-b1ab4bb2), both at checkpoint 20000 with their
+own step-20000 ab-grid CI. The -24 recipe is the single-block reduction of the 32-block SOTA
+`addsub-all-layers-4xh100-05`: doubled C, `neuron_aligned_zero_u` init, `per_position` hidden
+normalization, merged stochastic+PPGD terms at PGD:stochastic 0.9, a halved hidden e2e-KL
+rider, and CI-scaled weight decay reading the target stream's hidden head
+(`notes/dual_objective/addsub-L18-24.yaml` has the full delta from the -23 pair). Raw data
+`~/pd_scratch/dual_obj_jax/attn_alive/logitmag24/*.npz`; figures copied to
+`notes/plots/logit_magnitude/l18-24/`.
+
+Toolkit note: the `8B_targeted` venv every `attn_alive` script hard-codes is GONE (worktree
+deleted) and no torch remained in `~`. Rebuilt as `attn_alive/.venv-cpu` (torch 2.14+cpu,
+transformers 5.17); `logit_mag.py` and `logit_mag_plots.py` ran UNMODIFIED under transformers
+5. `logit_mag_plots.py` keys off the tags `dual_*` / `oo_*`, so `logitmag24_plots/` holds
+symlinks to the `*24_*` npz under the un-suffixed names.
+
+### The conclusion replicates: still no logit-magnitude difference
+
+Median over 10 000 prompts (logit std over the vocab 2.34; compare the table at the top):
+
+| condition | KL | acc | logit offset | slope | rms logit diff | of which shape | ‖final resid‖ / target | cos(final resid) |
+|---|---|---|---|---|---|---|---|---|
+| dual, output CI | 0.0057 | 0.947 | +0.009 | 0.998 | 0.12 | 0.11 | 0.994 | 0.998 |
+| dual, hidden CI | 0.0038 | 0.947 | −0.001 | 0.999 | 0.09 | 0.08 | 0.998 | 0.999 |
+| output-only, output CI | 0.0094 | 0.939 | +0.000 | 0.997 | 0.18 | 0.17 | 1.024 | 0.996 |
+| dual, all comps on | 0.0022 | 0.946 | +0.002 | 0.999 | 0.08 | 0.07 | 1.001 | 0.999 |
+| output-only, all comps on | 0.0049 | 0.943 | +0.007 | 0.999 | 0.14 | 0.14 | 1.018 | 0.998 |
+
+- Unchanged: no constant offset (within ±0.01 logits), no temperature/scale change (slope
+  0.997-0.999), ~93% of the rms logit difference is per-token shape — the error the KL already
+  sees. Post-RMSNorm norm 131.12-131.26 against the target's 131.19, so the residual
+  differences below are again erased before the unembed.
+- Unchanged: the dual arm is the more faithful one on KL (0.0057 / 0.0038 vs 0.0094) and on
+  residual error, and hidden CI stays tighter than output CI.
+
+### Two quantitative shifts versus -23
+
+- **The output-only residual excess doubles.** Its final-residual ratio is 1.024 (-23: 1.011).
+  The trough is essentially unchanged (0.944 after layer 19; -23: 0.945) — what differs is the
+  recovery: it crosses 1.0 between layers 27 and 28 and overshoots to +2.4%. The dual arm moved
+  the other way: its trough is at layer 18 (0.977), and it ends 0.7% low under output CI, 0.2%
+  low under hidden CI (-23: 0.8% low). The magnitude structure survives: the output-only
+  layer-19 ratio is 0.913 at a+b < 25 against 0.958 at a+b > 150 (dual: 0.959 / 0.993).
+- **The layer-18 split is sharper.** The output-only run reproduces only 35% of the
+  attention-output norm at "=" (-23: 48%) while matching the MLP-18 output almost exactly
+  (0.99; -23: 0.93). The dual run sits at 63% attention / 88% MLP under output CI and 79% / 94%
+  under hidden CI (-23: 65/84 and 84/94). The newer recipe pushes the output-only arm FURTHER
+  toward "drop the attention write, reproduce the MLP" — the o#73 story of
+  `report_attn_alive.md`, more pronounced.
+- The all-comps-on rows show this is faithfulness, not CI sparsity: with every component on and
+  the delta off, the output-only forward still carries +1.8% of final residual and a 4.2%
+  layer-19 deficit, while the dual is within 0.1% at the end and <0.3% everywhere.
+
+Caveat: -24 doubles C at every site, so component COUNTS (and anything per-component) are not
+comparable across the pairs; the norms, ratios and logit statistics quoted here are.
+
+Fig 1 (-24): Residual-stream norm at '=' per layer, relative to the target model
+
+![L18-24 residual-stream norm per layer](plots/logit_magnitude/l18-24/fig1_resid_norm_layers.png)
+
+Fig 2 (-24): Final residual norm ratio, direction, and layer-18 write norms
+
+![L18-24 final residual](plots/logit_magnitude/l18-24/fig2_final_resid.png)
+
+Fig 3 (-24): Per-prompt logit statistics, decomposed minus target
+
+![L18-24 logit statistics](plots/logit_magnitude/l18-24/fig3_logit_stats.png)
+
+Fig 4 (-24): Decomposed vs target logits, full vocab
+
+![L18-24 logit scatter](plots/logit_magnitude/l18-24/fig4_logit_scatter.png)
+
+Fig 5 (-24): Logit difference split into offset / scale / shape
+
+![L18-24 difference decomposition](plots/logit_magnitude/l18-24/fig5_diff_decomposition.png)
+
+Fig 6 (-24): (a, b) grids of final residual norm ratio and mean logit shift
+
+![L18-24 grids](plots/logit_magnitude/l18-24/fig6_grids.png)
+
+Fig 7 (-24): Norm ratios and KL by a+b
+
+![L18-24 by sum](plots/logit_magnitude/l18-24/fig7_by_sum.png)
