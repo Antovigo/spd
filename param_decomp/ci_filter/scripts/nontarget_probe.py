@@ -12,7 +12,8 @@ component on), recording per position the KL against the model and both argmax t
 Writes `<run_dir>/analysis/ci_filter/step_<step>/nontarget_probe/`: `summary.tsv` (one row per
 component: how broadly it acts), `examples.jsonl` (its `top_k` highest-KL positions with the
 decoded context and the token swap) and `heatmap.npz` + `heatmap_tokens.json` (per-token KL of
-the first `heatmap_rows` texts, for the token-coloured figures)."""
+the `heatmap_rows` texts with the HIGHEST max KL FOR THAT COMPONENT, so a narrow-context
+component is visible where it fires)."""
 
 import argparse
 import json
@@ -134,7 +135,9 @@ def nontarget_probe(
         batches = [text[start : start + batch_size] for start in range(0, len(text), batch_size)]
         batches = [b for b in batches if b.shape[0] == batch_size]
         keys = [(row["site"], int(row["component"])) for row in chosen]
-        heatmap: dict[tuple[str, int], np.ndarray] = {}
+        # Streaming top-n rows per component, ranked by the row's max KL: a narrow-context
+        # component is only interesting where it fires, and that is not row 0.
+        heatmap: dict[tuple[str, int], list[tuple[float, int, np.ndarray]]] = {k: [] for k in keys}
         kls: dict[tuple[str, int], list[np.ndarray]] = {k: [] for k in keys}
         flips: dict[tuple[str, int], list[np.ndarray]] = {k: [] for k in keys}
         best: dict[tuple[str, int], list[tuple[float, int, int, int, int]]] = {k: [] for k in keys}
@@ -154,8 +157,14 @@ def nontarget_probe(
                 got = probe(placed, prepared, tokens, baseline, keep)
                 kl = np.asarray(got["kl"])
                 top1 = np.asarray(got["top1"])
-                if batch_index == 0 and heatmap_rows:
-                    heatmap[site, component] = kl[:heatmap_rows].copy()
+                if heatmap_rows:
+                    ranked = heatmap[site, component]
+                    for r in np.argsort(kl.max(axis=1))[-heatmap_rows:]:
+                        ranked.append(
+                            (float(kl[r].max()), batch_index * batch_size + int(r), kl[r].copy())
+                        )
+                    ranked.sort(key=lambda entry: -entry[0])
+                    del ranked[heatmap_rows:]
                 kls[site, component].append(kl.ravel())
                 flips[site, component].append((top1 != base_top1).ravel())
                 flat = kl.ravel()
