@@ -255,7 +255,7 @@ def test_nontarget_probe_isolates_one_component() -> None:
     """Subtracting no component reproduces the frozen model exactly; subtracting one moves the
     prediction somewhere."""
     mesh = single_device_mesh()
-    rules, placed, sites, _ = _setup(mesh, "ddp")
+    rules, placed, sites, ci_fn = _setup(mesh, "ddp")
     tokens = jnp.asarray(np.array([[0, 11, 5, 12, 7], [0, 12, 6, 11, 7]], np.int32))
     with jax.set_mesh(mesh):
         components = init_model_component_stacks_placed(
@@ -263,7 +263,9 @@ def test_nontarget_probe_isolates_one_component() -> None:
         )
         prepared = prepare_compute_weights(placed, components)
         ones = {s.name: jnp.ones(s.C, jnp.float32) for s in sites}
-        baseline = make_probe_baseline()(placed, prepared, tokens, ones)
+        selection = ((placed.site_names[0], 0), (placed.site_names[1], 1))
+        baseline = make_probe_baseline(selection)(placed, prepared, ci_fn, tokens, ones)
+        assert np.asarray(baseline.ci).shape == (*tokens.shape, len(selection))
         # Subtracting NOTHING is the frozen model itself: the delta carries `W - UV`.
         np.testing.assert_allclose(np.asarray(baseline.clean_kl), 0.0, atol=1e-4)
         probe = make_probe_component()

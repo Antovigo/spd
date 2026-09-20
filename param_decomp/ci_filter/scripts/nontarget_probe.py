@@ -19,6 +19,7 @@ import argparse
 import json
 import time
 from pathlib import Path
+from typing import Any
 
 import jax
 import jax.numpy as jnp
@@ -125,8 +126,10 @@ def nontarget_probe(
     examples = (out_dir / "examples.jsonl").open("w")
     with jax.set_mesh(mesh):
         prepared, _ = prepare_components(placed, restored.components)
+        ci_fn = restored.ci_fn  # only to report how active each probed component is
         del restored
-        baseline_of = make_probe_baseline()
+        keys = [(row["site"], int(row["component"])) for row in chosen]
+        baseline_of = make_probe_baseline(tuple(keys))
         probe = make_probe_component()
         ones = {
             name: jax.sharding.reshard(jnp.ones(c, jnp.float32), P()) for name, c in site_c.items()
@@ -134,10 +137,9 @@ def nontarget_probe(
 
         batches = [text[start : start + batch_size] for start in range(0, len(text), batch_size)]
         batches = [b for b in batches if b.shape[0] == batch_size]
-        keys = [(row["site"], int(row["component"])) for row in chosen]
         # Streaming top-n rows per component, ranked by the row's max KL: a narrow-context
         # component is only interesting where it fires, and that is not row 0.
-        heatmap: dict[tuple[str, int], list[tuple[float, int, np.ndarray]]] = {k: [] for k in keys}
+        heatmap: dict[tuple[str, int], list[dict[str, Any]]] = {k: [] for k in keys}
         kls: dict[tuple[str, int], list[np.ndarray]] = {k: [] for k in keys}
         flips: dict[tuple[str, int], list[np.ndarray]] = {k: [] for k in keys}
         best: dict[tuple[str, int], list[tuple[float, int, int, int, int]]] = {k: [] for k in keys}
@@ -148,7 +150,7 @@ def nontarget_probe(
         t0 = time.time()
         for batch_index, block in enumerate(batches):
             tokens = jnp.asarray(block)
-            baseline = baseline_of(placed, prepared, tokens, ones)
+            baseline = baseline_of(placed, prepared, ci_fn, tokens, ones)
             base_top1 = np.asarray(baseline.top1)
             base_kls.append(float(np.mean(np.asarray(baseline.clean_kl))))
             for site, component in keys:
@@ -159,11 +161,20 @@ def nontarget_probe(
                 top1 = np.asarray(got["top1"])
                 if heatmap_rows:
                     ranked = heatmap[site, component]
-                    for r in np.argsort(kl.max(axis=1))[-heatmap_rows:]:
+                    ci_all = np.asarray(baseline.ci)
+                    for index in np.argsort(kl.max(axis=1))[-heatmap_rows:]:
+                        r = int(index)
                         ranked.append(
-                            (float(kl[r].max()), batch_index * batch_size + int(r), kl[r].copy())
+                            {
+                                "max_kl": float(kl[r].max()),
+                                "row": batch_index * batch_size + r,
+                                "kl": kl[r].copy(),
+                                "ci": ci_all[r, :, keys.index((site, component))].copy(),
+                                "model_top1": base_top1[r].copy(),
+                                "ablated_top1": top1[r].copy(),
+                            }
                         )
-                    ranked.sort(key=lambda entry: -entry[0])
+                    ranked.sort(key=lambda entry: -float(entry["max_kl"]))
                     del ranked[heatmap_rows:]
                 kls[site, component].append(kl.ravel())
                 flips[site, component].append((top1 != base_top1).ravel())
@@ -240,20 +251,28 @@ def nontarget_probe(
             )
     examples.close()
     if heatmap_rows:
-        arrays = {
-            f"{site}|{component}": np.stack([entry[2] for entry in ranked])
-            for (site, component), ranked in heatmap.items()
-            if ranked
-        }
-        np.savez(out_dir / "heatmap.npz", **arrays)  # pyright: ignore[reportArgumentType] (numpy savez **kwds stub is strict)
+        np.savez(  # the figure script's compact view: per-token KL only
+            out_dir / "heatmap.npz",
+            **{
+                f"{site}|{component}": np.stack([entry["kl"] for entry in ranked])
+                for (site, component), ranked in heatmap.items()
+                if ranked
+            },  # pyright: ignore[reportArgumentType] (numpy savez **kwds stub is strict)
+        )
         (out_dir / "heatmap_tokens.json").write_text(
             json.dumps(
                 {
                     f"{site}|{component}": [
                         {
-                            "row": entry[1],
-                            "max_kl": entry[0],
-                            "tokens": [tokenizer.decode([int(t)]) for t in text[entry[1]]],
+                            "row": entry["row"],
+                            "max_kl": entry["max_kl"],
+                            "tokens": [tokenizer.decode([int(t)]) for t in text[entry["row"]]],
+                            "kl": [round(float(v), 6) for v in entry["kl"]],
+                            "ci": [round(float(v), 4) for v in entry["ci"]],
+                            "model_top1": [tokenizer.decode([int(t)]) for t in entry["model_top1"]],
+                            "ablated_top1": [
+                                tokenizer.decode([int(t)]) for t in entry["ablated_top1"]
+                            ],
                         }
                         for entry in ranked
                     ]
@@ -294,7 +313,7 @@ def main() -> None:
     ap.add_argument(
         "--heatmap_rows",
         type=int,
-        default=8,
+        default=25,
         help="per component, the top rows by max KL whose per-token KL is saved",
     )
     ap.add_argument("--min_layer", type=int, default=13)

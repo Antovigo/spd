@@ -20,7 +20,8 @@ from jax.sharding import PartitionSpec as P
 from jaxtyping import Array, Float, Int
 
 from param_decomp.ci_filter.objective import kl_rows
-from param_decomp.ci_filter.step import Prepared
+from param_decomp.ci_filter.step import UNCONSTRAINED, Prepared, output_ci
+from param_decomp.core.ci_fn import PlacedCIFn
 from param_decomp.core.model import MaterializedMasking, PlacedModel
 from param_decomp.core.precision import COMPUTE_DT
 
@@ -36,6 +37,9 @@ class ProbeBaseline(eqx.Module):
     clean_kl: Float[Array, "B T"]
     """KL against `clean_forward`: the noise floor this probe cannot see below."""
     clean_top1: Int[Array, "B T"]
+    ci: Float[Array, "B T K"]
+    """The decomposition's own output CI of the probed components, in selection order: how
+    active each one is at that position, independent of what removing it does."""
 
 
 def _per_position_kl(
@@ -65,18 +69,32 @@ def _subtracting(
     ).output
 
 
-def make_probe_baseline() -> Callable[..., ProbeBaseline]:
+def make_probe_baseline(selection: tuple[tuple[str, int], ...]) -> Callable[..., ProbeBaseline]:
+    """`selection` is the probed `(site, component)` list, static: the baseline reports those
+    components' CI alongside its logits, in that order."""
+
     @eqx.filter_jit
     def probe_baseline(
-        placed: PlacedModel, prepared: Prepared, tokens: Int[Array, "B T"], keep: dict[str, Array]
+        placed: PlacedModel,
+        prepared: Prepared,
+        ci_fn: PlacedCIFn,
+        tokens: Int[Array, "B T"],
+        keep: dict[str, Array],
     ) -> ProbeBaseline:
-        clean_logits = placed.clean_forward(tokens).output
+        clean = placed.clean_forward(tokens, capture_keys=ci_fn.capture_keys)
+        clean_logits = clean.output
+        lower = output_ci(placed, ci_fn, UNCONSTRAINED, clean.captures, remat=False).lower
+        ci = jnp.stack(
+            [lower[site][:, :, component].astype(jnp.float32) for site, component in selection],
+            axis=-1,
+        )
         identity = _subtracting(placed, prepared, tokens, keep)
         return ProbeBaseline(
             logits=identity,
             top1=jax.sharding.reshard(jnp.argmax(identity, axis=-1), P()),
             clean_kl=jax.sharding.reshard(_per_position_kl(clean_logits, identity), P()),
             clean_top1=jax.sharding.reshard(jnp.argmax(clean_logits, axis=-1), P()),
+            ci=jax.sharding.reshard(ci, P()),
         )
 
     return probe_baseline
