@@ -41,6 +41,10 @@ from param_decomp.experiments.lm.resolved import TargetConfig
 from param_decomp.experiments.lm.training import enable_persistent_compilation_cache
 from param_decomp.infra.dataset_store import dataset_dir
 
+TOKEN_CLASSES = ("digit", "equals", "other")
+"""Coarse token classes the per-class mean KL is reported for: a component that fires on
+arithmetic-looking text should separate `digit`/`equals` from `other`."""
+
 SUMMARY_COLUMNS = (
     "site",
     "layer",
@@ -55,6 +59,8 @@ SUMMARY_COLUMNS = (
     "frac_kl_over_1e-3",
     "frac_kl_over_1e-2",
     "top1_flip_frac",
+    *[f"mean_kl_{name}" for name in TOKEN_CLASSES],
+    *[f"n_{name}" for name in TOKEN_CLASSES],
 )
 
 
@@ -72,6 +78,14 @@ def _select(
         and float(row["impairs_frac_run"]) >= min_impairs
     ]
     return sorted(chosen, key=lambda row: float(row["swept_danswer_ce_run"] or 0.0))
+
+
+def _token_classes(text: np.ndarray, tokenizer: Tokenizer) -> dict[str, np.ndarray]:
+    """`{class: (rows, seq_len) bool}` over the probed text, by the token's own string."""
+    decoded = {int(t): tokenizer.decode([int(t)]) for t in np.unique(text)}
+    digit = np.array([[decoded[int(t)].strip().isdigit() for t in row] for row in text])
+    equals = np.array([["=" in decoded[int(t)] for t in row] for row in text])
+    return {"digit": digit, "equals": equals & ~digit, "other": ~digit & ~equals}
 
 
 def _text_rows(data_root: Path, dataset: str, rows: int) -> np.ndarray:
@@ -145,6 +159,10 @@ def nontarget_probe(
         # Streaming top-n rows per component, ranked by the row's max KL: a narrow-context
         # component is only interesting where it fires, and that is not row 0.
         heatmap: dict[tuple[str, int], list[dict[str, Any]]] = {k: [] for k in keys}
+        classes = _token_classes(text, tokenizer)
+        class_sums: dict[tuple[str, int], dict[str, float]] = {
+            k: dict.fromkeys(TOKEN_CLASSES, 0.0) for k in keys
+        }
         kls: dict[tuple[str, int], list[np.ndarray]] = {k: [] for k in keys}
         flips: dict[tuple[str, int], list[np.ndarray]] = {k: [] for k in keys}
         best: dict[tuple[str, int], list[tuple[float, int, int, int, int]]] = {k: [] for k in keys}
@@ -182,6 +200,9 @@ def nontarget_probe(
                         )
                     ranked.sort(key=lambda entry: -float(entry["max_kl"]))
                     del ranked[heatmap_rows:]
+                block_slice = slice(batch_index * batch_size, (batch_index + 1) * batch_size)
+                for name, mask in classes.items():
+                    class_sums[site, component][name] += float(kl[mask[block_slice]].sum())
                 kls[site, component].append(kl.ravel())
                 flips[site, component].append((top1 != base_top1).ravel())
                 flat = kl.ravel()
@@ -226,6 +247,15 @@ def nontarget_probe(
                     "frac_kl_over_1e-3": float((flat_kl > 1e-3).mean()),
                     "frac_kl_over_1e-2": float((flat_kl > 1e-2).mean()),
                     "top1_flip_frac": float(flat_flip.mean()),
+                    **{
+                        f"mean_kl_{name}": class_sums[site, component][name]
+                        / max(int(classes[name][: len(batches) * batch_size].sum()), 1)
+                        for name in TOKEN_CLASSES
+                    },
+                    **{
+                        f"n_{name}": int(classes[name][: len(batches) * batch_size].sum())
+                        for name in TOKEN_CLASSES
+                    },
                 }
             )
             seen: set[tuple[int, int]] = set()
