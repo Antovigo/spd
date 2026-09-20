@@ -64,7 +64,7 @@ SUMMARY_COLUMNS = (
 )
 
 
-def _select(
+def select_components(
     table: Path, min_layer: int, max_layer: int, min_impairs: float
 ) -> list[dict[str, str]]:
     lines = table.read_text().splitlines()
@@ -128,7 +128,7 @@ def nontarget_probe(
     out_dir = run_dir / "analysis" / "ci_filter" / f"step_{step}" / "nontarget_probe"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    chosen = _select(table, min_layer, max_layer, min_impairs)
+    chosen = select_components(table, min_layer, max_layer, min_impairs)
     assert chosen, (
         f"no components in layers {min_layer}-{max_layer} with impairs_frac >= {min_impairs}"
     )

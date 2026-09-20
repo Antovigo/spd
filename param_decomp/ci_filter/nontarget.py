@@ -49,10 +49,12 @@ def _per_position_kl(
     return flat.reshape(p_logits.shape[:-1])
 
 
-def _subtracting(
+def subtracting(
     placed: PlacedModel, prepared: Prepared, tokens: Int[Array, "B T"], keep: dict[str, Array]
 ) -> Float[Array, "B T V"]:
-    """`x @ W` minus the components whose `keep` entry is 0, at every site."""
+    """`x @ W` minus the components whose `keep` entry is 0, at every site: with every mask at 1
+    and the delta mask at 1 the masked forward IS the frozen model, so a zeroed mask subtracts
+    exactly that component's contribution."""
     masks = {
         site.name: jnp.broadcast_to(keep[site.name].astype(COMPUTE_DT), (*tokens.shape, site.C))
         for site in placed.sites
@@ -92,7 +94,7 @@ def make_probe_baseline() -> Callable[..., ProbeBaseline]:
         placed: PlacedModel, prepared: Prepared, tokens: Int[Array, "B T"], keep: dict[str, Array]
     ) -> ProbeBaseline:
         clean_logits = placed.clean_forward(tokens).output
-        identity = _subtracting(placed, prepared, tokens, keep)
+        identity = subtracting(placed, prepared, tokens, keep)
         return ProbeBaseline(
             logits=identity,
             top1=jax.sharding.reshard(jnp.argmax(identity, axis=-1), P()),
@@ -116,7 +118,7 @@ def make_probe_component() -> Callable[..., dict[str, Array]]:
         baseline: ProbeBaseline,
         keep: dict[str, Array],
     ) -> dict[str, Array]:
-        logits = _subtracting(placed, prepared, tokens, keep)
+        logits = subtracting(placed, prepared, tokens, keep)
         out = {
             "kl": _per_position_kl(baseline.logits, logits),
             "top1": jnp.argmax(logits, axis=-1),
