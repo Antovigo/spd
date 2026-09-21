@@ -14,6 +14,7 @@ from param_decomp.arith_repr.hypotheses import (
     Labels,
     ValueFolds,
     build_hypotheses,
+    lattice_overlap,
     linear_direction,
 )
 
@@ -185,5 +186,6 @@ def fit_hypotheses(
         "joint_energy": joint_energy / total if total else 0.0,
         "null_threshold": threshold,
         "n_hypotheses": len(fits),
+        "lattice_overlap": lattice_overlap(hyps),
     }
     return fits, summary

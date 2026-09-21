@@ -15,7 +15,7 @@ import numpy as np
 DIVISORS: tuple[int, ...] = (2, 4, 5, 10, 20, 25, 50, 100)
 """The periods, in divisor order; `1` (the constant) is handled by centering."""
 
-RANK_TOL = 1e-6
+RANK_TOL = 1e-5
 
 
 def divisor_order_check() -> None:
@@ -75,12 +75,20 @@ def indicator(values: np.ndarray, n_classes: int) -> np.ndarray:
 
 
 def _orth_complement(r_m: np.ndarray) -> np.ndarray:
-    """Orthonormal basis of `col(r_m)` with the rank cut `RANK_TOL`."""
+    """Orthonormal basis of `col(r_m)` with the rank cut `RANK_TOL` (relative)."""
     if r_m.shape[1] == 0:
         return r_m[:, :0]
     u_m, s, _ = np.linalg.svd(r_m, full_matrices=False)
-    keep = s > RANK_TOL * max(float(s[0]) if s.size else 0.0, 1e-300) * np.sqrt(r_m.shape[0])
-    return u_m[:, keep]
+    return u_m[:, s > RANK_TOL * max(float(s[0]), 1e-300)]
+
+
+def _project_out(i_m: np.ndarray, lower: list[np.ndarray]) -> np.ndarray:
+    """`i_m` minus its projection onto the SUM of the `lower` spans. The lower spans are
+    orthonormalised first: under a non-product prompt measure the pure parts of
+    incomparable divisors (4 and 10, say) are not mutually orthogonal, so their
+    concatenation is not a projector."""
+    l_m = _orth_complement(np.concatenate(lower, axis=1))
+    return i_m - l_m @ (l_m.T @ i_m)
 
 
 @dataclass(frozen=True)
@@ -136,18 +144,14 @@ def pure_parts(
     for tau in periods:
         i_m = indicator(values % tau, tau)
         lower = [const] + [parts[d].Phi for d in periods if tau % d == 0 and d < tau]
-        l_m = np.concatenate(lower, axis=1)
-        r_m = i_m - l_m @ (l_m.T @ i_m)
-        phi_m = _orth_complement(r_m)
+        phi_m = _orth_complement(_project_out(i_m, lower))
         g_m = np.linalg.lstsq(i_m, phi_m, rcond=None)[0] if phi_m.shape[1] else np.zeros((tau, 0))
         parts[tau] = Hypothesis(quantity, tau, phi_m, g_m, 0)
     out = list(parts.values())
     lo, hi = int(values.min()), int(values.max())
     if hi - lo + 1 > max(periods):
         i_m = indicator(values - lo, hi - lo + 1)
-        l_m = np.concatenate([const] + [h.Phi for h in out], axis=1)
-        r_m = i_m - l_m @ (l_m.T @ i_m)
-        phi_m = _orth_complement(r_m)
+        phi_m = _orth_complement(_project_out(i_m, [const] + [h.Phi for h in out]))
         g_m = (
             np.linalg.lstsq(i_m, phi_m, rcond=None)[0]
             if phi_m.shape[1]
@@ -162,8 +166,7 @@ def op_hypothesis(labels: Labels) -> Hypothesis:
     i_m = indicator(labels.op, 2)
     n = labels.n
     const = np.full((n, 1), 1.0 / np.sqrt(n))
-    r_m = i_m - const @ (const.T @ i_m)
-    phi_m = _orth_complement(r_m)
+    phi_m = _orth_complement(_project_out(i_m, [const]))
     g_m = np.linalg.lstsq(i_m, phi_m, rcond=None)[0]
     return Hypothesis("op", 2, phi_m, g_m, 0)
 
@@ -177,6 +180,17 @@ def build_hypotheses(labels: Labels, quantities: tuple[str, ...]) -> list[Hypoth
             continue
         out.extend(pure_parts(labels, q))
     return [h for h in out if h.dim > 0]
+
+
+def lattice_overlap(hyps: list[Hypothesis]) -> float:
+    """Largest cosine between two hypothesis spaces of the SAME quantity (0 on a product
+    measure; reported as the order-dependence diagnostic of plan section 2)."""
+    worst = 0.0
+    for i, h in enumerate(hyps):
+        for g in hyps[i + 1 :]:
+            if g.quantity == h.quantity and h.dim and g.dim:
+                worst = max(worst, float(np.abs(h.Phi.T @ g.Phi).max()))
+    return worst
 
 
 def linear_direction(labels: Labels, quantity: str) -> np.ndarray:

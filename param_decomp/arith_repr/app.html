@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Integer representations in the residual stream</title>
+<script src="data.js"></script>
+<style>
+  body { font: 13px/1.4 system-ui, sans-serif; margin: 0; color: #222; background: #fafafa; }
+  header { padding: 8px 14px; background: #fff; border-bottom: 1px solid #ddd; display: flex; gap: 18px; align-items: center; flex-wrap: wrap; position: sticky; top: 0; z-index: 2; }
+  header label { display: inline-flex; gap: 6px; align-items: center; }
+  main { display: grid; grid-template-columns: minmax(720px, 1fr) 560px; gap: 12px; padding: 12px; }
+  #map { overflow: auto; background: #fff; border: 1px solid #ddd; }
+  #detail { background: #fff; border: 1px solid #ddd; padding: 10px; position: sticky; top: 52px; max-height: calc(100vh - 70px); overflow: auto; }
+  table.map { border-collapse: collapse; font-size: 11px; }
+  table.map th { position: sticky; background: #fff; z-index: 1; font-weight: 500; }
+  table.map thead th { top: 0; }
+  table.map th.row { left: 0; text-align: right; padding-right: 6px; white-space: nowrap; }
+  table.map td { width: 16px; height: 14px; padding: 0; border: 1px solid #f2f2f2; cursor: pointer; }
+  table.map td.sel { outline: 2px solid #000; outline-offset: -2px; }
+  table.map th.pos { border-left: 2px solid #999; }
+  table.map td.pos { border-left: 2px solid #999; }
+  table.map th.q { border-left: 1px solid #bbb; }
+  table.map td.q { border-left: 1px solid #bbb; }
+  th.vert { writing-mode: vertical-rl; transform: rotate(180deg); height: 70px; font-size: 10px; }
+  .muted { color: #777; }
+  svg text { font-size: 10px; }
+  .clusters div.c { margin: 4px 0; padding: 4px 6px; border: 1px solid #e5e5e5; cursor: pointer; }
+  .clusters div.c.sel { border-color: #000; }
+  pre { font-size: 11px; white-space: pre-wrap; }
+  .sep { border-collapse: collapse; font-size: 10px; }
+  .sep td, .sep th { border: 1px solid #eee; padding: 1px 3px; text-align: center; }
+  .sep td.y { background: #cfe8cf; }
+  .sep td.n { background: #f2c9c9; }
+</style>
+</head>
+<body>
+<header>
+  <b>Integer representations</b>
+  <label>ops <select id="op"><option>both</option><option>add</option><option>sub</option></select></label>
+  <label>score <select id="score"><option value="generalising">generalising energy (kept dirs)</option><option value="unique">unique energy</option><option value="marginal">marginal energy</option><option value="dim_S">dim S_H</option></select></label>
+  <label>max <input id="vmax" type="number" step="0.01" value="0.2" style="width:60px"></label>
+  <label><input id="log" type="checkbox"> log colour</label>
+  <span class="muted" id="status"></span>
+</header>
+<main>
+  <div id="map"></div>
+  <div id="detail"><span class="muted">Click a cell.</span></div>
+</main>
+<script>
+const D = window.ARITH_REPR;
+const POS = ["1", "2", "3", "4"];
+const POS_LABEL = {"1": "a", "2": "op", "3": "b", "4": "="};
+const QUANT_ORDER = ["a", "op", "b", "res", "cross"];
+const COLORS = ["#1f77b4", "#d62728", "#2ca02c", "#9467bd", "#ff7f0e", "#8c564b", "#e377c2", "#17becf", "#bcbd22", "#7f7f7f"];
+let sel = null, selCluster = 0, axX = 0, axY = 1;
+
+function hypNames() {
+  // Union of hypothesis names across all records, ordered by quantity then period.
+  const seen = new Map();
+  for (const key of D.keys) for (const p of POS) {
+    const pos = D.records[key].positions[p]; if (!pos) continue;
+    for (const op of Object.keys(pos.ops)) for (const f of pos.ops[op].fits)
+      if (!seen.has(f.name)) seen.set(f.name, f);
+  }
+  const names = [...seen.values()];
+  names.sort((x, y) => QUANT_ORDER.indexOf(x.quantity) - QUANT_ORDER.indexOf(y.quantity)
+    || (x.period === null ? 1e9 : x.period) - (y.period === null ? 1e9 : y.period));
+  return names.map(f => f.name);
+}
+const HYPS = hypNames();
+
+function colour(v, vmax, log) {
+  if (v === undefined || v === null) return "#f6f6f6";
+  let t = Math.max(0, Math.min(1, v / vmax));
+  if (log) t = Math.log1p(9 * t) / Math.log(10);
+  const r = Math.round(255 - 200 * t), g = Math.round(255 - 120 * t), b = Math.round(255 - 30 * t);
+  return `rgb(${r},${g},${b})`;
+}
+
+function cell(key, p, op, name) {
+  const pos = D.records[key].positions[p]; if (!pos) return null;
+  const o = pos.ops[op]; if (!o) return null;
+  return o.fits.find(f => f.name === name) || null;
+}
+
+function renderMap() {
+  const op = document.getElementById("op").value, score = document.getElementById("score").value;
+  const vmax = parseFloat(document.getElementById("vmax").value), log = document.getElementById("log").checked;
+  let h = "<table class='map'><thead><tr><th class='row'></th>";
+  for (const p of POS) HYPS.forEach((n, i) => {
+    const cls = i === 0 ? "pos" : (HYPS[i - 1].split(":")[0] !== n.split(":")[0] ? "q" : "");
+    h += `<th class='vert ${cls}' title='position ${p}'>${i === 0 ? "pos " + p + " (" + POS_LABEL[p] + ")  " : ""}${n}</th>`;
+  });
+  h += "</tr></thead><tbody>";
+  for (const key of D.keys) {
+    const r = D.records[key];
+    h += `<tr><th class='row'>${key} <span class='muted'>k=${r.k}</span></th>`;
+    for (const p of POS) HYPS.forEach((n, i) => {
+      const f = cell(key, p, op, n);
+      const v = f ? f[score] : null;
+      const cls = (i === 0 ? "pos" : (HYPS[i - 1].split(":")[0] !== n.split(":")[0] ? "q" : "")) +
+        (sel && sel.key === key && sel.p === p && sel.name === n ? " sel" : "");
+      const tip = f ? `${key} pos ${p} ${n}: gen ${f.generalising.toFixed(4)} uniq ${f.unique.toFixed(4)} marg ${f.marginal.toFixed(4)} dimS ${f.dim_S}/${f.dim_hypothesis}` : "";
+      h += `<td class='${cls}' style='background:${colour(v, score === "dim_S" ? vmax * 50 : vmax, log)}' title='${tip}' data-key='${key}' data-p='${p}' data-n='${n}'></td>`;
+    });
+    h += "</tr>";
+  }
+  h += "</tbody></table>";
+  document.getElementById("map").innerHTML = h;
+  document.querySelectorAll("#map td").forEach(td => td.onclick = () => {
+    sel = {key: td.dataset.key, p: td.dataset.p, name: td.dataset.n}; selCluster = null; renderMap(); renderDetail();
+  });
+}
+
+function scatter(cl, w, h) {
+  const pts = [];
+  cl.members.forEach((m, mi) => {
+    const C = cl.centroids[m], cnt = cl.counts[m];
+    C.forEach((c, j) => { if (cnt[j] > 0) pts.push({x: c[axX], y: c[axY], m, mi, j, n: cnt[j], norm: cl.norms[m][j]}); });
+  });
+  if (!pts.length) return "<span class='muted'>no centroids</span>";
+  const xs = pts.map(p => p.x), ys = pts.map(p => p.y);
+  const lim = Math.max(...xs.map(Math.abs), ...ys.map(Math.abs), 1e-9) * 1.1;
+  const sx = x => w / 2 + (x / lim) * (w / 2 - 20), sy = y => h / 2 - (y / lim) * (h / 2 - 20);
+  let s = `<svg width='${w}' height='${h}' style='border:1px solid #eee;background:#fff'>`;
+  s += `<line x1='${sx(-lim)}' y1='${sy(0)}' x2='${sx(lim)}' y2='${sy(0)}' stroke='#eee'/><line x1='${sx(0)}' y1='${sy(-lim)}' x2='${sx(0)}' y2='${sy(lim)}' stroke='#eee'/>`;
+  // Connect consecutive classes of each member (residue order).
+  cl.members.forEach((m, mi) => {
+    const mp = pts.filter(p => p.m === m).sort((a, b) => a.j - b.j);
+    if (mp.length > 2 && mp.length <= 100) {
+      const d = mp.map((p, i) => (i ? "L" : "M") + sx(p.x) + " " + sy(p.y)).join(" ");
+      s += `<path d='${d}' fill='none' stroke='${COLORS[mi % 10]}' stroke-opacity='0.35'/>`;
+    }
+  });
+  for (const p of pts) {
+    const r = 2 + 2 * Math.sqrt(p.n / 200);
+    s += `<circle cx='${sx(p.x)}' cy='${sy(p.y)}' r='${r}' fill='${COLORS[p.mi % 10]}' fill-opacity='0.8'><title>${p.m} class ${p.j} (n=${p.n}, |c|=${p.norm.toFixed(3)})</title></circle>`;
+    if (pts.length <= 60) s += `<text x='${sx(p.x) + 4}' y='${sy(p.y) - 3}' fill='${COLORS[p.mi % 10]}'>${p.j}</text>`;
+  }
+  s += "</svg>";
+  return s;
+}
+
+function renderDetail() {
+  if (!sel) return;
+  const op = document.getElementById("op").value;
+  const rec = D.records[sel.key], pos = rec.positions[sel.p], o = pos && pos.ops[op];
+  const el = document.getElementById("detail");
+  if (!o) { el.innerHTML = "<span class='muted'>not analysed</span>"; return; }
+  let h = `<b>${sel.key}</b> position ${sel.p} (${POS_LABEL[sel.p]}), ops ${op}, k=${rec.k}, reads ${rec.n_reads}<br>`;
+  h += `<span class='muted'>outside read basis ${(100 * pos.outside_basis_energy).toFixed(1)}% of ||x||² · joint hypotheses ${(100 * o.joint_energy).toFixed(1)}% · kept subspaces ${(100 * o.explained_by_kept).toFixed(1)}% · null R² threshold ${o.null_threshold.toFixed(3)}</span>`;
+  h += "<h4 style='margin:8px 0 4px'>Hypotheses</h4><table class='sep'><tr><th>name</th><th>dim H</th><th>marg</th><th>uniq</th><th>gen</th><th>dim S</th><th>lin</th><th>top σ²/total, R²</th></tr>";
+  for (const f of o.fits) {
+    const tot = 1; // singular values already relative below
+    const bold = f.name === sel.name ? "font-weight:bold" : "";
+    const sv = f.sv.slice(0, 4).map((s, i) => `${(s * s / o.total_energy_dummy || 0).toFixed ? "" : ""}${f.r2[i] !== undefined ? f.r2[i].toFixed(2) : ""}`).join(" ");
+    h += `<tr style='${bold}'><td>${f.name}</td><td>${f.dim_hypothesis}</td><td>${f.marginal.toFixed(4)}</td><td>${f.unique.toFixed(4)}</td><td>${f.generalising.toFixed(4)}</td><td>${f.dim_S}</td><td>${f.linear_r2.toFixed(2)}</td><td>${f.r2.slice(0, 4).map(x => x.toFixed(2)).join(" ")}</td></tr>`;
+  }
+  h += "</table>";
+  const sepAll = o.separability.all;
+  if (sepAll && sepAll.names.length) {
+    h += "<h4 style='margin:8px 0 4px'>Separability (all kinds; green = separable)</h4><table class='sep'><tr><th></th>";
+    for (const n of sepAll.names) h += `<th>${n}</th>`;
+    h += "<th>#reads</th></tr>";
+    sepAll.names.forEach((n, i) => {
+      h += `<tr><th>${n}</th>`;
+      sepAll.names.forEach((m, j) => h += i === j ? "<td></td>" : `<td class='${sepAll.separable[i][j] ? "y" : "n"}'></td>`);
+      h += `<td>${sepAll.reads_count[i]}</td></tr>`;
+    });
+    h += "</table>";
+    const perKind = Object.entries(o.separability).filter(([k]) => k !== "all").map(([k, s]) => `${k}: ${s.clusters.map(c => "{" + c.join(", ") + "}").join(" ")}`).join("<br>");
+    h += `<div class='muted'>per kind: <br>${perKind}</div>`;
+  }
+  if (pos.add_vs_sub_cosines && Object.keys(pos.add_vs_sub_cosines).length) {
+    h += "<h4 style='margin:8px 0 4px'>add vs sub subspace cosines</h4><div class='muted'>" +
+      Object.entries(pos.add_vs_sub_cosines).filter(([, c]) => c.length).map(([n, c]) => `${n}: ${c.map(x => x.toFixed(2)).join(" ")}`).join("<br>") + "</div>";
+  }
+  h += "<h4 style='margin:8px 0 4px'>Clusters</h4><div class='clusters'>";
+  if (selCluster === null) {
+    selCluster = Math.max(0, o.clusters.findIndex(c => c.members.includes(sel.name)));
+  }
+  o.clusters.forEach((c, i) => {
+    const spec = c.spectrum.slice(0, 6).map(x => x.toFixed(2)).join(" ");
+    h += `<div class='c ${i === selCluster ? "sel" : ""}' data-i='${i}'>#${i} dim ${c.dim}: ${c.members.join(", ")} <span class='muted'>centroid spectrum ${spec}</span></div>`;
+  });
+  h += "</div>";
+  const c = o.clusters[selCluster];
+  if (c) {
+    h += `<div>axes: x <select id='axx'>${[0,1,2,3,4,5].map(i => `<option ${i === axX ? "selected" : ""}>${i}</option>`).join("")}</select> y <select id='axy'>${[0,1,2,3,4,5].map(i => `<option ${i === axY ? "selected" : ""}>${i}</option>`).join("")}</select></div>`;
+    h += scatter(c, 520, 420);
+  }
+  el.innerHTML = h;
+  el.querySelectorAll(".clusters .c").forEach(d => d.onclick = () => { selCluster = +d.dataset.i; renderDetail(); });
+  const ax = el.querySelector("#axx"), ay = el.querySelector("#axy");
+  if (ax) ax.onchange = () => { axX = +ax.value; renderDetail(); };
+  if (ay) ay.onchange = () => { axY = +ay.value; renderDetail(); };
+}
+
+for (const id of ["op", "score", "vmax", "log"]) document.getElementById(id).onchange = () => { renderMap(); renderDetail(); };
+document.getElementById("status").textContent = `${D.keys.length} read points, ${HYPS.length} hypotheses`;
+renderMap();
+</script>
+</body>
+</html>
