@@ -145,11 +145,21 @@ def make_collect(n_layer: int, threshold: float):  # noqa: ANN201 (jitted closur
             got = jax.nn.silu(g) * captures[up[block]].astype(jnp.float32)
             errs.append(jnp.max(jnp.abs(got - ref)) / (jnp.max(jnp.abs(ref)) + 1e-6))
         out["hidden_rel_err"] = jnp.max(jnp.stack(errs))
-        ci = jnp.concatenate([jnp.take(lower[s], alive_idx[s], axis=-1) for s in sites], axis=-1)
+
+        def alive_columns(values: dict[str, Array]) -> Array:
+            """`(B, T, A)`: each site's alive columns, replicated (the gather needs a resolved
+            layout; the component axis is sharded)."""
+            return jnp.concatenate(
+                [
+                    jnp.take(jax.sharding.reshard(values[s], P()), alive_idx[s], axis=-1)
+                    for s in sites
+                ],
+                axis=-1,
+            )
+
+        ci = alive_columns(lower)
         out["ci"] = ci.astype(jnp.float16)
-        out["inner"] = jnp.concatenate(
-            [jnp.take(inner[s], alive_idx[s], axis=-1) for s in sites], axis=-1
-        ).astype(jnp.float32)
+        out["inner"] = alive_columns(inner).astype(jnp.float32)
         above = sum(jnp.sum(v > threshold, dtype=jnp.int32) for v in lower.values())
         above_alive = jnp.sum(ci > threshold, dtype=jnp.int32)
         out["above_outside_alive"] = above - above_alive
