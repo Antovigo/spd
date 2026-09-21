@@ -100,6 +100,41 @@ layer 30 (`mlp.gate_proj` c124: ablating it costs 10 accuracy points).
 Most early impairers hurt **subtraction** about twice as much as addition; L21 `mlp.down_proj` c38
 is the clean exception (addition-specific).
 
+## Does the classification transfer to the model itself? Mostly not.
+
+**Everything above is measured on the decomposition with the weight delta OFF.** This run has no
+faithfulness term, so that is not Llama. `scripts/model_ablation.py` repeats the test on the
+model: every component on and the delta on (which reproduces `x @ W`), minus the one candidate,
+over 4,096 pool prompts, scoring the integer-renormalized `log p(correct)`. Baseline: log p −3.66,
+accuracy 0.671.
+
+| component | decomposition `d_answer_ce` | **model Δ log p** | **model Δ accuracy** | prompts improved |
+|---|---|---|---|---|
+| L13 `mlp.gate_proj` c188 | −0.028 | **+0.532** | **+4.9 pts** | **98.1%** |
+| L17 `mlp.down_proj` c3 | −0.109 | **+0.154** | +0.9 pts | 76.3% |
+| L17 `mlp.up_proj` c9 | −0.092 | +0.083 | −1.9 pts | 67.8% |
+| L13 `self_attn.k_proj` c10/c15/c19 | −0.004 to −0.007 | −0.01 | ~0 | 36–45% |
+| L15 `mlp.down_proj` c6 | −0.019 | **−0.289** | **−10.9 pts** | 45.8% |
+| L14 `mlp.down_proj` c6 | −0.047 | **−0.571** | **−13.8 pts** | 21.4% |
+| L14 `mlp.gate_proj` c79 | −0.048 | **−0.691** | **−16.8 pts** | 30.1% |
+| L14 `mlp.up_proj` c2 | +0.018 | **−1.960** | **−50.9 pts** | 3.6% |
+
+(A positive model Δ log p means removing the component *helps*, i.e. it impairs arithmetic in
+Llama; a negative `d_answer_ce` in the decomposition means the same thing there.)
+
+- **Two candidates are confirmed consistent impairers in Llama.** L13 `mlp.gate_proj` c188 is the
+  clean one: removing it improves the correct answer on 98.1% of prompts and adds 4.9 accuracy
+  points. L17 `mlp.down_proj` c3 holds too, more weakly (76% of prompts, +0.9 points).
+- **Four flip sign.** The L14 trio and L15 `down_proj` c6 look like impairers in the delta-off
+  decomposition but are *essential helpers* in the model — L14 `mlp.up_proj` c2 alone carries
+  half the accuracy.
+- **The L13 attention components are inert either way.**
+
+So the delta-off classification ranks components badly for claims about Llama: of the 13, it got
+the direction right for 2, wrong for 4, and the rest are within noise. Any statement "component X
+impairs arithmetic" should be made with the delta ON. The earlier tables in this report describe
+the decomposition only, and are kept because they are what the filters optimize.
+
 ## What the L13–17 candidates do on general text
 
 The probe (`scripts/nontarget_probe.py`) subtracts one component from the model — every other
@@ -138,10 +173,29 @@ header, `search` in a query-syntax instruction. Not an arithmetic story.
 
 ![L17 down_proj c3](figures/probe_layers_17_mlp_down_proj_c3.png)
 
-**What this does not settle.** 65k tokens is a first pass; a component that fires on a genuinely
-rare context could still be invisible here (the per-component figures show each component's own
-top-8 sequences by max KL, so rare firings would surface if they existed in this sample). The
-larger pass is the same command with `--rows 16384`.
+**Over 1.05M tokens (16,384 rows), by token class** — mean KL at `=` tokens versus all other
+tokens, and at digit tokens versus other (counts: 135 `=`, 26,600 digits, 1.02M other):
+
+| component | `=` / other | digit / other | model Δ accuracy |
+|---|---|---|---|
+| L15 `mlp.down_proj` c6 | **28.8×** | 1.1× | −10.9 pts |
+| L17 `mlp.down_proj` c3 | **21.7×** | 1.1× | +0.9 pts |
+| L17 `mlp.up_proj` c9 | 3.5× | 1.1× | −1.9 pts |
+| L13 `mlp.gate_proj` c188 | 2.3× | 1.2× | **+4.9 pts** |
+| the other nine | 1.3–2.4× | 1.1–1.9× | — |
+
+The trivial prediction is recovered for `=` and not for digits: two `down_proj` components act
+almost only at `=` across a million tokens, and no candidate is digit-specific (best 1.9×). The
+two `=` handlers then split in the model — L17 c3 impairs arithmetic, L15 c6 is essential to it —
+so "fires on the arithmetic delimiter" says nothing about the sign. And the cleanest real-model
+impairer, L13 c188, is *not* specific to either: its harm on arithmetic is not explained by an
+arithmetic-looking trigger. With only 135 `=` tokens in the sample, the `=` ratios are
+directionally solid but not precise.
+
+**Browse it:** `<run_dir>/analysis/ci_filter/step_40000/nontarget_probe/app/index.html` — 25
+sequences per component (top by max KL over the million tokens), coloured by KL or by the
+component's CI, with a CI underline toggle and per-token hover (KL, CI, model versus ablated
+top-1).
 
 ### Two measurement traps, both hit on the way here
 
