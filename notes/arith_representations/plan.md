@@ -46,8 +46,14 @@ Fourier modes with `gcd(k, tau) = 1`, but the *subspace* is basis-free; a circle
 finding, not an input. For quantities whose range exceeds 100 (`a + b`), the remainder
 `D_Q = functions of Q (-) sum_tau M_{Q,tau}` is the "direct / non-periodic" hypothesis; for
 `a`, `b` (range exactly 100) the direct code is indistinguishable from `P_{·,100}` and this
-limitation is reported rather than hidden. A nested 1-D "linear in `Q`" direction is tested
-inside whatever spaces it projects onto, so a number-line code appears as a special case.
+limitation is reported rather than hidden.
+
+The **linear** function of `Q` (centred, `L_Q`) is its own 1-D hypothesis, placed right after
+the constant: every pure part is built orthogonal to it. Without it a number-line code is
+invisible — 73 % of a linear function of `a` lies in `P_{a,100}`, the lookup part that cannot
+generalise to held-out values by construction (this was seen on the first real layers and
+fixed before the sweep). The lattice is thus `const (+) L_Q (+) P_{Q,2} (+) ... (+) P_{Q,100}
+(+) D_Q`, still a complete orthogonal decomposition of the functions of `Q`.
 
 `op` is a 1-D hypothesis (`op` indicator, centred) and is tested only when both operations
 are pooled. The second operand is identified **separately per operation** (Antoine,
@@ -59,10 +65,15 @@ fitted on each operation alone and compared across operations (section 4).
 
 Non-orthogonality between quantities is a fact of the design, not a nuisance to hide:
 `res = a + b` has additive parts (`f(a) + g(b)`) that no analysis can attribute to a "result"
-representation. Fourier modes of `a + b` with `k != 0` factor as `e(ka) e(kb)` and lie entirely
-in the `a x b` interaction space, so the *periodic* result hypotheses are clean; only `D_res`
-overlaps the `a`/`b` spaces. Each hypothesis therefore gets two scores: **marginal** explained
-energy and **unique** explained energy (after partialling out every other hypothesis). Where
+representation. Result hypotheses (`res`, `cross`) are therefore defined **interaction-only**:
+every part is built orthogonal to the additive space (functions of `a` plus functions of `b`,
+the latter per operation). Fourier modes of `a + b` with `k != 0` factor as `e(ka) e(kb)` and
+already lie in the interaction space on a product measure, so the periodic result parts are
+essentially unchanged; `D_res` and `L_res` lose their additive content (`L_res` vanishes
+entirely — a *linear* result code is the same function as `L_a + L_b` and cannot be told
+apart from it; the diagnostic is whether `S_{L_a}` and `S_{L_b}` coincide). Each hypothesis
+also gets two scores: **marginal** explained energy and **unique** explained energy (after
+partialling out every other hypothesis). Where
 the empirical measure is not a product (the subtraction triangle), the pure parts are built by
 Gram-Schmidt in divisor order, and the tiny order dependence between incomparable divisors
 (4 vs 5, 20 vs 25) is measured and reported.
@@ -134,7 +145,9 @@ representation of `a` regardless of operation.
 
 ## 6. Researcher degrees of freedom, listed
 
-Changes made after the synthetic check (2026-09-21, before any real activation was analysed):
+Changes made after the synthetic check and after the first two real layers (2026-09-21):
+the linear hypothesis and the interaction-only result hypotheses above (both motivated by
+what the layer-0/2 fits showed: lookup-dominated `a:100`, `res:direct` = `L_a + L_b`);
 the kept-direction null moved from the 99th to the 99.9th percentile (with ~1,700 direction
 tests per read point the 99th let noise directions through), and unread hypotheses were taken
 out of the clustering graph (see section 4). Also fixed: the lower spans are orthonormalised
