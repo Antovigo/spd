@@ -177,6 +177,88 @@ def pgd_figure(root: Path) -> None:
     fig.savefig(FIGURES / "pgd.png", dpi=150)
 
 
+KINDS = (
+    "self_attn.q_proj",
+    "self_attn.k_proj",
+    "self_attn.v_proj",
+    "self_attn.o_proj",
+    "mlp.gate_proj",
+    "mlp.up_proj",
+    "mlp.down_proj",
+)
+CHAIN = (  # (label, source, colour): the decomposition, then each objective in the chain
+    ("decomposition", None, "#2a78d6"),
+    ("last-pos KL (ceiling)", "addsub-05-filter-last-pos-ceiling", "#eb6834"),
+    ("integer KL", "addsub-05-filter-integers", "#1baf7a"),
+    ("answer CE", "addsub-05-filter-answer-ce", "#eda100"),
+)
+SURFACE = "#fcfcfb"
+
+
+def _alive_by_site(root: Path, source: str | None) -> dict[str, np.ndarray]:
+    """`{site: (C,) bool}`: the decomposition's own alive set, or a filter's at its end."""
+    if source is None:
+        with np.load(root / ABLATIONS / "decomposition_alive.npz") as saved:
+            return {site: saved[site].astype(bool) for site in saved.files}
+    with np.load(root / FILTERS / source / "alive" / "max_ci.npz") as saved:
+        return {site: saved[site] > 0.01 for site in saved.files}
+
+
+def pruning_figure(root: Path) -> None:
+    """Alive components per layer, one panel per matrix kind, one bar per stage of the chain —
+    where each narrower objective removes components. Writes the counts beside the figure."""
+    counts = {label: _alive_by_site(root, source) for label, source, _ in CHAIN}
+    layers = sorted({int(site.split(".")[1]) for site in counts["decomposition"]})
+    width = 0.8 / len(CHAIN)
+    fig, axes = plt.subplots(len(KINDS), 1, figsize=(15, 2.3 * len(KINDS)), sharex=True)
+    rows = ["\t".join(["kind", "layer", *[label for label, _, _ in CHAIN]])]
+    for ax, kind in zip(axes, KINDS, strict=True):
+        per_stage = {
+            label: [int(alive[f"layers.{layer}.{kind}"].sum()) for layer in layers]
+            for label, alive in counts.items()
+        }
+        for offset, (label, _, colour) in enumerate(CHAIN):
+            ax.bar(
+                np.array(layers) + (offset - (len(CHAIN) - 1) / 2) * width,
+                per_stage[label],
+                width,
+                color=colour,
+                edgecolor=SURFACE,
+                linewidth=0.6,
+                label=label,
+            )
+        for index, layer in enumerate(layers):
+            rows.append(
+                "\t".join(
+                    [kind, str(layer), *[str(per_stage[stage][index]) for stage, _, _ in CHAIN]]
+                )
+            )
+        totals = "  ·  ".join(f"{stage} {sum(per_stage[stage]):,}" for stage, _, _ in CHAIN)
+        ax.set_title(f"{kind}   ({totals})", fontsize=9, loc="left", color="#0b0b0b")
+        ax.set_ylabel("alive", fontsize=8, color="#52514e")
+        ax.grid(axis="y", color="#e6e5e0", linewidth=0.6)
+        ax.set_axisbelow(True)
+        for spine in ("top", "right"):
+            ax.spines[spine].set_visible(False)
+        ax.tick_params(labelsize=8, colors="#52514e")
+    axes[-1].set_xticks(layers)
+    axes[-1].set_xlabel("layer", fontsize=9, color="#52514e")
+    axes[0].legend(
+        ncol=len(CHAIN), fontsize=8, loc="lower left", bbox_to_anchor=(0, 1.25), frameon=False
+    )
+    fig.suptitle(
+        "Alive components per layer: the decomposition, then each filtering objective",
+        fontsize=11,
+        y=0.995,
+    )
+    fig.tight_layout()
+    fig.savefig(FIGURES / "pruning_by_layer.png", dpi=150, facecolor=SURFACE)
+    plt.close(fig)
+    table = root / FILTERS / "pruning_by_layer.tsv"
+    table.write_text("\n".join(rows) + "\n")
+    print(f"-> {FIGURES / 'pruning_by_layer.png'} and {table}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--root", type=Path, default=DEFAULT_ROOT)
@@ -186,6 +268,7 @@ def main() -> None:
     faithfulness_figure(args.root)
     attribution_figure(args.root)
     pgd_figure(args.root)
+    pruning_figure(args.root)
     print(f"-> {FIGURES}")
 
 

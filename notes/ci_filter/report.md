@@ -63,6 +63,17 @@ Going from full-vocabulary KL to integers-only removed a further 4% (11,606 -> 1
 integer KL (0.0479) and flat robustness. Once the ceiling and the removal are in place, the
 components that only set non-integer probability mass are already gone.
 
+### Where the narrower objectives remove components
+
+![pruning by layer](figures/pruning_by_layer.png)
+
+Alive components per layer and matrix kind: the decomposition (12,553), the last-position-KL
+ceiling filter (11,604), then its two siblings trained from it — integer KL (11,130) and answer
+CE (11,063). Removal is concentrated in the **last four layers**: L31 `mlp.down_proj` falls from
+346 to 226 at the first stage and to 191 under integer KL, L31 `self_attn.o_proj` from 48 to 10,
+and `self_attn.o_proj` loses heavily at L28–31 and L22–24 in general. The early and middle layers
+barely change. Exact counts: `ci_filter/step_40000/pruning_by_layer.tsv`.
+
 ## Finding 4: the model's arithmetic errors are largely a gating failure
 
 ![faithfulness](figures/faithfulness.png)
@@ -119,6 +130,5 @@ Both helpers and interferers concentrate in the MLPs of layers 30-31.
 
 Ablation studies (screens, sweeps, probe, table) live in `<run_dir>/analysis/ablations/step_40000/`. Per filter: `config.yaml`, `training/{metrics.jsonl, ci_fn/}`, `eval/{pool_evals.jsonl, summary.json,
 pgd_recon.json}`, `alive/{alive.json, max_ci.npz, kept.npz}`, `ab_grids/index.html` (the `(a, b)`-grid
-applet, every operation x position), and for the last two filters `attribution/{components.npz,
-verified.json, summary.json}`. Backup: `~/out/pod-backup/p-ba5a0c05/analysis/ci_filter/`. Wandb:
+applet, every operation x position). Backup: `~/out/pod-backup/p-ba5a0c05/analysis/`. Wandb:
 project `param-decomp-llama`.
