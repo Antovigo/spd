@@ -74,6 +74,27 @@ CE (11,063). Removal is concentrated in the **last four layers**: L31 `mlp.down_
 and `self_attn.o_proj` loses heavily at L28–31 and L22–24 in general. The early and middle layers
 barely change. Exact counts: `ci_filter/step_40000/pruning_by_layer.tsv`.
 
+### Where per-token L0 drops, by position
+
+Mean components active per token (CI > 0.01), summed over all sites, 4,000 pool prompts
+(`scripts/l0_by_position.py` → `ci_filter/step_40000/l0_by_position.tsv`):
+
+| position | decomposition | last-pos KL (ceiling) | integer KL | answer CE |
+|---|---|---|---|---|
+| 0 `<BOS>` | 528 | **429** | 415 | 403 |
+| 1 `a` | 541 | 500 | 490 | 478 |
+| 2 operator | 573 | 521 | 506 | 502 |
+| 3 `b` | 721 | 652 | 633 | 610 |
+| 4 `=` (scored) | 630 | 621 | 615 | **558** |
+
+The KL objectives sparsify almost everything **except** the scored position: they only score
+`=`, so imp-min removes what the earlier positions do not need for it (BOS loses 19%), while `=`
+itself barely moves (−1.4%). Only the answer-CE objective cuts `=` substantially (−11%), almost
+entirely in the MLPs of layers 28–31 and 18 — the per-layer detail is in
+`figures/l0_position_4.png` (and `_0` … `_3` for the other positions).
+
+![L0 at the last position](figures/l0_position_4.png)
+
 ## Finding 4: the model's arithmetic errors are largely a gating failure
 
 ![faithfulness](figures/faithfulness.png)

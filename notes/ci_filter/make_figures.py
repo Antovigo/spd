@@ -8,6 +8,7 @@ and writes `notes/ci_filter/figures/*.png`.
 """
 
 import argparse
+import csv
 import json
 from collections.abc import Callable
 from pathlib import Path
@@ -259,6 +260,65 @@ def pruning_figure(root: Path) -> None:
     print(f"-> {FIGURES / 'pruning_by_layer.png'} and {table}")
 
 
+def l0_position_figures(root: Path) -> None:
+    """One figure per prompt position: per-token L0 of every layer and matrix kind, one bar per
+    stage of the chain (`ci_filter/step_40000/l0_by_position.tsv`, from
+    `scripts/l0_by_position.py`)."""
+    table = root / FILTERS / "l0_by_position.tsv"
+    if not table.exists():
+        print(f"skipping L0-by-position figures: no {table}")
+        return
+    rows = list(csv.DictReader(table.open(), delimiter="\t"))
+    stage_of = {"run" if source is None else source: label for label, source, _ in CHAIN}
+    l0: dict[tuple[str, str, int, int], float] = {
+        (stage_of[r["source"]], r["kind"], int(r["layer"]), int(r["position"])): float(r["l0"])
+        for r in rows
+        if r["source"] in stage_of
+    }
+    positions = sorted({(int(r["position"]), r["label"]) for r in rows})
+    layers = sorted({int(r["layer"]) for r in rows})
+    width = 0.8 / len(CHAIN)
+    for position, label in positions:
+        fig, axes = plt.subplots(len(KINDS), 1, figsize=(15, 2.3 * len(KINDS)), sharex=True)
+        for ax, kind in zip(axes, KINDS, strict=True):
+            for offset, (stage, _, colour) in enumerate(CHAIN):
+                ax.bar(
+                    np.array(layers) + (offset - (len(CHAIN) - 1) / 2) * width,
+                    [l0.get((stage, kind, layer, position), 0.0) for layer in layers],
+                    width,
+                    color=colour,
+                    edgecolor=SURFACE,
+                    linewidth=0.6,
+                    label=stage,
+                )
+            totals = "  ·  ".join(
+                f"{stage} {sum(l0.get((stage, kind, layer, position), 0.0) for layer in layers):.0f}"
+                for stage, _, _ in CHAIN
+            )
+            ax.set_title(f"{kind}   ({totals})", fontsize=9, loc="left", color="#0b0b0b")
+            ax.set_ylabel("L0 / token", fontsize=8, color="#52514e")
+            ax.grid(axis="y", color="#e6e5e0", linewidth=0.6)
+            ax.set_axisbelow(True)
+            for spine in ("top", "right"):
+                ax.spines[spine].set_visible(False)
+            ax.tick_params(labelsize=8, colors="#52514e")
+        axes[-1].set_xticks(layers)
+        axes[-1].set_xlabel("layer", fontsize=9, color="#52514e")
+        axes[0].legend(
+            ncol=len(CHAIN), fontsize=8, loc="lower left", bbox_to_anchor=(0, 1.25), frameon=False
+        )
+        fig.suptitle(
+            f"Per-token L0 at position {position} ({label}): the decomposition, then each objective",
+            fontsize=11,
+            y=0.995,
+        )
+        fig.tight_layout()
+        out = FIGURES / f"l0_position_{position}.png"
+        fig.savefig(out, dpi=150, facecolor=SURFACE)
+        plt.close(fig)
+        print(f"-> {out}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--root", type=Path, default=DEFAULT_ROOT)
@@ -269,6 +329,7 @@ def main() -> None:
     attribution_figure(args.root)
     pgd_figure(args.root)
     pruning_figure(args.root)
+    l0_position_figures(args.root)
     print(f"-> {FIGURES}")
 
 
