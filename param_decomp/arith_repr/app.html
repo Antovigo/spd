@@ -63,8 +63,8 @@ function hypNames() {
       if (!seen.has(f.name)) seen.set(f.name, f);
   }
   const names = [...seen.values()];
-  names.sort((x, y) => QUANT_ORDER.indexOf(x.quantity) - QUANT_ORDER.indexOf(y.quantity)
-    || (x.period === null ? 1e9 : x.period) - (y.period === null ? 1e9 : y.period));
+  const rank = f => f.kind === "linear" ? 0 : (f.period === null ? 1e9 : f.period);
+  names.sort((x, y) => QUANT_ORDER.indexOf(x.quantity) - QUANT_ORDER.indexOf(y.quantity) || rank(x) - rank(y));
   return names.map(f => f.name);
 }
 const HYPS = hypNames();

@@ -96,69 +96,109 @@ def indicator(values: np.ndarray, n_classes: int) -> np.ndarray:
     return out
 
 
-def _orth_complement(r_m: np.ndarray) -> np.ndarray:
-    """Orthonormal basis of `col(r_m)` with the rank cut `RANK_TOL` (relative)."""
+def _orth_complement(r_m: np.ndarray, scale: float | None = None) -> np.ndarray:
+    """Orthonormal basis of `col(r_m)` with the rank cut `RANK_TOL` relative to `scale`
+    (default: the largest singular value; pass the pre-projection scale for a residual, or
+    a single column that is entirely numerical noise would be kept)."""
     if r_m.shape[1] == 0:
         return r_m[:, :0]
     u_m, s, _ = np.linalg.svd(r_m, full_matrices=False)
-    return u_m[:, s > RANK_TOL * max(float(s[0]), 1e-300)]
+    ref = float(s[0]) if scale is None else scale
+    return u_m[:, s > RANK_TOL * max(ref, 1e-300)]
 
 
-def _project_out(i_m: np.ndarray, lower: list[np.ndarray]) -> np.ndarray:
-    """`i_m` minus its projection onto the SUM of the `lower` spans. The lower spans are
-    orthonormalised first: under a non-product prompt measure the pure parts of
-    incomparable divisors (4 and 10, say) are not mutually orthogonal, so their
-    concatenation is not a projector."""
+def _project_out(i_m: np.ndarray, lower: list[np.ndarray]) -> tuple[np.ndarray, float]:
+    """`i_m` minus its projection onto the SUM of the `lower` spans, and `i_m`'s own scale
+    (largest singular value) for the rank cut. The lower spans are orthonormalised first:
+    under a non-product prompt measure the pure parts of incomparable divisors (4 and 10,
+    say) are not mutually orthogonal, so their concatenation is not a projector."""
     l_m = _orth_complement(np.concatenate(lower, axis=1))
-    return i_m - l_m @ (l_m.T @ i_m)
+    scale = float(np.linalg.norm(i_m, 2))
+    return i_m - l_m @ (l_m.T @ i_m), scale
+
+
+def _pure(i_m: np.ndarray, lower: list[np.ndarray]) -> np.ndarray:
+    return _orth_complement(*_project_out(i_m, lower))
 
 
 @dataclass(frozen=True)
 class Hypothesis:
-    """`Phi` (n x m, orthonormal, centred) on the fitting prompts and the residue weights `G`
-    (n_classes x m) that evaluate the same functions elsewhere. `classes(labels)` maps a
-    prompt to its class index (its residue, or its value offset for a direct part)."""
+    """`Phi` (n x m, orthonormal, centred) on the fitting prompts, plus what re-evaluates the
+    same functions on other prompts: for a periodic or direct part the residue weights `G`
+    (`n_classes x m`, `Phi = I G` with `I` the class indicator), for the linear part the
+    affine map `(mean, 1 / norm)` stored in `G`. `classes(labels)` maps a prompt to its class
+    index (residue, or value offset for the direct and linear parts; -1 = not supported)."""
 
     quantity: str
+    kind: str
+    """`periodic`, `direct` or `linear`."""
     period: int | None
-    """`None` = the direct (non-periodic) part."""
     Phi: np.ndarray
     G: np.ndarray
     value_offset: int
+    n_classes: int
 
     @property
     def name(self) -> str:
-        return f"{self.quantity}:{'direct' if self.period is None else self.period}"
+        match self.kind:
+            case "periodic":
+                return f"{self.quantity}:{self.period}"
+            case "linear":
+                return f"{self.quantity}:lin"
+            case _:
+                return f"{self.quantity}:direct"
 
     @property
     def dim(self) -> int:
         return int(self.Phi.shape[1])
 
-    @property
-    def n_classes(self) -> int:
-        return int(self.G.shape[0])
-
     def classes(self, labels: Labels) -> np.ndarray:
         values = labels.quantity(self.quantity)
-        if self.period is None:
-            return np.where(values >= 0, values - self.value_offset, -1)
-        return np.where(values >= 0, values % self.period, -1)
+        if self.kind == "periodic":
+            assert self.period is not None
+            return np.where(values >= 0, values % self.period, -1)
+        return np.where(values >= 0, values - self.value_offset, -1)
 
     def evaluate(self, labels: Labels) -> np.ndarray:
         """The hypothesis functions on another prompt set (n' x m). A class never seen where
         the hypothesis was built (a value outside a direct part's range) evaluates to 0."""
+        values = labels.quantity(self.quantity)
+        support = values >= 0
+        out = np.zeros((labels.n, self.dim))
+        if self.kind == "linear":
+            if self.dim:
+                out[support, 0] = (values[support] - self.G[0, 0]) * self.G[1, 0]
+            return out
         cls = self.classes(labels)
         valid = (cls >= 0) & (cls < self.n_classes)
-        out = np.zeros((labels.n, self.dim))
         out[valid] = indicator(cls[valid], self.n_classes) @ self.G
         return out
 
 
+def additive_space(labels: Labels) -> np.ndarray:
+    """Functions of `a` alone plus functions of `b` alone (`b` per operation): what a
+    result hypothesis must be orthogonal to in order to count as a computed quantity."""
+    cols = [indicator(labels.a - labels.a.min(), int(labels.a.max() - labels.a.min() + 1))]
+    b0 = labels.b - labels.b.min()
+    nb = int(b0.max() + 1)
+    for op in np.unique(labels.op):
+        cols.append(indicator(b0, nb) * (labels.op == op)[:, None])
+    return np.concatenate(cols, axis=1)
+
+
+INTERACTION_QUANTITIES = ("res", "cross", "sum", "diff")
+
+
 def pure_parts(
-    labels: Labels, quantity: str, periods: tuple[int, ...] = DIVISORS
+    labels: Labels,
+    quantity: str,
+    periods: tuple[int, ...] = DIVISORS,
+    extra_lower: list[np.ndarray] | None = None,
 ) -> list[Hypothesis]:
-    """`P_{Q,tau}` for every period, built by Gram-Schmidt in divisor order, plus `D_Q` when
-    the quantity's range exceeds one period."""
+    """The linear part, `P_{Q,tau}` for every period (Gram-Schmidt in divisor order, every
+    part orthogonal to the linear one), and `D_Q` when the quantity's range exceeds one
+    period. `extra_lower` spans are projected out of everything (the additive space, for a
+    result quantity)."""
     values = labels.quantity(quantity)
     n = values.size
     support = values >= 0
@@ -167,30 +207,48 @@ def pure_parts(
     const = np.full((n, 1), 1.0 / np.sqrt(n))
     if not support.all():
         const = _orth_complement(np.stack([np.ones(n), support.astype(np.float64)], axis=1))
+    base = [const] + (extra_lower or [])
 
     def masked_indicator(cls: np.ndarray, n_classes: int) -> np.ndarray:
         out = np.zeros((n, n_classes))
         out[support] = indicator(cls[support], n_classes)
         return out
 
+    lo, hi = int(values[support].min()), int(values[support].max())
+    out: list[Hypothesis] = []
+    mean = float(values[support].mean())
+    raw = np.where(support, values - mean, 0.0)[:, None]
+    lin_phi = _pure(raw, base)
+    scale = float(lin_phi[:, 0] @ raw[:, 0]) if lin_phi.shape[1] else 1.0
+    linear = Hypothesis(
+        quantity,
+        "linear",
+        None,
+        lin_phi,
+        np.array([[mean], [1.0 / scale if scale else 0.0]]),
+        lo,
+        hi - lo + 1,
+    )
+    out.append(linear)
+    base = base + [linear.Phi]
+
     parts: dict[int, Hypothesis] = {}
     for tau in periods:
         i_m = masked_indicator(np.where(support, values % tau, 0), tau)
-        lower = [const] + [parts[d].Phi for d in periods if tau % d == 0 and d < tau]
-        phi_m = _orth_complement(_project_out(i_m, lower))
+        lower = base + [parts[d].Phi for d in periods if tau % d == 0 and d < tau]
+        phi_m = _pure(i_m, lower)
         g_m = np.linalg.lstsq(i_m, phi_m, rcond=None)[0] if phi_m.shape[1] else np.zeros((tau, 0))
-        parts[tau] = Hypothesis(quantity, tau, phi_m, g_m, 0)
-    out = list(parts.values())
-    lo, hi = int(values[support].min()), int(values[support].max())
+        parts[tau] = Hypothesis(quantity, "periodic", tau, phi_m, g_m, 0, tau)
+    out.extend(parts.values())
     if hi - lo + 1 > max(periods):
         i_m = masked_indicator(np.where(support, values - lo, 0), hi - lo + 1)
-        phi_m = _orth_complement(_project_out(i_m, [const] + [h.Phi for h in out]))
+        phi_m = _pure(i_m, base + [h.Phi for h in parts.values()])
         g_m = (
             np.linalg.lstsq(i_m, phi_m, rcond=None)[0]
             if phi_m.shape[1]
             else np.zeros((i_m.shape[1], 0))
         )
-        out.append(Hypothesis(quantity, None, phi_m, g_m, lo))
+        out.append(Hypothesis(quantity, "direct", None, phi_m, g_m, lo, hi - lo + 1))
     return out
 
 
@@ -199,9 +257,9 @@ def op_hypothesis(labels: Labels) -> Hypothesis:
     i_m = indicator(labels.op, 2)
     n = labels.n
     const = np.full((n, 1), 1.0 / np.sqrt(n))
-    phi_m = _orth_complement(_project_out(i_m, [const]))
+    phi_m = _pure(i_m, [const])
     g_m = np.linalg.lstsq(i_m, phi_m, rcond=None)[0]
-    return Hypothesis("op", 2, phi_m, g_m, 0)
+    return Hypothesis("op", "periodic", 2, phi_m, g_m, 0, 2)
 
 
 def build_hypotheses(labels: Labels, quantities: tuple[str, ...]) -> list[Hypothesis]:
@@ -211,7 +269,8 @@ def build_hypotheses(labels: Labels, quantities: tuple[str, ...]) -> list[Hypoth
             if np.unique(labels.op).size > 1:
                 out.append(op_hypothesis(labels))
             continue
-        out.extend(pure_parts(labels, q))
+        extra = [additive_space(labels)] if q in INTERACTION_QUANTITIES else None
+        out.extend(pure_parts(labels, q, extra_lower=extra))
     return [h for h in out if h.dim > 0]
 
 

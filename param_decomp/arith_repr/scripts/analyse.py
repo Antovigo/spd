@@ -70,6 +70,7 @@ def fit_record(f: HypothesisFit) -> dict[str, Any]:
     return {
         "name": f.hypothesis.name,
         "quantity": f.hypothesis.quantity,
+        "kind": f.hypothesis.kind,
         "period": f.hypothesis.period,
         "dim_hypothesis": f.hypothesis.dim,
         "marginal": f.marginal,

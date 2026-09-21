@@ -29,6 +29,7 @@ def compact(record: dict[str, Any]) -> dict[str, Any]:
                 {
                     "name": f["name"],
                     "quantity": f["quantity"],
+                    "kind": f["kind"],
                     "period": f["period"],
                     "dim_hypothesis": f["dim_hypothesis"],
                     "marginal": f["marginal"],
