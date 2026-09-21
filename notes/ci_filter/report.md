@@ -95,6 +95,58 @@ entirely in the MLPs of layers 28–31 and 18 — the per-layer detail is in
 
 ![L0 at the last position](figures/l0_position_4.png)
 
+### What the integer objective drops: borderline components, not a non-integer mechanism
+
+**476 components** are alive at the end of the full-vocabulary filter (`-last-pos-ceiling`) and
+dead at the end of the integer-only filter (`-integers`). The hypothesis was that they set the
+probability of non-integer tokens. `scripts/token_effects.py` subtracts them from the MODEL
+(every other component on, weight delta on) over 2,048 pool prompts and scores the last position
+against the subtract-nothing forward — individually, all together, by layer band, and against a
+same-size control drawn from the components both filters keep:
+
+| ablation | KL full vocab | KL integers | integer share | most-moved non-integer token (p before → after) |
+|---|---|---|---|---|
+| **ALL** (476 comps) | 2.07e-03 | 1.74e-03 | 0.84 | `?⏎` 0.0752 → 0.0744 |
+| **CONTROL (alive in both)** (476 comps) | 2.54e+00 | 2.41e+00 | 0.95 | `?⏎` 0.0752 → 0.0145 |
+| **layers 0-7** (44 comps) | 1.27e-03 | 1.08e-03 | 0.85 | ` ` 0.0415 → 0.0419 |
+| **layers 8-15** (41 comps) | 7.33e-04 | 6.49e-04 | 0.89 | `?⏎` 0.0752 → 0.0754 |
+| **layers 16-23** (61 comps) | 5.58e-04 | 4.76e-04 | 0.85 | ` ` 0.0415 → 0.0413 |
+| **layers 24-31** (330 comps) | 5.27e-04 | 3.62e-04 | 0.69 | `?⏎` 0.0752 → 0.0740 |
+| *top individual components:* | | | | |
+| L1 `self_attn.v_proj` c213 (max CI 1.00) | 6.64e-04 | 5.36e-04 | 0.81 | `?⏎` 0.0752 → 0.0751 |
+| L0 `mlp.down_proj` c524 (max CI 1.00) | 6.22e-04 | 5.09e-04 | 0.82 | `?⏎` 0.0752 → 0.0751 |
+| L6 `self_attn.v_proj` c221 (max CI 0.05) | 6.12e-04 | 5.04e-04 | 0.82 | `?⏎` 0.0752 → 0.0756 |
+| L11 `self_attn.o_proj` c428 (max CI 0.04) | 6.07e-04 | 5.44e-04 | 0.90 | ` ` 0.0415 → 0.0415 |
+| L1 `self_attn.o_proj` c91 (max CI 0.40) | 5.72e-04 | 4.63e-04 | 0.81 | `?⏎` 0.0752 → 0.0750 |
+| L1 `self_attn.o_proj` c371 (max CI 0.03) | 5.72e-04 | 4.66e-04 | 0.81 | `?` 0.0100 → 0.0099 |
+| L1 `self_attn.o_proj` c378 (max CI 0.07) | 5.70e-04 | 4.65e-04 | 0.82 | `?⏎` 0.0752 → 0.0752 |
+| L1 `mlp.gate_proj` c28 (max CI 0.37) | 5.68e-04 | 4.63e-04 | 0.81 | `?⏎` 0.0752 → 0.0751 |
+| L1 `self_attn.o_proj` c135 (max CI 0.20) | 5.61e-04 | 4.56e-04 | 0.81 | ` ` 0.0415 → 0.0415 |
+| L2 `mlp.up_proj` c320 (max CI 0.02) | 5.48e-04 | 4.45e-04 | 0.81 | `?⏎` 0.0752 → 0.0750 |
+| L2 `mlp.down_proj` c490 (max CI 0.09) | 5.30e-04 | 4.31e-04 | 0.81 | ` ` 0.0415 → 0.0416 |
+| L2 `self_attn.k_proj` c80 (max CI 0.13) | 5.29e-04 | 4.35e-04 | 0.82 | `?⏎` 0.0752 → 0.0751 |
+
+- **Jointly they barely matter.** Removing all 476 moves the model's answer distribution by KL
+  0.002 — 1,200× less than removing 476 random components that both objectives keep (2.54).
+- **What they do move is not non-integer-specific.** 84% of their KL is still within the
+  integers; only the layer 24–31 band leans non-integer (69%).
+- **They are borderline, not a mechanism.** Their median max CI in the full-vocabulary filter is
+  0.13 (46% below 0.1), against 1.0 for the alive population. The full-vocabulary filter kept them
+  at a trickle; the integer objective's lighter reconstruction constraint let imp-min push them
+  under the 0.01 threshold.
+- **Individually they are at the measurement floor**: KLs of ~2–6e-4 with the same integer share
+  (~0.82) and the same most-moved tokens for all 476. That signature is a single small subtraction
+  reshuffling bf16 rounding in the residual stream, not component-specific behaviour.
+- **What is non-integer at `=`** is informative in itself: after `12+34=` the model puts real
+  mass on question/blank templates — `?⏎` (7.5%), `?`, `??`, `____` — and a bare space (4.2%).
+  That is the probability mass the integer objective renormalizes away; it is carried by the kept
+  components, not by these 476.
+
+(L20 `mlp.gate_proj`/`down_proj` c44 is *not* among them: its max CI is 1.0 in both filters and its
+mean CI at `=` is unchanged, 0.043/0.083 → 0.042/0.080 for add/sub.)
+
+Full table: `ablations/step_40000/non_integer_components.tsv` (group rows first).
+
 ## Finding 4: the model's arithmetic errors are largely a gating failure
 
 ![faithfulness](figures/faithfulness.png)
