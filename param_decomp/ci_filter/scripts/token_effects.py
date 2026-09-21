@@ -16,6 +16,10 @@ so bf16 noise cancels):
   moves non-integer mass);
 - the non-integer tokens whose mean probability changes most, with before/after probabilities.
 
+Group rows come first (`group: ALL`, a same-size `CONTROL` drawn from the components both
+filters keep, then layer bands): a single component is often below the bf16 floor of this
+subtraction, so the joint ablation — against its control — is the robust readout.
+
 Writes `<run_dir>/analysis/ablations/step_<step>/non_integer_components.tsv`."""
 
 import argparse
@@ -80,6 +84,23 @@ def make_effects() -> Callable[..., dict[str, Array]]:
     return effects
 
 
+def _alive_in_both(
+    run_dir: Path, step: int, first: str, second: str, threshold: float
+) -> list[tuple[str, int]]:
+    """Components alive at the end of BOTH filters: the control population."""
+
+    def max_ci(filter_id: str) -> dict[str, np.ndarray]:
+        with np.load(CIFilterOutputs.for_run(run_dir, step, filter_id).max_ci) as saved:
+            return {site: saved[site] for site in saved.files}
+
+    a, b = max_ci(first), max_ci(second)
+    return [
+        (site, int(c))
+        for site in sorted(a)
+        for c in np.nonzero((a[site] > threshold) & (b[site] > threshold))[0]
+    ]
+
+
 def _chosen(
     run_dir: Path, step: int, alive_in: str, dead_in: str, threshold: float
 ) -> list[tuple[str, int, float]]:
@@ -105,6 +126,7 @@ def token_effects(
     prompts: int,
     batch_size: int,
     top_tokens: int,
+    groups_only: bool,
 ) -> Path:
     if config.compilation_cache_dir is not None:
         enable_persistent_compilation_cache(config.compilation_cache_dir)
@@ -169,10 +191,48 @@ def token_effects(
             "top_tokens",
         ]
         rows = ["\t".join(header)]
+        # Group ablations first: one component is often below the bf16 floor of this subtraction
+        # (it reshuffles rounding in the residual stream), so the WHOLE set and layer bands are
+        # the robust readout; the per-component rows follow, marked by their own address.
+        bands = [(0, 7), (8, 15), (16, 23), (24, 31)]
+        both = _alive_in_both(run_dir, step, alive_in, dead_in, config.alive_threshold)
+        pick = np.random.default_rng(np.random.SeedSequence((config.seed, 23))).choice(
+            len(both), size=min(len(chosen), len(both)), replace=False
+        )
+        groups: list[tuple[str, list[tuple[str, int]]]] = [
+            ("ALL", [(site, c) for site, c, _ in chosen]),
+            # Same size, drawn from the components BOTH objectives keep: what an arbitrary
+            # joint ablation of this many components does.
+            ("CONTROL (alive in both)", [both[int(i)] for i in pick]),
+            *[
+                (
+                    f"layers {lo}-{hi}",
+                    [(site, c) for site, c, _ in chosen if lo <= int(site.split(".")[1]) <= hi],
+                )
+                for lo, hi in bands
+            ],
+        ]
+        units: list[tuple[str, str, str, str, float, list[tuple[str, int]]]] = [
+            (f"group: {name}", "", "group", str(len(members)), float("nan"), members)
+            for name, members in groups
+            if members
+        ]
+        units += [
+            (
+                site,
+                site.split(".", 2)[1],
+                site.split(".", 2)[2],
+                str(component),
+                max_ci,
+                [(site, component)],
+            )
+            for site, component, max_ci in (chosen if not groups_only else [])
+        ]
         t0 = time.time()
-        for index, (site, component, max_ci) in enumerate(chosen):
+        for index, (site, layer, kind, component_label, max_ci, members) in enumerate(units):
             keep = dict(ones)
-            keep[site] = ones[site].at[component].set(0.0)
+            for member_site, member in members:
+                keep[member_site] = keep[member_site].at[member].set(0.0)
             kl = integer_kl = 0.0
             probs = np.zeros_like(base_probs)
             for block, reference in zip(batches, references, strict=True):
@@ -185,15 +245,14 @@ def token_effects(
             change = np.where(is_integer, 0.0, np.abs(probs - base_probs))
             ranked = np.argsort(change)[::-1][:top_tokens]
             top = int(ranked[0])
-            layer, kind = site.split(".", 2)[1], site.split(".", 2)[2]
             rows.append(
                 "\t".join(
                     [
                         site,
                         layer,
                         kind,
-                        str(component),
-                        f"{max_ci:.4g}",
+                        component_label,
+                        "" if max_ci != max_ci else f"{max_ci:.4g}",
                         f"{kl:.4g}",
                         f"{integer_kl:.4g}",
                         f"{integer_kl / kl:.3g}" if kl > 0 else "",
@@ -207,9 +266,9 @@ def token_effects(
                     ]
                 )
             )
-            if index % 50 == 0:
+            if index % 50 == 0 or kind == "group":
                 logger.info(
-                    f"{index}/{len(chosen)} ({time.time() - t0:.0f}s): {site} c{component} "
+                    f"{index}/{len(units)} ({time.time() - t0:.0f}s): {site} {component_label} "
                     f"KL {kl:.2e}, integer KL {integer_kl:.2e}, top {tokenizer.decode([top])!r}"
                 )
     out.write_text("\n".join(rows) + "\n")
@@ -227,6 +286,9 @@ def main() -> None:
     ap.add_argument("--prompts", type=int, default=2048)
     ap.add_argument("--batch_size", type=int, default=256)
     ap.add_argument("--top_tokens", type=int, default=5)
+    ap.add_argument(
+        "--groups_only", action="store_true", help="only the whole set and the layer bands"
+    )
     args = ap.parse_args()
     token_effects(
         CIFilterConfig.from_file(args.config),
@@ -236,6 +298,7 @@ def main() -> None:
         args.prompts,
         args.batch_size,
         args.top_tokens,
+        args.groups_only,
     )
 
 
