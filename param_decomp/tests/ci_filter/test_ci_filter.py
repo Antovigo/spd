@@ -210,7 +210,7 @@ def test_template_configs_parse(name: str, tmp_path: Path) -> None:
     assert CIFilterConfig.from_file(tmp_path / name) == config
     if name != "last_position_kl.yaml":
         assert isinstance(config.init, InitFromCIFilter)
-    assert config.ci_ceiling == config.prune_dead == (name == "last_position_answer_ce.yaml")
+    assert config.ci_ceiling and config.prune_dead  # the adopted default mechanism
 
 
 # ------------------------------------ placed run ------------------------------------
@@ -615,7 +615,8 @@ def _exercise_placed(tmp_path: Path, mesh: Mesh, sharding: str) -> None:
         obj1_config.to_file(obj1.config)
         save_ci_fn(obj1.ci_fn, ci_fn)
         save_kept(obj1.kept, {site: np.asarray(k) > 0 for site, k in kept.items()})
-        start, unconstrained = starting_ci(config, run_dir, 0, run_ci_fn)
+        bare = config.model_copy(update={"ci_ceiling": False, "prune_dead": False})
+        start, unconstrained = starting_ci(bare, run_dir, 0, run_ci_fn)
         assert start is run_ci_fn and unconstrained == UNCONSTRAINED
         start, capped_by = starting_ci(obj1_config, run_dir, 0, run_ci_fn)
         assert start is run_ci_fn and len(capped_by.ceilings) == 1 and capped_by.kept is None

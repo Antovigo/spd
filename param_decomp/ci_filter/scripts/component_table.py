@@ -3,12 +3,13 @@ the filters, and what the attribution says about it.
 
     python -m param_decomp.ci_filter.scripts.component_table --run_dir <run> [--step 40000]
 
-Writes `<run_dir>/analysis/ci_filter/step_<step>/components.tsv`. Columns:
+Writes `<run_dir>/analysis/ablations/step_<step>/components.tsv`, one row per component of
+`decomposition_alive.npz` there. Filters are the ACTIVE runs under `ci_filter/step_<step>/`
+(`Trash/` is ignored), named by their id minus the shared prefix. Columns:
 
 - `site`, `component` — the component's address, and `layer`, `kind` split out for grouping;
 - `alive_<filter>` / `max_ci_<filter>` — alive at the filter's end (max output CI over the
-  20k-prompt pool > 0.01) and that max CI. `alive_start` is the decomposition's own alive set
-  (this table's row set), read from the pruning filter's `alive/kept.npz`;
+  20k-prompt pool > 0.01) and that max CI; `alive_start` is always 1 (the row set);
 - `effect_<source>[_add|_sub]` — mean first-order effect of ABLATING it on `log p(correct
   answer)`, over every pool prompt and split per operation. Positive = ablating HELPS, i.e. the
   component impairs the answer;
@@ -21,45 +22,50 @@ Writes `<run_dir>/analysis/ci_filter/step_<step>/components.tsv`. Columns:
 - `ablated_dscore_<source>` / `ablated_dacc_<source>` — the same measurement from the earlier
   1000-prompt verification of the extremes, empty elsewhere.
 
-Sources are the filters plus `run` (the decomposition's own CI fn, `attribution_run/`)."""
+Sources are the filters plus `run` (the decomposition's own CI fn), each read from
+`ablations/step_<step>/<source>/` when present."""
 
 import argparse
 import json
+import os
 from pathlib import Path
 
 import numpy as np
 
-ATTRIBUTION = {"run": "attribution_run"}
-"""Sources whose attribution does not live under a filter directory."""
+from param_decomp.ci_filter.paths import TRASH, ablation_source_dir, ablations_dir, ci_filter_dir
 
-FILTERS = {
-    "lastpos": "addsub-05-filter-last-pos",
-    "prune": "addsub-05-filter-last-pos-alive",
-    "ceiling": "addsub-05-filter-last-pos-ceiling",
-    "integers": "addsub-05-filter-integers",
-    "ce": "addsub-05-filter-answer-ce",
-}
 SWEPT_METRICS = ("kl", "integer_kl", "answer_ce", "accuracy")
-START_FROM = "prune"
-"""Whose `alive/kept.npz` is the decomposition's own alive set (it pruned from the run)."""
+
+
+def _filters(run_dir: Path, step: int) -> dict[str, Path]:
+    """`{short name: directory}` of the ACTIVE filtering runs (not `Trash/`), short names being
+    the ids with their shared prefix dropped (`addsub-05-filter-integers` -> `integers`)."""
+    root = ci_filter_dir(run_dir, step)
+    found = sorted(
+        d for d in root.iterdir() if d.name != TRASH and (d / "alive" / "max_ci.npz").exists()
+    )
+    prefix = os.path.commonprefix([d.name for d in found]) if len(found) > 1 else ""
+    prefix = prefix[: prefix.rfind("-") + 1] if "-" in prefix else ""
+    return {d.name.removeprefix(prefix) or d.name: d for d in found}
 
 
 def component_table(run_dir: Path, step: int) -> Path:
-    root = run_dir / "analysis" / "ci_filter" / f"step_{step}"
-    with np.load(root / FILTERS[START_FROM] / "alive" / "kept.npz") as kept:
+    ablations = ablations_dir(run_dir, step)
+    with np.load(ablations / "decomposition_alive.npz") as kept:
         start = {site: kept[site] for site in kept.files}
+    filters = _filters(run_dir, step)
 
     max_ci: dict[str, dict[str, np.ndarray]] = {}
-    for name, filter_id in FILTERS.items():
-        with np.load(root / filter_id / "alive" / "max_ci.npz") as saved:
+    for name, directory in filters.items():
+        with np.load(directory / "alive" / "max_ci.npz") as saved:
             max_ci[name] = {site: saved[site] for site in saved.files}
 
     effects: dict[str, dict[str, np.ndarray]] = {}
     measured: dict[str, dict[tuple[str, int], dict[str, float]]] = {}
     swept: dict[str, dict[tuple[str, int], dict[str, str]]] = {}
-    sources = {**{n: root / f for n, f in FILTERS.items()}, "run": root}
-    for name, base in sources.items():
-        attribution = base / ATTRIBUTION.get(name, "attribution")
+    sources = {"run": "run", **{name: d.name for name, d in filters.items()}}
+    for name, source in sources.items():
+        attribution = ablation_source_dir(run_dir, step, source)
         if not (attribution / "components.npz").exists():
             continue
         with np.load(attribution / "components.npz") as saved:
@@ -77,7 +83,7 @@ def component_table(run_dir: Path, step: int) -> Path:
                 swept[name][(row["site"], int(row["component"]))] = row
 
     header = ["site", "layer", "kind", "component", "alive_start"]
-    for name in FILTERS:
+    for name in filters:
         header += [f"alive_{name}", f"max_ci_{name}"]
     for name in effects:
         header += [
@@ -95,7 +101,7 @@ def component_table(run_dir: Path, step: int) -> Path:
             header += [f"swept_d{metric}_{name}" for metric in SWEPT_METRICS]
 
     n_prompts = {
-        name: _pool_size(sources[name] / ATTRIBUTION.get(name, "attribution")) for name in effects
+        name: _pool_size(ablation_source_dir(run_dir, step, sources[name])) for name in effects
     }
     rows: list[str] = ["\t".join(header)]
     for site in sorted(start):
@@ -103,7 +109,7 @@ def component_table(run_dir: Path, step: int) -> Path:
         for component in np.nonzero(start[site])[0]:
             component = int(component)
             values: list[str] = [site, layer, kind, str(component), "1"]
-            for name in FILTERS:
+            for name in filters:
                 ci = float(max_ci[name][site][component])
                 values += [str(int(ci > 0.01)), f"{ci:.6g}"]
             for name, per_site in effects.items():
@@ -136,7 +142,7 @@ def component_table(run_dir: Path, step: int) -> Path:
                     ]
             rows.append("\t".join(values))
 
-    out = root / "components.tsv"
+    out = ablations / "components.tsv"
     out.write_text("\n".join(rows) + "\n")
     print(f"{len(rows) - 1} components x {len(header)} columns -> {out}")
     return out

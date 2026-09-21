@@ -225,8 +225,9 @@ class CIFilterConfig(BaseConfig):
     step: NonNegativeInt | None = None
     """Checkpoint step; `None` is the latest."""
     init: CIInit = InitFromRun()
-    ci_ceiling: bool = False
-    """CI can only decrease from the starting point's: per prompt, position and component, the
+    ci_ceiling: bool = True
+    """DEFAULT ON (with `prune_dead`: the adopted filtering mechanism). CI can only decrease from
+    the starting point's: per prompt, position and component, the
     CI every consumer reads (training masks, imp-min, evaluations, alive list, grid) is the
     minimum of the trained CI fn's and the STARTING CI's, so the narrower objective can only
     switch components off. The starting CI is the decomposition's CI fn for `init: run`, and the
@@ -234,8 +235,8 @@ class CIFilterConfig(BaseConfig):
     when it had `ci_ceiling`). Each ceiling holds one frozen compute-precision copy of a CI fn
     and costs one extra CI forward (no backward) wherever CI is read. Over the cap only a
     gradient that lowers the CI reaches the trained fn."""
-    prune_dead: bool = False
-    """Remove, before the first step, every component whose STARTING CI (with the start's own
+    prune_dead: bool = True
+    """DEFAULT ON (with `ci_ceiling`). Remove, before the first step, every component whose STARTING CI (with the start's own
     constraints) never exceeds `alive_threshold` at any position of any pool prompt: its CI is
     forced to 0 and its U and V are zeroed, so it cannot come back, and with the weight delta on
     (PPGD) its weight lies in the delta `W - UV` as if deleted. Removal is inherited: a filter

@@ -11,7 +11,7 @@ change in the integer-renormalized `log p(correct answer)` and in accuracy, and 
 the change is (the share of prompts improved), which is the claim "this component impairs
 arithmetic" stated about Llama rather than about its decomposition.
 
-Writes `<run_dir>/analysis/ci_filter/step_<step>/model_ablation.tsv`."""
+Writes `<run_dir>/analysis/ablations/step_<step>/model_ablation.tsv`."""
 
 import argparse
 import time
@@ -29,6 +29,7 @@ from param_decomp.ci_filter.attribution import answer_targets
 from param_decomp.ci_filter.config import CIFilterConfig, resolve_run_dir
 from param_decomp.ci_filter.nontarget import subtracting
 from param_decomp.ci_filter.objective import answer_logprob_rows, restrict
+from param_decomp.ci_filter.paths import ablations_dir
 from param_decomp.ci_filter.pool import answer_token_ids, build_pool, load_tokenizer
 from param_decomp.ci_filter.scripts.nontarget_probe import select_components
 from param_decomp.ci_filter.step import Prepared, gather_rows, prepare_components
@@ -94,7 +95,8 @@ def model_ablation(
     target = restored.deliverable.target
     assert isinstance(target, TargetConfig)
     placed, mesh, step = restored.placed, restored.mesh, restored.step
-    out = run_dir / "analysis" / "ci_filter" / f"step_{step}" / "model_ablation.tsv"
+    out = ablations_dir(run_dir, step) / "model_ablation.tsv"
+    out.parent.mkdir(parents=True, exist_ok=True)
 
     tokenizer = load_tokenizer(target.model_name)
     pool = build_pool(config.pool, tokenizer)

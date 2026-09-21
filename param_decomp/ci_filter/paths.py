@@ -1,6 +1,23 @@
-"""Output layout and ids of CI filter runs.
+"""Output layout and ids of CI filter runs and of the ablation studies built on them.
 
-A CI filter's outputs live with the decomposition it reads:
+Everything lives with the decomposition it reads, under `<run_dir>/analysis/`:
+
+    ci_filter/step_<step>/<cf-id>/  one filtering run (below)
+    ci_filter/step_<step>/Trash/    retired filtering runs (not ceiling + prune), kept for
+                                    the record; nothing reads from it
+    ablations/step_<step>/          anything that measures the effect of ABLATING components:
+        decomposition_alive.npz     {site: (C,)} bool, the decomposition's own alive set on the
+                                    pool (the row set of the tables and sweeps)
+        components.tsv              one row per alive component, every measurement joined
+        <source>/                   screen (`components.npz`, `summary.json`, `verified.json`)
+                                    and full sweep (`ablation_sweep.tsv`) for one CI source:
+                                    `run` (the decomposition's own CI) or a filter id
+        model_ablation.tsv          candidates subtracted from the MODEL (weight delta on)
+        nontarget_probe/            the same subtraction scored on general text, plus the
+                                    browsable `app/index.html`
+        mask_ablations/<source>.json  global-mask ablations (all-on, alive-union, dead-only, ...)
+
+One filtering run:
 
     <run_dir>/analysis/ci_filter/step_<step>/<cf-id>/
         config.yaml                 the pinned CIFilterConfig
@@ -22,6 +39,23 @@ import secrets
 from dataclasses import dataclass
 from pathlib import Path
 
+TRASH = "Trash"
+"""Subfolder of `ci_filter/step_<step>/` holding retired filtering runs."""
+
+
+def ci_filter_dir(run_dir: Path, step: int) -> Path:
+    return run_dir / "analysis" / "ci_filter" / f"step_{step}"
+
+
+def ablations_dir(run_dir: Path, step: int) -> Path:
+    """Where every ablation study of this run and step writes (layout in the module docstring)."""
+    return run_dir / "analysis" / "ablations" / f"step_{step}"
+
+
+def ablation_source_dir(run_dir: Path, step: int, source: str) -> Path:
+    """One CI source's screen and sweep: `run` or a filter id."""
+    return ablations_dir(run_dir, step) / source
+
 
 @dataclass(frozen=True)
 class CIFilterOutputs:
@@ -29,7 +63,7 @@ class CIFilterOutputs:
 
     @staticmethod
     def for_run(run_dir: Path, step: int, filter_id: str) -> "CIFilterOutputs":
-        return CIFilterOutputs(run_dir / "analysis" / "ci_filter" / f"step_{step}" / filter_id)
+        return CIFilterOutputs(ci_filter_dir(run_dir, step) / filter_id)
 
     @property
     def config(self) -> Path:

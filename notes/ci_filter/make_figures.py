@@ -1,9 +1,10 @@
 """Figures for `notes/ci_filter/report.md`, from the pulled filter outputs.
 
-    python notes/ci_filter/make_figures.py [--root <analysis/ci_filter/step_40000>]
+    python notes/ci_filter/make_figures.py [--root <run_dir>/analysis]
 
-Reads each filter's `eval/pool_evals.jsonl`, `eval/pgd_recon.json` and (where present)
-`attribution/`, and writes `notes/ci_filter/figures/*.png`.
+Reads each filter's `eval/pool_evals.jsonl` and `eval/pgd_recon.json` (the retired ones from
+`ci_filter/step_40000/Trash/`) and the attribution under `ablations/step_40000/<filter-id>/`,
+and writes `notes/ci_filter/figures/*.png`.
 """
 
 import argparse
@@ -18,12 +19,14 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 
-DEFAULT_ROOT = Path("~/out/pod-backup/p-ba5a0c05/analysis/ci_filter/step_40000").expanduser()
+DEFAULT_ROOT = Path("~/out/pod-backup/p-ba5a0c05/analysis").expanduser()
+FILTERS = "ci_filter/step_40000"
+ABLATIONS = "ablations/step_40000"
 FIGURES = Path(__file__).parent / "figures"
 
-RUNS = {
-    "addsub-05-filter-last-pos": ("unconstrained", "tab:red"),
-    "addsub-05-filter-last-pos-alive": ("prune_dead", "tab:orange"),
+RUNS = {  # path under the filters folder -> (label, colour); retired runs live in Trash/
+    "Trash/addsub-05-filter-last-pos": ("unconstrained", "tab:red"),
+    "Trash/addsub-05-filter-last-pos-alive": ("prune_dead", "tab:orange"),
     "addsub-05-filter-last-pos-ceiling": ("ci_ceiling", "tab:blue"),
     "addsub-05-filter-integers": ("integer KL (ceiling+prune)", "tab:green"),
     "addsub-05-filter-answer-ce": ("answer CE (ceiling+prune)", "tab:purple"),
@@ -32,7 +35,7 @@ LLAMA_ACCURACY = 0.6671500205993652  # attribution summaries, clean model on the
 
 
 def evals(root: Path, run: str) -> list[dict[str, Any]]:
-    path = root / run / "eval" / "pool_evals.jsonl"
+    path = root / FILTERS / run / "eval" / "pool_evals.jsonl"
     rows: list[dict[str, Any]] = [json.loads(line) for line in path.read_text().splitlines()]
     seen: dict[int, dict[str, Any]] = {}
     for row in rows:  # a pruning run logs step 0 twice: keep the post-removal one
@@ -86,7 +89,7 @@ def faithfulness_figure(root: Path) -> None:
     # The integer-KL run predates the accuracy column in the evaluations; its attribution
     # pass measured the same quantity on the same pool.
     integer: dict[str, float] = json.loads(
-        (root / "addsub-05-filter-integers" / "attribution" / "summary.json").read_text()
+        (root / ABLATIONS / "addsub-05-filter-integers" / "summary.json").read_text()
     )
     axes[1].axhline(integer["accuracy"], ls=":", c="tab:green", lw=1.5)
     axes[1].text(
@@ -105,7 +108,7 @@ def faithfulness_figure(root: Path) -> None:
 def attribution_figure(root: Path) -> None:
     fig, axes = plt.subplots(1, 2, figsize=(11, 4))
     for run, (label, color) in RUNS.items():
-        path = root / run / "attribution"
+        path = root / ABLATIONS / Path(run).name
         if not path.exists():
             continue
         verified: list[dict[str, Any]] = json.loads((path / "verified.json").read_text())
@@ -152,7 +155,9 @@ def pgd_figure(root: Path) -> None:
     finals: list[float] = []
     colors: list[str] = []
     for run, (label, color) in RUNS.items():
-        pgd: dict[str, float] = json.loads((root / run / "eval" / "pgd_recon.json").read_text())
+        pgd: dict[str, float] = json.loads(
+            (root / FILTERS / run / "eval" / "pgd_recon.json").read_text()
+        )
         if "answer-ce" in run:  # a cross-entropy, not a KL: not on this axis
             continue
         names.append(label)

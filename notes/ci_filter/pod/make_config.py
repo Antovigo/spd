@@ -9,7 +9,7 @@ Hardware knobs come from the environment: MICRO (prompts per microbatch; unset =
 1024-prompt batch in one forward), EVAL_BATCH (default 1000), GRID_CHUNK (default 1000).
 Constraint knobs (env), overriding the template seat when SET: `PRUNE_DEAD` (`1` removes the
 components dead on the pool at the start), `CI_CEILING` (`1` caps CI at the starting point's).
-The `obj3` seat turns both on by itself. The run is referenced by id, so it resolves to `$DATA_ROOT/runs/p-ba5a0c05`."""
+Every seat turns both on (the adopted mechanism); set `=0` only to reproduce a retired run. The run is referenced by id, so it resolves to `$DATA_ROOT/runs/p-ba5a0c05`."""
 
 import argparse
 import os
@@ -48,6 +48,8 @@ def main() -> None:
         case "obj2" | "obj3":
             assert args.init_id, f"{args.stage} starts from another filter's CI fn: pass --init-id"
             raw["init"] = {"kind": "ci_filter", "id": args.init_id}
+        case _:
+            raise AssertionError(f"unknown stage {args.stage!r}")  # argparse choices guard this
     config = CIFilterConfig.model_validate(raw)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     config.to_file(args.out)

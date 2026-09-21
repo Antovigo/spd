@@ -5,7 +5,7 @@ CI function against narrower last-position objectives on the 20,000-prompt pool 
 `a, b` in 1..100), and see which components survive. Target stream only, 5,000 steps x 1,024 prompts,
 the decomposition's own merged stochastic-subset PPGD reconstruction scored by the filter objective,
 imp-min gamma re-annealed 1 -> 0.01 over the last half. Code: `param_decomp/ci_filter`
-(branch `feature/ci_filter`); outputs: `<run_dir>/analysis/ci_filter/step_40000/<filter-id>/`;
+(branch `feature/ci_filter`); outputs: `<run_dir>/analysis/ci_filter/step_40000/<filter-id>/` (runs without the ceiling now under `Trash/`);
 figures regenerate with `python notes/ci_filter/make_figures.py`.
 
 ## What was run
@@ -117,7 +117,7 @@ Both helpers and interferers concentrate in the MLPs of layers 30-31.
 
 ## Where things are
 
-Per filter: `config.yaml`, `training/{metrics.jsonl, ci_fn/}`, `eval/{pool_evals.jsonl, summary.json,
+Ablation studies (screens, sweeps, probe, table) live in `<run_dir>/analysis/ablations/step_40000/`. Per filter: `config.yaml`, `training/{metrics.jsonl, ci_fn/}`, `eval/{pool_evals.jsonl, summary.json,
 pgd_recon.json}`, `alive/{alive.json, max_ci.npz, kept.npz}`, `ab_grids/index.html` (the `(a, b)`-grid
 applet, every operation x position), and for the last two filters `attribution/{components.npz,
 verified.json, summary.json}`. Backup: `~/out/pod-backup/p-ba5a0c05/analysis/ci_filter/`. Wandb:

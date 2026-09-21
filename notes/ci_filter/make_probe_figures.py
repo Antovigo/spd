@@ -20,7 +20,7 @@ import numpy as np  # noqa: E402
 from matplotlib.colors import LogNorm  # noqa: E402
 
 DEFAULT_PROBE = Path(
-    "~/out/pod-backup/p-ba5a0c05/analysis/ci_filter/step_40000/nontarget_probe"
+    "~/out/pod-backup/p-ba5a0c05/analysis/ablations/step_40000/nontarget_probe"
 ).expanduser()
 FIGURES = Path(__file__).parent / "figures"
 PER_LINE = 16

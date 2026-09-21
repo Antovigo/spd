@@ -9,7 +9,7 @@ each one from the FROZEN MODEL over pre-tokenized non-target text (weight delta 
 component on), recording per position the KL against the model and both argmax tokens
 (`param_decomp/ci_filter/nontarget.py`).
 
-Writes `<run_dir>/analysis/ci_filter/step_<step>/nontarget_probe/`: `summary.tsv` (one row per
+Writes `<run_dir>/analysis/ablations/step_<step>/nontarget_probe/`: `summary.tsv` (one row per
 component: how broadly it acts), `examples.jsonl` (its `top_k` highest-KL positions with the
 decoded context and the token swap) and `heatmap.npz` + `heatmap_tokens.json` (per-token KL of
 the `heatmap_rows` texts with the HIGHEST max KL FOR THAT COMPONENT, so a narrow-context
@@ -33,6 +33,7 @@ from param_decomp.ci_filter.nontarget import (
     make_probe_ci,
     make_probe_component,
 )
+from param_decomp.ci_filter.paths import ablations_dir
 from param_decomp.ci_filter.pool import Tokenizer, load_tokenizer
 from param_decomp.ci_filter.step import prepare_components
 from param_decomp.core.log import logger, setup_console_logger
@@ -125,7 +126,7 @@ def nontarget_probe(
     target = restored.deliverable.target
     assert isinstance(target, TargetConfig)
     placed, mesh, step = restored.placed, restored.mesh, restored.step
-    out_dir = run_dir / "analysis" / "ci_filter" / f"step_{step}" / "nontarget_probe"
+    out_dir = ablations_dir(run_dir, step) / "nontarget_probe"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     chosen = select_components(table, min_layer, max_layer, min_impairs)

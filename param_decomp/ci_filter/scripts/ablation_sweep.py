@@ -9,7 +9,7 @@ un-ablated baseline in full-vocabulary KL, answer-restricted KL, the true answer
 and accuracy. The clean forward and the CI evaluation are computed once for the subset, so the
 inner loop is one masked forward per component.
 
-Writes `<filter>/attribution/ablation_sweep.tsv` incrementally (one flushed row per component,
+Writes `<run_dir>/analysis/ablations/step_<step>/<source>/ablation_sweep.tsv` incrementally (one flushed row per component,
 so a killed job keeps its progress); rerunning skips the components already in the file."""
 
 import argparse
@@ -28,7 +28,7 @@ from param_decomp.ci_filter.attribution import (
 )
 from param_decomp.ci_filter.checkpoint import trained_ci
 from param_decomp.ci_filter.config import CIFilterConfig, resolve_run_dir
-from param_decomp.ci_filter.paths import CIFilterOutputs
+from param_decomp.ci_filter.paths import ablation_source_dir
 from param_decomp.ci_filter.pool import answer_token_ids, build_pool, load_tokenizer
 from param_decomp.ci_filter.step import (
     UNCONSTRAINED,
@@ -59,11 +59,7 @@ def ablation_sweep(
     target = restored.deliverable.target
     assert isinstance(target, TargetConfig)
     placed, mesh, step = restored.placed, restored.mesh, restored.step
-    out_dir = (
-        run_dir / "analysis" / "ci_filter" / f"step_{step}" / "attribution_run"
-        if source == "run"
-        else CIFilterOutputs.for_run(run_dir, step, source).root / "attribution"
-    )
+    out_dir = ablation_source_dir(run_dir, step, source)
     out_dir.mkdir(parents=True, exist_ok=True)
     out = out_dir / "ablation_sweep.tsv"
 

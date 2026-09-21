@@ -8,8 +8,7 @@ answer's renormalized log-probability — it interferes.
     python -m param_decomp.ci_filter.scripts.run_attribution --config <yaml> --data_root <root>
         --source <cf-id|run> [--batch_size 500] [--verify_top 100] [--verify_prompts 1000]
 
-Writes `<run_dir>/analysis/ci_filter/step_<step>/<source>/attribution/` (for `run`, the
-`mask_ablations` sibling): `components.npz` (per-site mean effect, the count of prompts where
+Writes `<run_dir>/analysis/ablations/step_<step>/<source>/`: `components.npz` (per-site mean effect, the count of prompts where
 ablating HELPS the true answer, and activity counts, each overall and per operation), `summary.json` (accuracies, score means) and `verified.json` (the
 ablated extremes, first-order vs causal)."""
 
@@ -30,7 +29,7 @@ from param_decomp.ci_filter.attribution import (
 )
 from param_decomp.ci_filter.checkpoint import trained_ci
 from param_decomp.ci_filter.config import CIFilterConfig, resolve_run_dir
-from param_decomp.ci_filter.paths import CIFilterOutputs
+from param_decomp.ci_filter.paths import ablation_source_dir
 from param_decomp.ci_filter.pool import answer_token_ids, build_pool, load_tokenizer
 from param_decomp.ci_filter.step import (
     UNCONSTRAINED,
@@ -42,12 +41,6 @@ from param_decomp.core.log import logger, setup_console_logger
 from param_decomp.experiments.lm.load_run import restore_jax_run
 from param_decomp.experiments.lm.resolved import TargetConfig
 from param_decomp.experiments.lm.training import enable_persistent_compilation_cache
-
-
-def _out_dir(run_dir: Path, step: int, source: str) -> Path:
-    if source == "run":
-        return run_dir / "analysis" / "ci_filter" / f"step_{step}" / "attribution_run"
-    return CIFilterOutputs.for_run(run_dir, step, source).root / "attribution"
 
 
 def run_attribution(
@@ -65,7 +58,7 @@ def run_attribution(
     target = restored.deliverable.target
     assert isinstance(target, TargetConfig)
     placed, mesh, step = restored.placed, restored.mesh, restored.step
-    out_dir = _out_dir(run_dir, step, source)
+    out_dir = ablation_source_dir(run_dir, step, source)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     tokenizer = load_tokenizer(target.model_name)

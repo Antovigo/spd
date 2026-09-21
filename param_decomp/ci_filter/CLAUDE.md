@@ -35,8 +35,10 @@ switch off per prompt. Target stream only: no non-target pass, no hidden-activat
   one lazily loaded file per slice (payload format of `experiments/lm/ab_grid_dataset.py`).
 - `checkpoint.py` — orbax save/restore of the fine-tuned CI fn (chains objective 2 onto 1), and
   `starting_ci` / `trained_ci`: the CI fn a filter starts from and the constraints capping it.
-- `paths.py` — `CIFilterOutputs`: `<run_dir>/analysis/ci_filter/step_<step>/<cf-id>/` (layout
-  in the module docstring).
+- `paths.py` — the analysis layout, in its module docstring: filtering runs in
+  `<run_dir>/analysis/ci_filter/step_<step>/<cf-id>/` (retired ones in `Trash/`), and EVERY
+  ablation study — screens, sweeps, model ablation, the non-target probe, mask ablations, the
+  per-component table — in `<run_dir>/analysis/ablations/step_<step>/` (`ablations_dir`).
 - `scripts/run_ci_filter.py` — entry point.
 - `configs/` — template seats for objective 1 (`last_position_kl.yaml`) and objective 2
   (`last_position_integer_kl.yaml`, `init` from objective 1's id); parse-gated by
@@ -55,7 +57,8 @@ same cut defines the rounded masks. Constraints (`step.CIConstraints`, threaded 
 `ci_ceiling` the CI is the entrywise minimum of the trained fn's and each frozen ceiling fn's (the
 starting point's CI, chained through `init: ci_filter`); with `prune_dead` the components dead on
 the pool at the start get CI 0 and zeroed U/V (`remove_components`, saved as `alive/kept.npz` and
-inherited by later filters).
+inherited by later filters). **Ceiling + prune is the adopted default** (both config
+fields and every template seat default to on); runs without the ceiling were moved to `Trash/`.
 
 Run: `python -m param_decomp.ci_filter.scripts.run_ci_filter --config <yaml> --data_root <root>
 [--filter_id cf-xxxxxxxx]`. The mesh is fsdp over every visible device (`restore_jax_run`).

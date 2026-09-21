@@ -2,7 +2,7 @@
 
 The CI fn is the decomposition's own (`--source run`) or a CI filter's (`--source cf-xxxxxxxx`).
 The run, pool, evaluation batch and alive threshold come from a `CIFilterConfig`. Writes
-`<run_dir>/analysis/ci_filter/step_<step>/mask_ablations/<source>.json`."""
+`<run_dir>/analysis/ablations/step_<step>/mask_ablations/<source>.json`."""
 
 import argparse
 import json
@@ -17,6 +17,7 @@ from jax.sharding import PartitionSpec as P
 from param_decomp.ci_filter.ablation import MASKINGS, ablation_rows
 from param_decomp.ci_filter.checkpoint import trained_ci
 from param_decomp.ci_filter.config import CIFilterConfig, resolve_run_dir
+from param_decomp.ci_filter.paths import ablations_dir
 from param_decomp.ci_filter.pool import build_pool, load_tokenizer
 from param_decomp.ci_filter.step import (
     UNCONSTRAINED,
@@ -39,9 +40,7 @@ def mask_ablations(config: CIFilterConfig, data_root: Path, source: str) -> Path
     target = restored.deliverable.target
     assert isinstance(target, TargetConfig)
     placed, mesh, step = restored.placed, restored.mesh, restored.step
-    out_path = (
-        run_dir / "analysis" / "ci_filter" / f"step_{step}" / "mask_ablations" / f"{source}.json"
-    )
+    out_path = ablations_dir(run_dir, step) / "mask_ablations" / f"{source}.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     pool = build_pool(config.pool, load_tokenizer(target.model_name))
     threshold = config.alive_threshold

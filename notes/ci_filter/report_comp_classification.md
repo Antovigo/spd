@@ -23,7 +23,7 @@ with a clearer name.
 
 ## The dataset
 
-`<run_dir>/analysis/ci_filter/step_40000/components.tsv` — 12,553 rows (every component alive in
+`<run_dir>/analysis/ablations/step_40000/components.tsv` — 12,553 rows (every component alive in
 the decomposition on this pool) x 46 columns, built by
 `python -m param_decomp.ci_filter.scripts.component_table --run_dir <run>`:
 
@@ -192,7 +192,7 @@ impairer, L13 c188, is *not* specific to either: its harm on arithmetic is not e
 arithmetic-looking trigger. With only 135 `=` tokens in the sample, the `=` ratios are
 directionally solid but not precise.
 
-**Browse it:** `<run_dir>/analysis/ci_filter/step_40000/nontarget_probe/app/index.html` — 25
+**Browse it:** `<run_dir>/analysis/ablations/step_40000/nontarget_probe/app/index.html` — 25
 sequences per component (top by max KL over the million tokens), coloured by KL or by the
 component's CI, with a CI underline toggle and per-token hover (KL, CI, model versus ablated
 top-1).
