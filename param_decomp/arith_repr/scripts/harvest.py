@@ -24,6 +24,7 @@ from param_decomp.ci_filter.config import ArithmeticPoolConfig
 from param_decomp.ci_filter.pool import build_pool, load_tokenizer
 from param_decomp.ci_filter.step import gather_rows, index_batches
 from param_decomp.core.log import logger, setup_console_logger
+from param_decomp.core.model import PlacedModel
 from param_decomp.core.sharding import hsdp_mesh
 from param_decomp.experiments.lm.deliverable import load_deliverable
 from param_decomp.experiments.lm.load_run import build_target
@@ -73,7 +74,9 @@ def main() -> None:
     )
 
     @eqx.filter_jit
-    def captures(tokens_all: Int[Array, "N T"], idx: Int[Array, " B"]) -> dict[str, Array]:
+    def captures(
+        placed: PlacedModel, tokens_all: Int[Array, "N T"], idx: Int[Array, " B"]
+    ) -> dict[str, Array]:
         tokens = gather_rows(tokens_all, idx)
         result = placed.clean_forward(tokens, capture_keys=keys)
         return {
@@ -87,7 +90,7 @@ def main() -> None:
         tokens_all = jnp.asarray(pool.tokens)
         t0 = time.time()
         for i, (idx, real) in enumerate(batches):
-            got = captures(tokens_all, jnp.asarray(idx))
+            got = captures(placed, tokens_all, jnp.asarray(idx))
             for key, value in got.items():
                 arr = np.asarray(value)[:real]  # bfloat16 (ml_dtypes) numpy array
                 if key not in memmaps:
