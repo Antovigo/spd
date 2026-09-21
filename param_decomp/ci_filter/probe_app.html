@@ -56,6 +56,15 @@ const showCI = document.getElementById("showci");
 const rowsEl = document.getElementById("rows");
 const tip = document.getElementById("tip");
 
+// Helpers first: `const` bindings are not hoisted, and the dropdown below uses them.
+function label(key) {
+  const [site, component] = key.split("|");
+  const parts = site.split(".");
+  return `L${parts[1]} ${parts.slice(2).join(".")} c${component}`;
+}
+const fmt = (v) => (v === undefined ? "?" : Number(v).toPrecision(3));
+const pct = (v) => (v === undefined ? "?" : (100 * Number(v)).toFixed(2) + "%");
+
 const keys = Object.keys(DATA).sort((a, b) => (SUMMARY[b]?.max_kl ?? 0) - (SUMMARY[a]?.max_kl ?? 0));
 for (const key of keys) {
   const s = SUMMARY[key] || {};
@@ -64,14 +73,6 @@ for (const key of keys) {
   option.textContent = `${label(key)}  —  max KL ${fmt(s.max_kl)}, flips ${pct(s.top1_flip_frac)}`;
   componentSelect.append(option);
 }
-
-function label(key) {
-  const [site, component] = key.split("|");
-  const parts = site.split(".");
-  return `L${parts[1]} ${parts.slice(2).join(".")} c${component}`;
-}
-const fmt = (v) => (v === undefined ? "?" : Number(v).toPrecision(3));
-const pct = (v) => (v === undefined ? "?" : (100 * Number(v)).toFixed(2) + "%");
 
 // Perceptually ordered ramp, white -> amber -> red -> near-black; input is already in [0, 1].
 function colour(t) {
