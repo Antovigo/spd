@@ -66,3 +66,49 @@ property of that penalty, not something every L18 decomposition does.
 - No coupled baseline: `p-5b7fa697`'s pin predates #1000 and no current build can open it,
   and pins are immutable (CONFIGS.md rule 4). A same-code coupled twin at 20k is the only
   way to add one.
+
+---
+
+# Dual vs outputs-only under a long attack (addsub-L18-24, added 2026-09-21)
+
+**Question.** The -24 pair differs only in the objective: `addsub-L18-24` (dual, `p-80e88c2b`)
+and `addsub-L18-24-outputs-only` (`p-b1ab4bb2`, `ci.dual: false`, no hidden pass), both
+20 000 steps. At the production 20-step probe the dual arm has the lower PGD recon loss — does
+that hold up when the adversary gets 5x as many steps?
+
+**Probe.** Same as above (`pgd_curve.py`, fresh PGD on the OUTPUT CI head, end-to-end output
+KL, 4 fixed batches, source shape `c`, non-target arm delta-pinned), with budgets 20→100 in
+steps of 20 and **4** adversary start points instead of 2. Jobs 11988/11989 against a frozen
+worktree at the -24 commit; the output head is the one both arms share, so this is the
+like-for-like comparison and says nothing about the dual arm's hidden head. Raw data
+`~/pd_scratch/dual_obj_jax/pgd_curve24/`; figure script `pgd_curve24_figs.py`.
+
+![PGD vs adversarial steps, dual vs outputs-only](plots/init_pgd/02_l18_24_dual_vs_outputs_only.png)
+
+**The dual arm is more robust at every budget, and the gap does not close.** At 100 steps
+outputs-only sits at 1.61x the dual arm's loss on the task distribution and 1.67x on general
+text — the same ratio as at 20 steps (1.63x / 1.65x). The min-max bands over the four start
+points do not overlap on either stream.
+
+**Neither arm hides a weakness at long budgets.** From 20 to 100 steps the loss rises only
++3.4% (dual) / +2.4% (outputs-only) on the task and +7.1% / +8.5% on general text, almost
+all of it by step 60 (general text: mostly by step 40). The production 20-step probe already
+sees most of the worst case for both.
+
+**Outputs-only is more sensitive to where the attack starts:** its task-distribution spread
+is 0.0068-0.0082 at 100 steps against the dual's 0.0043-0.0049.
+
+| steps | dual, task | outputs-only, task | dual, general | outputs-only, general |
+|---|---|---|---|---|
+| 20 | 0.00439 | 0.00716 | 0.01131 | 0.01865 |
+| 40 | 0.00447 | 0.00730 | 0.01186 | 0.01977 |
+| 60 | 0.00450 | 0.00731 | 0.01198 | 0.01994 |
+| 80 | 0.00452 | 0.00733 | 0.01207 | 0.02015 |
+| 100 | 0.00454 | 0.00733 | 0.01211 | 0.02023 |
+
+(Mean over 4 start points. The k=20 points reproduce each run's own step-20000 eval,
+0.0047 and 0.0067, within the spread across starts.)
+
+Caveat: both are ONE-block decompositions (layer 18), so as with the logit-magnitude
+comparison (`report_logit_magnitude.md`) a per-block robustness gap may compound in a
+full-model run rather than stay at 1.6x.
