@@ -40,6 +40,7 @@
   <label>score <select id="score"><option value="generalising">generalising energy (kept dirs)</option><option value="unique">unique energy</option><option value="marginal">marginal energy</option><option value="dim_S">dim S_H</option></select></label>
   <label>max <input id="vmax" type="number" step="0.01" value="0.2" style="width:60px"></label>
   <label><input id="log" type="checkbox"> log colour</label>
+  <label>hide hypotheses with generalising energy below <input id="emin" type="number" step="0.001" value="0.005" style="width:64px"> everywhere</label>
   <span class="muted" id="status"></span>
 </header>
 <main>
@@ -67,7 +68,11 @@ function hypNames() {
   names.sort((x, y) => QUANT_ORDER.indexOf(x.quantity) - QUANT_ORDER.indexOf(y.quantity) || rank(x) - rank(y));
   return names.map(f => f.name);
 }
-const HYPS = hypNames();
+let HYPS = hypNames();
+function visibleHyps() {
+  const emin = parseFloat(document.getElementById("emin").value) || 0, op = document.getElementById("op").value;
+  return hypNames().filter(n => D.keys.some(key => POS.some(p => { const f = cell(key, p, op, n); return f && f.generalising >= emin; })));
+}
 
 function colour(v, vmax, log) {
   if (v === undefined || v === null) return "#f6f6f6";
@@ -86,6 +91,7 @@ function cell(key, p, op, name) {
 function renderMap() {
   const op = document.getElementById("op").value, score = document.getElementById("score").value;
   const vmax = parseFloat(document.getElementById("vmax").value), log = document.getElementById("log").checked;
+  HYPS = visibleHyps();
   let h = "<table class='map'><thead><tr><th class='row'></th>";
   for (const p of POS) HYPS.forEach((n, i) => {
     const cls = i === 0 ? "pos" : (HYPS[i - 1].split(":")[0] !== n.split(":")[0] ? "q" : "");
@@ -149,12 +155,13 @@ function renderDetail() {
   if (!o) { el.innerHTML = "<span class='muted'>not analysed</span>"; return; }
   let h = `<b>${sel.key}</b> position ${sel.p} (${POS_LABEL[sel.p]}), ops ${op}, k=${rec.k}, reads ${rec.n_reads}<br>`;
   h += `<span class='muted'>outside read basis ${(100 * pos.outside_basis_energy).toFixed(1)}% of ||x||² · joint hypotheses ${(100 * o.joint_energy).toFixed(1)}% · kept subspaces ${(100 * o.explained_by_kept).toFixed(1)}% · null R² threshold ${o.null_threshold.toFixed(3)}</span>`;
-  h += "<h4 style='margin:8px 0 4px'>Hypotheses</h4><table class='sep'><tr><th>name</th><th>dim H</th><th>marg</th><th>uniq</th><th>gen</th><th>dim S</th><th>lin</th><th>top σ²/total, R²</th></tr>";
+  const emin = parseFloat(document.getElementById("emin").value) || 0;
+  const readsBy = {}; if (o.separability.all) o.separability.all.names.forEach((n, i) => readsBy[n] = o.separability.all.reads_count[i]);
+  h += "<h4 style='margin:8px 0 4px'>Hypotheses (dim S > 0)</h4><table class='sep'><tr><th>name</th><th>dim H</th><th>marg</th><th>uniq</th><th>gen</th><th>dim S</th><th>#reads</th><th>held-out R² (top dirs)</th></tr>";
   for (const f of o.fits) {
-    const tot = 1; // singular values already relative below
-    const bold = f.name === sel.name ? "font-weight:bold" : "";
-    const sv = f.sv.slice(0, 4).map((s, i) => `${(s * s / o.total_energy_dummy || 0).toFixed ? "" : ""}${f.r2[i] !== undefined ? f.r2[i].toFixed(2) : ""}`).join(" ");
-    h += `<tr style='${bold}'><td>${f.name}</td><td>${f.dim_hypothesis}</td><td>${f.marginal.toFixed(4)}</td><td>${f.unique.toFixed(4)}</td><td>${f.generalising.toFixed(4)}</td><td>${f.dim_S}</td><td>${f.linear_r2.toFixed(2)}</td><td>${f.r2.slice(0, 4).map(x => x.toFixed(2)).join(" ")}</td></tr>`;
+    if (!f.dim_S && f.name !== sel.name) continue;
+    const style = (f.name === sel.name ? "font-weight:bold;" : "") + (f.generalising < emin ? "color:#999;" : "");
+    h += `<tr style='${style}'><td>${f.name}</td><td>${f.dim_hypothesis}</td><td>${f.marginal.toFixed(4)}</td><td>${f.unique.toFixed(4)}</td><td>${f.generalising.toFixed(4)}</td><td>${f.dim_S}</td><td>${readsBy[f.name] ?? ""}</td><td>${f.r2.slice(0, 4).map(x => x.toFixed(2)).join(" ")}</td></tr>`;
   }
   h += "</table>";
   const sepAll = o.separability.all;
@@ -196,7 +203,7 @@ function renderDetail() {
   if (ay) ay.onchange = () => { axY = +ay.value; renderDetail(); };
 }
 
-for (const id of ["op", "score", "vmax", "log"]) document.getElementById(id).onchange = () => { renderMap(); renderDetail(); };
+for (const id of ["op", "score", "vmax", "log", "emin"]) document.getElementById(id).onchange = () => { renderMap(); renderDetail(); };
 document.getElementById("status").textContent = `${D.keys.length} read points, ${HYPS.length} hypotheses`;
 renderMap();
 </script>
