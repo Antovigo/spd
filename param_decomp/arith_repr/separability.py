@@ -38,7 +38,10 @@ class SeparabilityResult:
     separable: np.ndarray
     """`(n_hyp, n_hyp)` bool, symmetric; the diagonal is False."""
     clusters: list[list[int]]
-    """Connected components of the NOT-separable graph, as hypothesis indices."""
+    """Connected components of the NOT-separable graph over the READ hypotheses, as
+    hypothesis indices; an unread hypothesis (no component reads it) is its own cluster
+    and is listed in `unread` — nothing points at it, so it can neither separate nor merge."""
+    unread: list[int]
     overlaps: np.ndarray
     """`(n_hyp, n_components)` the raw `s_A(c)`."""
 
@@ -67,9 +70,11 @@ def separability(
             a_not_b = bool(np.any(reads[i] & ignores[j]))
             b_not_a = bool(np.any(reads[j] & ignores[i]))
             sep[i, j] = sep[j, i] = a_not_b and b_not_a
-    # Connected components of the complement graph.
+    # Connected components of the complement graph over the read hypotheses.
+    unread = [i for i in range(n_h) if not reads[i].any()]
     seen = np.zeros(n_h, bool)
-    clusters: list[list[int]] = []
+    clusters: list[list[int]] = [[i] for i in unread]
+    seen[unread] = True
     for start in range(n_h):
         if seen[start]:
             continue
@@ -83,7 +88,7 @@ def separability(
                     seen[j] = True
                     stack.append(j)
         clusters.append(sorted(comp))
-    return SeparabilityResult(names, reads, ignores, sep, clusters, s)
+    return SeparabilityResult(names, reads, ignores, sep, clusters, unread, s)
 
 
 @dataclass

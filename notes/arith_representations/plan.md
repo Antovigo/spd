@@ -72,7 +72,8 @@ and position `p`:
 - representation subspace `S_H = row-space(M_H)`, truncated to the directions that survive the
   **value-held-out** test: five folds, each holding out 20 % of the `a` values and 20 % of the
   `b` values (every prompt touching a held-out value is held out). A direction is kept if its
-  held-out explained energy exceeds the 99th percentile of a label-permutation null. This is
+  held-out explained energy exceeds the 99.9th percentile of a label-permutation null (five
+  replicates, pooled over hypotheses and directions at that read point and position). This is
   what separates "a code for `a mod 10`" (predicts unseen `a`) from a lookup table over `a`
   (`P_{a,100}` cannot generalise across values by construction).
 - `dim(S_H)` and the spectrum of `M_H` are recorded per `(r, p, H)`. The applet's presence map
@@ -99,7 +100,10 @@ whose projection onto `S_B` is at chance. It is symmetric by construction and ha
 threshold — only null quantiles.
 
 Two hypotheses that are not separable are joined; **clusters** are the connected components
-of that graph, computed per `(r, kappa)` and also with the kinds pooled. The expected picture
+of that graph, computed per `(r, kappa)` and also with the kinds pooled. A hypothesis that no
+alive component reads at all is reported as *unread* and kept out of the graph: nothing points
+at it, so it can neither separate from nor merge with anything (letting it in would glue every
+cluster together through it). The expected picture
 if the model used circles in orthogonal planes would be one cluster per period; the plan does
 not assume it.
 
@@ -125,6 +129,12 @@ representation of `a` regardless of operation.
    centroid clouds.
 
 ## 6. Researcher degrees of freedom, listed
+
+Changes made after the synthetic check (2026-09-21, before any real activation was analysed):
+the kept-direction null moved from the 99th to the 99.9th percentile (with ~1,700 direction
+tests per read point the 99th let noise directions through), and unread hypotheses were taken
+out of the clustering graph (see section 4). Also fixed: the lower spans are orthonormalised
+before projecting, so the pure parts are exact on non-product prompt measures.
 
 Fixed by this document: the hypothesis lattice (divisors of 100), the read basis (the ceiling
 filter's alive set), post-norm residuals, the value-held-out split (20 %, 5 folds, seed 0), the

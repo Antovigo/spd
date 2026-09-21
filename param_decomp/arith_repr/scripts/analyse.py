@@ -144,6 +144,7 @@ def analyse_key(
                     "separable": sep.separable.tolist(),
                     "clusters": [[sep.names[i] for i in c] for c in sep.clusters],
                     "n_reads": int(sep.reads.shape[1]),
+                    "unread": [sep.names[i] for i in sep.unread],
                     "reads_count": sep.reads.sum(axis=1).tolist(),
                     "max_overlap": sep.overlaps.max(axis=1).tolist() if sep.overlaps.size else [],
                 }

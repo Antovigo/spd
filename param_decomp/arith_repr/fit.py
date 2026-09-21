@@ -19,6 +19,8 @@ from param_decomp.arith_repr.hypotheses import (
 )
 
 RANK_TOL = 1e-8
+NULL_PERCENTILE = 99.9
+"""Directions are kept above this percentile of the pooled permutation null."""
 
 
 def orthonormal_union(bases: list[np.ndarray]) -> np.ndarray:
@@ -46,7 +48,7 @@ class HypothesisFit:
     """Per direction: pooled over folds, `1 - ||(Y - Yhat) w||^2 / ||Y w||^2` on the test
     prompts of the hypothesis's quantity."""
     kept: np.ndarray
-    """Per direction: held-out R^2 above the permutation null's 99th percentile."""
+    """Per direction: held-out R^2 above the permutation null's `NULL_PERCENTILE`."""
     linear_r2: float
     """Energy of the centred linear function of the quantity inside `col(Phi)`, over its
     total energy — how much of a number-line code this part carries."""
@@ -178,7 +180,9 @@ def fit_hypotheses(
                 total=total,
             )
         )
-    threshold = float(np.percentile(np.concatenate(null_pool), 99)) if null_pool else 0.0
+    threshold = (
+        float(np.percentile(np.concatenate(null_pool), NULL_PERCENTILE)) if null_pool else 0.0
+    )
     for fit in fits:
         fit.kept = fit.heldout_r2 > threshold
     summary = {
