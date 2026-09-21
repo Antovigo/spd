@@ -16,7 +16,12 @@ import ml_dtypes
 import numpy as np
 
 from param_decomp.arith_repr.fit import HypothesisFit, fit_hypotheses, orthonormal_union
-from param_decomp.arith_repr.hypotheses import QUANTITIES_BY_POSITION, Labels, ValueFolds
+from param_decomp.arith_repr.hypotheses import (
+    QUANTITIES_BY_POSITION,
+    Labels,
+    ValueFolds,
+    pooled_quantities,
+)
 from param_decomp.arith_repr.separability import (
     cluster_geometry,
     principal_angles,
@@ -118,7 +123,8 @@ def analyse_key(
             mask = op_mask & keep_prompt
             labels = labels_all.subset(mask)
             Y = Y_all[mask]
-            fits, summary = fit_hypotheses(Y, labels, quantities, folds, n_null, seed)
+            fitted = pooled_quantities(quantities) if op_name == "both" else quantities
+            fits, summary = fit_hypotheses(Y, labels, fitted, folds, n_null, seed)
             per_op_fits[op_name], per_op_labels[op_name] = fits, labels
             Yc = Y - Y.mean(axis=0)
             union = orthonormal_union([f.S for f in fits])

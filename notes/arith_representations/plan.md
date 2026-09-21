@@ -50,8 +50,12 @@ limitation is reported rather than hidden. A nested 1-D "linear in `Q`" directio
 inside whatever spaces it projects onto, so a number-line code appears as a special case.
 
 `op` is a 1-D hypothesis (`op` indicator, centred) and is tested only when both operations
-are pooled. Every other hypothesis is fitted per operation and then compared across
-operations (section 4, "shared or separate").
+are pooled. The second operand is identified **separately per operation** (Antoine,
+2026-09-21: `b` may be represented differently on subtraction prompts): on the pooled set the
+`b` hypotheses are the op-conditional `b@add` and `b@sub` — functions of `b mod tau` supported
+on one operation's prompts, orthogonal to the op indicator — so the same reads decide whether
+the two are separable and their principal angles are measured. Every hypothesis is also
+fitted on each operation alone and compared across operations (section 4).
 
 Non-orthogonality between quantities is a fact of the design, not a nuisance to hide:
 `res = a + b` has additive parts (`f(a) + g(b)`) that no analysis can attribute to a "result"

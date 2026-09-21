@@ -52,6 +52,10 @@ class Labels:
                 return self.a + self.b
             case "diff":
                 return self.a - self.b
+            case "b@add":
+                return np.where(self.op == 0, self.b, -1)
+            case "b@sub":
+                return np.where(self.op == 1, self.b, -1)
             case _:
                 raise KeyError(name)
 
@@ -65,7 +69,25 @@ QUANTITIES_BY_POSITION: dict[int, tuple[str, ...]] = {
     3: ("a", "op", "b", "res", "cross"),
     4: ("a", "op", "b", "res", "cross"),
 }
-"""Which quantities can be present at each position (a quantity needs its tokens)."""
+"""Which quantities can be present at each position (a quantity needs its tokens). On the
+pooled prompt set `b` is replaced by the op-conditional `b@add` and `b@sub` (`pooled_quantities`):
+the second operand is identified separately per operation."""
+
+
+def pooled_quantities(quantities: tuple[str, ...]) -> tuple[str, ...]:
+    out: list[str] = []
+    for q in quantities:
+        out.extend(("b@add", "b@sub") if q == "b" else (q,))
+    return tuple(out)
+
+
+def held_out_quantity(quantity: str) -> str:
+    """Which value a hypothesis about `quantity` is held out on (`a`, `b`, or `either`)."""
+    if quantity == "a":
+        return "a"
+    if quantity == "b" or quantity.startswith("b@"):
+        return "b"
+    return "either"
 
 
 def indicator(values: np.ndarray, n_classes: int) -> np.ndarray:
@@ -119,8 +141,8 @@ class Hypothesis:
     def classes(self, labels: Labels) -> np.ndarray:
         values = labels.quantity(self.quantity)
         if self.period is None:
-            return values - self.value_offset
-        return values % self.period
+            return np.where(values >= 0, values - self.value_offset, -1)
+        return np.where(values >= 0, values % self.period, -1)
 
     def evaluate(self, labels: Labels) -> np.ndarray:
         """The hypothesis functions on another prompt set (n' x m). A class never seen where
@@ -139,18 +161,29 @@ def pure_parts(
     the quantity's range exceeds one period."""
     values = labels.quantity(quantity)
     n = values.size
+    support = values >= 0
+    # The "constant" of an op-conditional quantity is its support indicator (the op itself),
+    # so every pure part is orthogonal to the op hypothesis as well as to the constant.
     const = np.full((n, 1), 1.0 / np.sqrt(n))
+    if not support.all():
+        const = _orth_complement(np.stack([np.ones(n), support.astype(np.float64)], axis=1))
+
+    def masked_indicator(cls: np.ndarray, n_classes: int) -> np.ndarray:
+        out = np.zeros((n, n_classes))
+        out[support] = indicator(cls[support], n_classes)
+        return out
+
     parts: dict[int, Hypothesis] = {}
     for tau in periods:
-        i_m = indicator(values % tau, tau)
+        i_m = masked_indicator(np.where(support, values % tau, 0), tau)
         lower = [const] + [parts[d].Phi for d in periods if tau % d == 0 and d < tau]
         phi_m = _orth_complement(_project_out(i_m, lower))
         g_m = np.linalg.lstsq(i_m, phi_m, rcond=None)[0] if phi_m.shape[1] else np.zeros((tau, 0))
         parts[tau] = Hypothesis(quantity, tau, phi_m, g_m, 0)
     out = list(parts.values())
-    lo, hi = int(values.min()), int(values.max())
+    lo, hi = int(values[support].min()), int(values[support].max())
     if hi - lo + 1 > max(periods):
-        i_m = indicator(values - lo, hi - lo + 1)
+        i_m = masked_indicator(np.where(support, values - lo, 0), hi - lo + 1)
         phi_m = _orth_complement(_project_out(i_m, [const] + [h.Phi for h in out]))
         g_m = (
             np.linalg.lstsq(i_m, phi_m, rcond=None)[0]
@@ -195,8 +228,9 @@ def lattice_overlap(hyps: list[Hypothesis]) -> float:
 
 def linear_direction(labels: Labels, quantity: str) -> np.ndarray:
     """The centred, unit-norm linear function of `Q` (the number-line probe)."""
-    v = labels.quantity(quantity).astype(np.float64)
-    v = v - v.mean()
+    raw = labels.quantity(quantity)
+    support = raw >= 0
+    v = np.where(support, raw - raw[support].mean(), 0.0)
     return v / max(np.linalg.norm(v), 1e-300)
 
 
@@ -224,7 +258,7 @@ class ValueFolds:
         never seen in training (`a` for `a`, `b` for `b`, either for the rest)."""
         a_out = np.isin(labels.a, self.a_out[fold])
         b_out = np.isin(labels.b, self.b_out[fold])
-        match quantity:
+        match held_out_quantity(quantity):
             case "a":
                 return a_out
             case "b":

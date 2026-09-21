@@ -109,9 +109,10 @@ class ClusterGeometry:
 def class_centroids(
     Y: np.ndarray, classes: np.ndarray, n_classes: int
 ) -> tuple[np.ndarray, np.ndarray]:
-    counts = np.bincount(classes, minlength=n_classes)
+    valid = classes >= 0
+    counts = np.bincount(classes[valid], minlength=n_classes)
     sums = np.zeros((n_classes, Y.shape[1]))
-    np.add.at(sums, classes, Y)
+    np.add.at(sums, classes[valid], Y[valid])
     return sums / np.maximum(counts, 1)[:, None], counts
 
 
