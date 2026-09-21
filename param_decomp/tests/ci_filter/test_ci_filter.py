@@ -210,7 +210,6 @@ def test_template_configs_parse(name: str, tmp_path: Path) -> None:
     assert CIFilterConfig.from_file(tmp_path / name) == config
     if name != "last_position_kl.yaml":
         assert isinstance(config.init, InitFromCIFilter)
-    assert config.ci_ceiling and config.prune_dead  # the adopted default mechanism
 
 
 # ------------------------------------ placed run ------------------------------------
@@ -344,7 +343,7 @@ def _exercise_placed(tmp_path: Path, mesh: Mesh, sharding: str) -> None:
     config = _config(micro)
     with jax.set_mesh(mesh):
         # Training and every read below run under both constraints: the starting CI fn caps the
-        # trained one (`ci_ceiling`) and every odd component is removed (`prune_dead`).
+        # trained one (the ceiling) and every odd component is removed (the prune).
         start_ci_fn = ci_fn
         kept = {s.name: (jnp.arange(s.C) % 2 == 0).astype(jnp.float32) for s in sites}
         constraints = CIConstraints(ceilings=(cast_floating(ci_fn, COMPUTE_DT),), kept=kept)
@@ -611,18 +610,13 @@ def _exercise_placed(tmp_path: Path, mesh: Mesh, sharding: str) -> None:
         run_ci_fn = _setup(mesh, sharding)[3]
         obj1 = CIFilterOutputs.for_run(run_dir, 0, "obj1")
         obj1.create()
-        obj1_config = config.model_copy(update={"ci_ceiling": True, "prune_dead": True})
+        obj1_config = config
         obj1_config.to_file(obj1.config)
         save_ci_fn(obj1.ci_fn, ci_fn)
         save_kept(obj1.kept, {site: np.asarray(k) > 0 for site, k in kept.items()})
-        bare = config.model_copy(update={"ci_ceiling": False, "prune_dead": False})
-        start, unconstrained = starting_ci(bare, run_dir, 0, run_ci_fn)
-        assert start is run_ci_fn and unconstrained == UNCONSTRAINED
         start, capped_by = starting_ci(obj1_config, run_dir, 0, run_ci_fn)
         assert start is run_ci_fn and len(capped_by.ceilings) == 1 and capped_by.kept is None
-        obj2_config = config.model_copy(
-            update={"ci_ceiling": True, "init": InitFromCIFilter(id="obj1")}
-        )
+        obj2_config = config.model_copy(update={"init": InitFromCIFilter(id="obj1")})
         trained, inherited = trained_ci(run_dir, 0, "obj1", run_ci_fn)
         assert len(inherited.ceilings) == 1 and inherited.kept is not None
         for site, k in kept.items():

@@ -4,12 +4,13 @@ batch_size: 1024
 betas:
 - 0.9
 - 0.999
+ci_ceiling: true
 compilation_cache_dir: ~/.cache/param-decomp/xla
 eval_batch_size: 1000
 eval_every: 1000
 grad_clip_norm: null
 grid:
-  chunk_prompts: 1000
+  chunk_prompts: 500
   mean_ci_floor: 0.05
 imp_min:
   coeff:
@@ -80,6 +81,7 @@ pool:
   operations:
   - add
   - sub
+prune_dead: false
 recon:
   adv_fraction:
     max_val: 0.3333333

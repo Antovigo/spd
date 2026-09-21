@@ -1,6 +1,5 @@
 """Save and restore a fine-tuned CI fn as an orbax tree of its array leaves, and resolve the CI
-a filter starts from with the constraints bounding it (`CIFilterConfig.ci_ceiling`,
-`prune_dead`).
+a filter starts from with the constraints bounding it (ceiling and prune, `CIFilterConfig`).
 
 The tree is keyed by leaf index; the restore target is the decomposition's own CI fn, whose
 treedef, shapes, dtypes and shardings the saved leaves must match."""
@@ -49,15 +48,13 @@ def starting_ci(
     config: CIFilterConfig, run_dir: Path, step: int, run_ci_fn: PlacedCIFn
 ) -> tuple[PlacedCIFn, CIConstraints]:
     """The CI fn a filter trains from and the constraints it starts under: the starting point's
-    own (none for `init: run`), plus — with `ci_ceiling` — a frozen copy of the starting CI fn
-    as one more ceiling. `prune_dead` is applied later, from the starting CI's pool evaluation."""
+    own (none for `init: run`) plus a frozen copy of the starting CI fn as one more ceiling. The
+    pruning is applied later, from the starting CI's pool evaluation."""
     match config.init:
         case InitFromRun():
             ci_fn, inherited = run_ci_fn, UNCONSTRAINED
         case InitFromCIFilter(id=source_id):
             ci_fn, inherited = trained_ci(run_dir, step, source_id, run_ci_fn)
-    if not config.ci_ceiling:
-        return ci_fn, inherited
     return ci_fn, CIConstraints(
         ceilings=(*inherited.ceilings, cast_floating(ci_fn, COMPUTE_DT)), kept=inherited.kept
     )

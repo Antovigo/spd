@@ -28,8 +28,7 @@ One filtering run:
         eval/pgd_recon.json         the PGD recon eval of the starting and the final CI fn
         alive/alive.json            {site: [component ids]} with max CI > alive_threshold
         alive/max_ci.npz            {site: (C,)} max output CI over every prompt and position
-        alive/kept.npz              {site: (C,)} bool, the components NOT removed (only when
-                                    components were removed: `prune_dead` here or upstream)
+        alive/kept.npz              {site: (C,)} bool, the components NOT removed by pruning
         ab_grids/index.html         the applet (open over file://)
         ab_grids/manifest.js        slice index
         ab_grids/<op>_pos<p>.js     one (operation, position) slice

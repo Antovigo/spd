@@ -7,9 +7,7 @@ stage: `smoke` (objective 1 on a 1..30 pool, 30 steps, evals every 10 steps, the
 (last-position cross-entropy of the TRUE answer, init from --init-id).
 Hardware knobs come from the environment: MICRO (prompts per microbatch; unset = the whole
 1024-prompt batch in one forward), EVAL_BATCH (default 1000), GRID_CHUNK (default 1000).
-Constraint knobs (env), overriding the template seat when SET: `PRUNE_DEAD` (`1` removes the
-components dead on the pool at the start), `CI_CEILING` (`1` caps CI at the starting point's).
-Every seat turns both on (the adopted mechanism); set `=0` only to reproduce a retired run. The run is referenced by id, so it resolves to `$DATA_ROOT/runs/p-ba5a0c05`."""
+Every filter runs under the ceiling and prune constraints (see `CIFilterConfig`). The run is referenced by id, so it resolves to `$DATA_ROOT/runs/p-ba5a0c05`."""
 
 import argparse
 import os
@@ -36,9 +34,6 @@ def main() -> None:
     raw["microbatch_size"] = int(micro) if micro else None
     raw["eval_batch_size"] = int(os.environ.get("EVAL_BATCH", "1000"))
     raw["grid"]["chunk_prompts"] = int(os.environ.get("GRID_CHUNK", "1000"))
-    for knob, field in (("CI_CEILING", "ci_ceiling"), ("PRUNE_DEAD", "prune_dead")):
-        if knob in os.environ:  # unset leaves the template seat's own value
-            raw[field] = os.environ[knob] == "1"
     match args.stage:
         case "smoke":
             raw |= {"steps": 30, "eval_every": 10, "wandb": None}
@@ -55,8 +50,7 @@ def main() -> None:
     config.to_file(args.out)
     print(
         f"{args.stage}: {args.out} (microbatch {config.microbatch_size}, "
-        f"eval {config.eval_batch_size}, prune_dead {config.prune_dead}, "
-        f"ci_ceiling {config.ci_ceiling})"
+        f"eval {config.eval_batch_size})"
     )
 
 

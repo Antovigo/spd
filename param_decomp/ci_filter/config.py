@@ -217,6 +217,19 @@ class CIFilterConfig(BaseConfig):
     """Fine-tune the output-role CI fn of a FROZEN decomposition against a narrower output
     objective, so components that objective does not need are switched off.
 
+    Every filter runs under the two constraints (the only filtering mechanism kept):
+
+    - **prune** — before the first step, every component whose STARTING CI (under the start's own
+      constraints) never exceeds `alive_threshold` at any position of any pool prompt is removed:
+      its CI is forced to 0 and its U and V are zeroed, so it cannot come back, and with the
+      weight delta on its weight lies in the delta `W - UV` as if deleted. Removal is inherited
+      by filters initialized from this one (`alive/kept.npz`).
+    - **ceiling** — the CI every consumer reads (training masks, imp-min, evaluations, alive list,
+      grid) is the entrywise minimum of the trained CI fn's and the STARTING CI's, so the narrower
+      objective can only switch components off. The starting CI is the decomposition's for
+      `init: run` and the source filter's effective CI for `init: ci_filter`, so ceilings chain.
+      Over the cap only a gradient that lowers the CI reaches the trained fn.
+
     The forward is masked by the deterministic lower-leaky CI with the weight delta OFF
     (a component whose CI is 0 contributes nothing); only the prompt pool's target stream
     is used, with no hidden-activation or non-target pass."""
@@ -225,23 +238,6 @@ class CIFilterConfig(BaseConfig):
     step: NonNegativeInt | None = None
     """Checkpoint step; `None` is the latest."""
     init: CIInit = InitFromRun()
-    ci_ceiling: bool = True
-    """DEFAULT ON (with `prune_dead`: the adopted filtering mechanism). CI can only decrease from
-    the starting point's: per prompt, position and component, the
-    CI every consumer reads (training masks, imp-min, evaluations, alive list, grid) is the
-    minimum of the trained CI fn's and the STARTING CI's, so the narrower objective can only
-    switch components off. The starting CI is the decomposition's CI fn for `init: run`, and the
-    source filter's effective CI for `init: ci_filter` (its CI fn, capped by its own constraints
-    when it had `ci_ceiling`). Each ceiling holds one frozen compute-precision copy of a CI fn
-    and costs one extra CI forward (no backward) wherever CI is read. Over the cap only a
-    gradient that lowers the CI reaches the trained fn."""
-    prune_dead: bool = True
-    """DEFAULT ON (with `ci_ceiling`). Remove, before the first step, every component whose STARTING CI (with the start's own
-    constraints) never exceeds `alive_threshold` at any position of any pool prompt: its CI is
-    forced to 0 and its U and V are zeroed, so it cannot come back, and with the weight delta on
-    (PPGD) its weight lies in the delta `W - UV` as if deleted. Removal is inherited: a filter
-    initialized from one that removed components keeps them removed. Shapes are unchanged
-    (removal is by zeroing), so this does not make the step cheaper."""
     pool: ArithmeticPoolConfig = ArithmeticPoolConfig()
     objective: Objective
 
@@ -333,8 +329,8 @@ class PoolEval(BaseConfig):
     """Every component on (reference: the decomposition with the delta off); every KEPT one
     when components were removed."""
     n_kept: int | None = None
-    """Components not removed (`prune_dead`, here or upstream); `None` when none were. A
-    `prune_dead` filter logs two step-0 evaluations: before removal (`None`, jsonl only) and
+    """Components not removed (here or upstream); `None` when none were. A filter logs two
+    step-0 evaluations: before removal (`None`, jsonl only) and
     after."""
     pgd_recon: float | None = None
     """`PGDEvalConfig`'s adversarial reconstruction KL (final evaluation only; the starting

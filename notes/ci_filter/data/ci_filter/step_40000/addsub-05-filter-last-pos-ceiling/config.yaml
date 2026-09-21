@@ -9,7 +9,7 @@ eval_batch_size: 1000
 eval_every: 1000
 grad_clip_norm: null
 grid:
-  chunk_prompts: 1000
+  chunk_prompts: 500
   mean_ci_floor: 0.05
 imp_min:
   coeff:

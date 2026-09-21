@@ -5,11 +5,11 @@ betas:
 - 0.9
 - 0.999
 compilation_cache_dir: ~/.cache/param-decomp/xla
-eval_batch_size: 1000
+eval_batch_size: 500
 eval_every: 1000
 grad_clip_norm: null
 grid:
-  chunk_prompts: 1000
+  chunk_prompts: 250
   mean_ci_floor: 0.05
 imp_min:
   coeff:
@@ -51,7 +51,8 @@ imp_min:
   normalize_at_one: true
   reference_datapoint_count: 640
 init:
-  kind: run
+  id: addsub-05-filter-last-pos-ceiling
+  kind: ci_filter
 log_every: 10
 lr_schedule:
   max_val: 4.0e-05
@@ -62,9 +63,10 @@ lr_schedule:
   - at: 1.0
     frac: 0.1
     interp: cosine
-microbatch_size: null
+microbatch_size: 512
 objective:
-  kind: last_position_kl
+  include_minus: true
+  kind: last_position_integer_kl
 pgd_eval:
   batch_size: 128
   n_batches: 4

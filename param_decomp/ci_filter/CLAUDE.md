@@ -53,12 +53,12 @@ position; the evaluations always use deterministic masks with the delta off. Imp
 upper-leaky CI with its frequency penalty at a FIXED `a'` (microbatch-invariant). A component
 is alive iff its output CI exceeds `alive_threshold` at any position of any pool prompt; the
 same cut defines the rounded masks. Constraints (`step.CIConstraints`, threaded explicitly after
-`ci_fn` in every jit, `UNCONSTRAINED` = none) bound every CI read (`step.output_ci`): with
-`ci_ceiling` the CI is the entrywise minimum of the trained fn's and each frozen ceiling fn's (the
-starting point's CI, chained through `init: ci_filter`); with `prune_dead` the components dead on
-the pool at the start get CI 0 and zeroed U/V (`remove_components`, saved as `alive/kept.npz` and
-inherited by later filters). **Ceiling + prune is the adopted default** (both config
-fields and every template seat default to on); runs without the ceiling were moved to `Trash/`.
+`ci_fn` in every jit, `UNCONSTRAINED` = none) bound every CI read (`step.output_ci`). Every filter runs under both — they are the only
+filtering mechanism, with no switch: the **ceiling** makes the CI the entrywise minimum of the
+trained fn's and each frozen ceiling fn's (the starting point's CI, chained through
+`init: ci_filter`), and the **prune** gives the components dead on the pool at the start CI 0 and
+zeroed U/V (`remove_components`, saved as `alive/kept.npz`, inherited by later filters).
+`UNCONSTRAINED` remains for reading the decomposition's OWN CI (`source: run`).
 
 Run: `python -m param_decomp.ci_filter.scripts.run_ci_filter --config <yaml> --data_root <root>
 [--filter_id cf-xxxxxxxx]`. The mesh is fsdp over every visible device (`restore_jax_run`).

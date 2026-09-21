@@ -136,8 +136,7 @@ def run_ci_filter(config: CIFilterConfig, data_root: Path, filter_id: str) -> Pa
             entity=config.wandb.entity,
             name=filter_id,
             group=run_dir.name,
-            tags=[config.objective.kind, config.init.kind]
-            + (["ci_ceiling"] if config.ci_ceiling else []),
+            tags=[config.objective.kind, config.init.kind],
         )
 
     tokenizer = load_tokenizer(target.model_name)
@@ -275,25 +274,21 @@ def run_ci_filter(config: CIFilterConfig, data_root: Path, filter_id: str) -> Pa
             )
             return result, site_max
 
-        if config.prune_dead:
-            _, start_max = evaluate(0, ci_fn, references=True, log_wandb=False)
-            kept = {
-                site: jax.sharding.reshard(
-                    jnp.asarray(m > config.alive_threshold, jnp.float32), P()
-                )
-                for site, m in start_max.items()
-            }
-            constraints = CIConstraints(ceilings=constraints.ceilings, kept=kept)
-            del prepared, v_norms
-            prepared, v_norms = prepare(components, constraints)
-            logger.info(
-                f"removed the dead components: {_n_kept(constraints)} of "
-                f"{sum(m.size for m in start_max.values())} kept"
-            )
-        if constraints.kept is not None:
-            save_kept(
-                outputs.kept, {site: np.asarray(k) > 0 for site, k in constraints.kept.items()}
-            )
+        # Prune: remove what the starting CI never uses on the pool (the pre-removal evaluation
+        # goes to the jsonl only, so wandb shows one step-0 point).
+        _, start_max = evaluate(0, ci_fn, references=True, log_wandb=False)
+        kept = {
+            site: jax.sharding.reshard(jnp.asarray(m > config.alive_threshold, jnp.float32), P())
+            for site, m in start_max.items()
+        }
+        constraints = CIConstraints(ceilings=constraints.ceilings, kept=kept)
+        del prepared, v_norms
+        prepared, v_norms = prepare(components, constraints)
+        logger.info(
+            f"removed the dead components: {_n_kept(constraints)} of "
+            f"{sum(m.size for m in start_max.values())} kept"
+        )
+        save_kept(outputs.kept, {site: np.asarray(k) > 0 for site, k in kept.items()})
         del components
         evaluate(0, ci_fn, references=True)
         # The starting CI fn's PGD eval runs up front, so a crash in it surfaces before training.

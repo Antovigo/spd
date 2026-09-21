@@ -50,10 +50,10 @@ class CIConstraints:
 
     ceilings: tuple[PlacedCIFn, ...]
     """Frozen compute-precision CI fns whose output CI caps the trained one's entrywise
-    (`CIFilterConfig.ci_ceiling`); `()` leaves the CI uncapped."""
+    (a filter's ceilings, `CIFilterConfig`); `()` leaves the CI uncapped."""
     kept: dict[str, Array] | None
     """`{site: (C,)}` 1.0 for a kept component, 0.0 for a removed one, whose CI is forced to 0
-    (`CIFilterConfig.prune_dead`; its U and V are zeroed by `remove_components`); `None` keeps
+    (a filter's pruning, `CIFilterConfig`; its U and V are zeroed by `remove_components`); `None` keeps
     every component."""
 
 

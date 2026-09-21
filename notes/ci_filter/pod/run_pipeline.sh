@@ -6,9 +6,7 @@
 # --no-smoke), `--only obj2` never runs it. The smoke writes to the fixed id
 # `cf-smoke` and is deleted when it passes. Objective 2 starts from objective 1's CI fn: from
 # the id this pipeline just produced, or from --init-id when run with `--only obj2`.
-# Hardware knobs (env): MICRO, EVAL_BATCH, GRID_CHUNK. Constraint knobs (env): PRUNE_DEAD=1
-# removes the components dead at the start, CI_CEILING=1 caps CI at the starting point's — see
-# make_config.py.
+# Hardware knobs (env): MICRO, EVAL_BATCH, GRID_CHUNK — see make_config.py.
 # Filter ids (output dir + wandb run name/id): OBJ1_ID, OBJ2_ID, OBJ3_ID (the answer-CE
 # objective, which only runs with `--only obj3`); they fail closed if taken.
 # Follow: tail -f $DATA_ROOT/logs/ci_filter.latest.log
