@@ -1,4 +1,14 @@
-# Does the weight init change adversarial robustness?
+# PGD robustness under long attacks: L18 decompositions
+
+How far does a decomposition's reconstruction degrade when a fresh PGD adversary gets many
+more steps than the production 20-step probe? Two comparisons, same probe (`pgd_curve.py`):
+
+1. [Weight init](#weight-init-does-it-change-adversarial-robustness) — `zero_u` vs
+   `neuron_aligned_targeted` (addsub-L18-22 / -23).
+2. [Objective](#objective-dual-vs-outputs-only-under-a-long-attack) — dual vs
+   outputs-only (addsub-L18-24).
+
+## Weight init: does it change adversarial robustness?
 
 **Question.** Two L18 decompositions differing only in how their components were
 initialised — does one survive a long PGD attack better than the other?
@@ -16,7 +26,7 @@ batch and position). Non-target arm is delta-pinned (SPEC T4).
 
 ![PGD vs adversarial steps by init](plots/init_pgd/01_init_pgd_vs_steps.png)
 
-## What it shows
+### What it shows
 
 **General text — the aligned init is ~22% easier to attack.** At 100 steps 0.0127 against
 0.0104, and the gap opens from 20 steps onward. This one is solid: the between-init gap is
@@ -35,7 +45,7 @@ nonlinearity-penalty work: there the penalised runs kept climbing to 2.5–3× w
 control flattened. Here both arms flatten, so "keeps climbing under a longer attack" is a
 property of that penalty, not something every L18 decomposition does.
 
-## Numbers (mean over 2 adversary start points)
+### Numbers (mean over 2 adversary start points)
 
 | steps | 10 | 20 | 40 | 60 | 80 | 100 |
 |---|---|---|---|---|---|---|
@@ -44,7 +54,7 @@ property of that penalty, not something every L18 decomposition does.
 | general, `zero_u` | 0.0086 | 0.0098 | 0.0102 | 0.0103 | 0.0104 | 0.0104 |
 | general, aligned | 0.0092 | 0.0113 | 0.0126 | 0.0126 | 0.0127 | 0.0127 |
 
-## Caveats
+### Caveats
 
 - One training seed per init; two adversary start points. Enough for the 22%
   off-distribution gap, not for the 10% on-distribution one.
@@ -69,7 +79,9 @@ property of that penalty, not something every L18 decomposition does.
 
 ---
 
-# Dual vs outputs-only under a long attack (addsub-L18-24, added 2026-09-21)
+## Objective: dual vs outputs-only under a long attack
+
+*addsub-L18-24, added 2026-09-21.*
 
 **Question.** The -24 pair differs only in the objective: `addsub-L18-24` (dual, `p-80e88c2b`)
 and `addsub-L18-24-outputs-only` (`p-b1ab4bb2`, `ci.dual: false`, no hidden pass), both
