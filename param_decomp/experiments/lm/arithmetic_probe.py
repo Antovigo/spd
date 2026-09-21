@@ -10,9 +10,12 @@ tokenizer, so every rank builds the identical grid at startup with no coordinati
 For Llama-3.1 every 1-3 digit integer is a single token, so `"<a>+<b>="` is a constant
 4 tokens (5 with BOS) and every sum 2..200 is a single token — the asserts below codify
 that; a range/op that breaks either invariant fails fast rather than silently padding.
+Multiplication is the exception to the answer invariant: products from 1000 up split into
+two tokens, and the probe records CI at the `=` position (which predicts the answer's first
+token) and never reads the answer, so `mul` asserts the constant prompt length only.
 """
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -20,13 +23,14 @@ import numpy as np
 
 from param_decomp.experiments.lm.arithmetic_eval import ArithmeticGrid as ArithmeticGrid
 
-# Operation -> (display symbol, result fn). Only addition is exercised today; subtraction
-# (negative results) and multiplication tokenize differently and must re-clear the
-# single-token-answer assert before use.
-OPERATIONS = {
+# Operation -> (symbol, result fn). The symbol is the one written INTO the prompt, so it must
+# match the training pool's: `mul` uses "×" like `prompts/multiplication_1-100.txt` (one
+# Llama-3.1 token). A `None` result fn skips the single-token-answer assert (see the module
+# docstring for why `mul` does).
+OPERATIONS: dict[str, tuple[str, Callable[[int, int], int] | None]] = {
     "add": ("+", lambda a, b: a + b),
     "sub": ("-", lambda a, b: a - b),
-    "mul": ("*", lambda a, b: a * b),
+    "mul": ("×", None),
 }
 
 
@@ -44,7 +48,7 @@ class ArithmeticProbe:
     """`(n_prompts, T)` int32, row-major `(a, b)` order."""
     grid: ArithmeticGrid
     answer_position: int
-    """The `=` token; its logits predict the (single-token) answer."""
+    """The `=` token; its logits predict the answer (its first token, for `mul`)."""
 
 
 def build_arithmetic_probe(
@@ -72,6 +76,9 @@ def build_arithmetic_probe(
                 f"all prompts must share one length (padding is disabled) — pick an operand "
                 f"range whose operands are all single tokens"
             )
+            if result_fn is None:
+                rows.append(ids)
+                continue
             answer = result_fn(a, b)
             answer_tokens = tokenizer.encode(str(answer), add_special_tokens=False)
             assert len(answer_tokens) == 1, (

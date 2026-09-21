@@ -14,7 +14,7 @@ from param_decomp.experiments.lm.ab_grid_operation import global_arithmetic_prob
 from param_decomp.experiments.lm.arithmetic_probe import build_arithmetic_probe
 
 BOS = 7
-SYMBOL_IDS = {"+": 101, "-": 102, "*": 103, "=": 104}
+SYMBOL_IDS = {"+": 101, "-": 102, "×": 103, "=": 104}
 
 
 class _StubTokenizer:
@@ -26,7 +26,7 @@ class _StubTokenizer:
 
     def encode(self, text: str, add_special_tokens: bool) -> list[int]:
         ids = [BOS] if add_special_tokens else []
-        for part in re.findall(r"\d+|[-+*=]", text):
+        for part in re.findall(r"\d+|[-+×=]", text):
             if part.isdigit():
                 n = int(part)
                 ids += [1000 + n] if n < self.split_from else [1000 + int(d) for d in part]
@@ -50,8 +50,8 @@ def test_build_arithmetic_probe_grid_row_major_with_bos():
 
 def test_build_arithmetic_probe_operation_dispatch_and_rejects_unknown():
     probe = build_arithmetic_probe("mul", (2, 3), (2, 3), _StubTokenizer())
-    assert probe.grid.symbol == "*"
-    assert probe.tokens[0][2] == SYMBOL_IDS["*"]
+    assert probe.grid.symbol == "×"
+    assert probe.tokens[0][2] == SYMBOL_IDS["×"]
     with pytest.raises(AssertionError, match="operation must be"):
         build_arithmetic_probe("div", (1, 2), (1, 2), _StubTokenizer())
 
@@ -67,6 +67,12 @@ def test_build_arithmetic_probe_rejects_multi_token_answer():
     # operands single-token but 5+5=10 splits -> the answer premise breaks
     with pytest.raises(AssertionError, match="single answer token"):
         build_arithmetic_probe("add", (5, 5), (5, 6), _StubTokenizer(split_from=10))
+
+
+def test_build_arithmetic_probe_mul_accepts_multi_token_products():
+    # 40x50=2000 splits under split_from=1000; mul never reads the answer, so it builds
+    probe = build_arithmetic_probe("mul", (40, 41), (50, 51), _StubTokenizer(split_from=1000))
+    assert probe.tokens.shape == (4, 5) and probe.answer_position == 4
 
 
 def test_arithmetic_probe_global_preserves_grid():
