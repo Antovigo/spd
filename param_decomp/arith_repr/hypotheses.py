@@ -16,6 +16,13 @@ DIVISORS: tuple[int, ...] = (2, 4, 5, 10, 20, 25, 50, 100)
 """The periods, in divisor order; `1` (the constant) is handled by centering."""
 
 RANK_TOL = 1e-5
+UNSUPPORTED = -(1 << 20)
+"""Value of a quantity on a prompt where it is not defined (an op-conditional quantity on the
+other operation); far below any genuine value, negative ones included."""
+
+
+def supported(values: np.ndarray) -> np.ndarray:
+    return values > UNSUPPORTED // 2
 
 
 def divisor_order_check() -> None:
@@ -53,9 +60,9 @@ class Labels:
             case "diff":
                 return self.a - self.b
             case "b@add":
-                return np.where(self.op == 0, self.b, -1)
+                return np.where(self.op == 0, self.b, UNSUPPORTED)
             case "b@sub":
-                return np.where(self.op == 1, self.b, -1)
+                return np.where(self.op == 1, self.b, UNSUPPORTED)
             case _:
                 raise KeyError(name)
 
@@ -154,16 +161,17 @@ class Hypothesis:
 
     def classes(self, labels: Labels) -> np.ndarray:
         values = labels.quantity(self.quantity)
+        ok = supported(values)
         if self.kind == "periodic":
             assert self.period is not None
-            return np.where(values >= 0, values % self.period, -1)
-        return np.where(values >= 0, values - self.value_offset, -1)
+            return np.where(ok, values % self.period, -1)
+        return np.where(ok, values - self.value_offset, -1)
 
     def evaluate(self, labels: Labels) -> np.ndarray:
         """The hypothesis functions on another prompt set (n' x m). A class never seen where
         the hypothesis was built (a value outside a direct part's range) evaluates to 0."""
         values = labels.quantity(self.quantity)
-        support = values >= 0
+        support = supported(values)
         out = np.zeros((labels.n, self.dim))
         if self.kind == "linear":
             if self.dim:
@@ -201,7 +209,7 @@ def pure_parts(
     result quantity)."""
     values = labels.quantity(quantity)
     n = values.size
-    support = values >= 0
+    support = supported(values)
     # The "constant" of an op-conditional quantity is its support indicator (the op itself),
     # so every pure part is orthogonal to the op hypothesis as well as to the constant.
     const = np.full((n, 1), 1.0 / np.sqrt(n))
@@ -288,7 +296,7 @@ def lattice_overlap(hyps: list[Hypothesis]) -> float:
 def linear_direction(labels: Labels, quantity: str) -> np.ndarray:
     """The centred, unit-norm linear function of `Q` (the number-line probe)."""
     raw = labels.quantity(quantity)
-    support = raw >= 0
+    support = supported(raw)
     v = np.where(support, raw - raw[support].mean(), 0.0)
     return v / max(np.linalg.norm(v), 1e-300)
 
