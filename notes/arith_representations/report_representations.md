@@ -22,7 +22,14 @@ components: q/k/v/gate/up over 32 layers), prompts `a+b=` (10,000) and `a-b=` wi
   are `{a:10}`, `{b:10}`, `{res:10}` plus the linear-`a` group (`res:direct`, `cross:direct`,
   `op`), which is the documented additive ambiguity: a linear `a` is also a linear part of
   `a+b` and of `a-b`.
-- Analysis array (job 12083): 64 read points x positions 1-4 x {both, add, sub}.
+- Synthetic applet: [`synth_app/index.html`](synth_app/index.html) (open over `file://`),
+  one fake read point `mlp_in.0`, with a subtraction-only `b mod 5` code added to the plant.
+  On the pooled set `b@add:10` and `b@sub:10` share one cluster (the same planted circle) and
+  `b@sub:5` is its own; add-vs-sub cosines are 1.0 for the shared codes. Small leaks
+  (`res:25` at 0.013 generalising energy on subtraction) come from the incomparable-divisor
+  overlap on the triangle measure (`lattice_overlap` 0.25 there, 0.07 pooled) — the unique
+  energy (0.001) is the honest number for those.
+- Analysis array (job 12093): 64 read points x positions 1-4 x {both, add, sub}.
 
 ## Findings
 
