@@ -1,0 +1,14 @@
+site	layer	kind	component	impairs_frac_run	swept_danswer_ce_run	d_logp	d_accuracy	improved_frac	baseline_logp	baseline_accuracy
+layers.17.mlp.down_proj	17	mlp.down_proj	3	0.9876	-0.108628	0.154362	0.0090332	0.7627	-3.66466	0.670654
+layers.17.mlp.up_proj	17	mlp.up_proj	9	0.9794	-0.0918124	0.0829	-0.0192871	0.6785	-3.66466	0.670654
+layers.13.mlp.down_proj	13	mlp.down_proj	0	0.9549	-0.0513613	-0.000204563	-0.0263672	0.6882	-3.66466	0.670654
+layers.14.mlp.gate_proj	14	mlp.gate_proj	79	0.9375	-0.0475552	-0.690649	-0.167969	0.3008	-3.66466	0.670654
+layers.14.mlp.down_proj	14	mlp.down_proj	6	0.9452	-0.0469072	-0.570562	-0.137695	0.2144	-3.66466	0.670654
+layers.17.mlp.gate_proj	17	mlp.gate_proj	502	0.8913	-0.0407152	-0.0624666	-0.0356445	0.5789	-3.66466	0.670654
+layers.13.mlp.gate_proj	13	mlp.gate_proj	188	0.8054	-0.0275199	0.53241	0.0493164	0.9812	-3.66466	0.670654
+layers.15.mlp.down_proj	15	mlp.down_proj	6	0.8559	-0.0193543	-0.288846	-0.108887	0.4578	-3.66466	0.670654
+layers.15.self_attn.q_proj	15	self_attn.q_proj	142	0.8236	-0.0117307	0.0169737	-0.0385742	0.5703	-3.66466	0.670654
+layers.13.self_attn.k_proj	13	self_attn.k_proj	19	0.8626	-0.00698066	-0.00948572	0.00366211	0.4231	-3.66466	0.670654
+layers.13.self_attn.k_proj	13	self_attn.k_proj	15	0.8638	-0.0059793	-0.0154262	0.000976562	0.3621	-3.66466	0.670654
+layers.13.self_attn.k_proj	13	self_attn.k_proj	10	0.8597	-0.00415111	-0.0136318	0.000732422	0.4468	-3.66466	0.670654
+layers.14.mlp.up_proj	14	mlp.up_proj	2	0.8166	0.017561	-1.95946	-0.508789	0.03589	-3.66466	0.670654

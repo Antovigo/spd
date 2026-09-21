@@ -1,0 +1,13 @@
+{
+  "source": "run",
+  "n_prompts": 20000,
+  "mean_score": -3.8669826984405518,
+  "mean_clean_score": -3.708162546157837,
+  "accuracy": 0.6299499869346619,
+  "clean_accuracy": 0.6671500205993652,
+  "n_rows": {
+    "all": 20000,
+    "add": 10000,
+    "sub": 10000
+  }
+}

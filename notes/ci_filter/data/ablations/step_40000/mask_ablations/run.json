@@ -1,0 +1,29 @@
+{
+  "source": "run",
+  "threshold": 0.01,
+  "n_prompts": 20000,
+  "n_alive": 12473,
+  "n_components": 124928,
+  "kl": {
+    "all_on": {
+      "last": 0.02450055256485939,
+      "all_positions": 0.013859878294169903
+    },
+    "alive_union": {
+      "last": 0.08564449846744537,
+      "all_positions": 0.05323321372270584
+    },
+    "dead_only": {
+      "last": 7.876988410949707,
+      "all_positions": 7.2947998046875
+    },
+    "rounded_ci": {
+      "last": 0.05079776793718338,
+      "all_positions": 0.03244658187031746
+    },
+    "rounded_ci_plus_dead": {
+      "last": 0.05080033093690872,
+      "all_positions": 0.03212781623005867
+    }
+  }
+}

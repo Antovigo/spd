@@ -76,6 +76,7 @@ CORE_LAB_TEST_PATHS = \
 	param_decomp/tests/core/test_placed_eval_tiers.py
 CORE_TEST_PATHS = param_decomp/tests/core/ param_decomp/tests/targets/
 LAB_TEST_PATHS = \
+	param_decomp/tests/ci_filter/ \
 	param_decomp/tests/clustering/ \
 	param_decomp/tests/experiments/ \
 	param_decomp/tests/infra/ \

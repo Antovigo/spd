@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Component probe — per-token effect on general text</title>
+<style>
+  :root { color-scheme: light; }
+  body { font: 14px/1.5 system-ui, sans-serif; margin: 0; padding: 18px 22px; color: #111; }
+  h1 { font-size: 17px; margin: 0 0 4px; }
+  .sub { color: #555; font-size: 12px; margin-bottom: 14px; }
+  .controls { display: flex; gap: 18px; align-items: center; flex-wrap: wrap;
+              position: sticky; top: 0; background: #fff; padding: 10px 0; border-bottom: 1px solid #ddd; z-index: 2; }
+  label { font-size: 12px; color: #333; }
+  select, input { font: inherit; font-size: 13px; }
+  .row { margin: 9px 0; padding: 5px 8px 5px 92px; position: relative; border-radius: 4px; }
+  .row:nth-child(odd) { background: #fafafa; }
+  .meta { position: absolute; left: 6px; top: 5px; width: 80px; font-size: 11px; color: #666; font-variant-numeric: tabular-nums; }
+  .tok { padding: 1px 0; white-space: pre-wrap; border-radius: 2px; }
+  .tok:hover { outline: 1px solid #0a58ca; }
+  .legend { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #555; }
+  .swatch { width: 15px; height: 12px; display: inline-block; border: 1px solid #ccc; }
+  #tip { position: fixed; background: #111; color: #fff; padding: 6px 8px; border-radius: 4px;
+         font-size: 11px; pointer-events: none; display: none; z-index: 5; white-space: pre; }
+</style>
+</head>
+<body>
+<h1>Component probe: what one component does to general text</h1>
+<div class="sub" id="subtitle"></div>
+<div class="controls">
+  <label>component
+    <select id="component"></select>
+  </label>
+  <label>sequences
+    <select id="count">
+      <option>5</option><option>10</option><option selected>25</option><option>50</option>
+    </select>
+  </label>
+  <label>colour by
+    <select id="metric">
+      <option value="kl" selected>KL when subtracted</option>
+      <option value="ci">component CI (how active)</option>
+    </select>
+  </label>
+  <label><input type="checkbox" id="showci" /> mark CI &gt; 0.01 (underline)</label>
+  <span class="legend">low<span class="swatch" id="sw0"></span><span class="swatch" id="sw1"></span><span class="swatch" id="sw2"></span><span class="swatch" id="sw3"></span>high</span>
+</div>
+<div id="rows"></div>
+<div id="tip"></div>
+<script src="data.js"></script>
+<script>
+const DATA = window.PROBE_DATA, SUMMARY = window.PROBE_SUMMARY;
+const componentSelect = document.getElementById("component");
+const countSelect = document.getElementById("count");
+const metricSelect = document.getElementById("metric");
+const showCI = document.getElementById("showci");
+const rowsEl = document.getElementById("rows");
+const tip = document.getElementById("tip");
+
+// Helpers first: `const` bindings are not hoisted, and the dropdown below uses them.
+function label(key) {
+  const [site, component] = key.split("|");
+  const parts = site.split(".");
+  return `L${parts[1]} ${parts.slice(2).join(".")} c${component}`;
+}
+const fmt = (v) => (v === undefined ? "?" : Number(v).toPrecision(3));
+const pct = (v) => (v === undefined ? "?" : (100 * Number(v)).toFixed(2) + "%");
+
+const keys = Object.keys(DATA).sort((a, b) => (SUMMARY[b]?.max_kl ?? 0) - (SUMMARY[a]?.max_kl ?? 0));
+for (const key of keys) {
+  const s = SUMMARY[key] || {};
+  const option = document.createElement("option");
+  option.value = key;
+  option.textContent = `${label(key)}  —  max KL ${fmt(s.max_kl)}, flips ${pct(s.top1_flip_frac)}`;
+  componentSelect.append(option);
+}
+
+// Perceptually ordered ramp, white -> amber -> red -> near-black; input is already in [0, 1].
+function colour(t) {
+  const stops = [[255,255,255],[254,235,170],[253,174,97],[227,74,51],[103,0,13]];
+  const x = Math.max(0, Math.min(1, t)) * (stops.length - 1);
+  const i = Math.min(stops.length - 2, Math.floor(x)), f = x - i;
+  const c = stops[i].map((v, k) => Math.round(v + f * (stops[i + 1][k] - v)));
+  return `rgb(${c[0]},${c[1]},${c[2]})`;
+}
+[0.15, 0.4, 0.7, 1].forEach((t, i) => (document.getElementById("sw" + i).style.background = colour(t)));
+
+function scale(values, metric) {
+  if (metric === "ci") return (v) => v;  // CI is already 0..1
+  const top = Math.max(...values.flat());          // log scale against this component's own max
+  const floor = 1e-5;
+  return (v) => (v <= floor ? 0 : Math.log(v / floor) / Math.log(Math.max(top, floor * 10) / floor));
+}
+
+function render() {
+  const key = componentSelect.value;
+  const rows = DATA[key].slice(0, Number(countSelect.value));
+  const metric = metricSelect.value;
+  const norm = scale(rows.map((r) => r[metric]), metric);
+  const s = SUMMARY[key] || {};
+  document.getElementById("subtitle").textContent =
+    `${label(key)} subtracted from the model · median KL ${fmt(s.median_kl)}, p99 ${fmt(s.p99_kl)},` +
+    ` argmax changes on ${pct(s.top1_flip_frac)} of positions · arithmetic dCE ${fmt(s.swept_danswer_ce_run)}` +
+    ` · ${DATA[key].length} sequences kept, ranked by max KL`;
+  rowsEl.textContent = "";
+  for (const row of rows) {
+    const div = document.createElement("div");
+    div.className = "row";
+    const meta = document.createElement("span");
+    meta.className = "meta";
+    meta.textContent = `#${row.row}\nmax ${fmt(row.max_kl)}`;
+    div.append(meta);
+    row.tokens.forEach((token, i) => {
+      const span = document.createElement("span");
+      span.className = "tok";
+      span.textContent = token.replace(/\n/g, "⏎");
+      span.style.background = colour(norm(row[metric][i]));
+      if (showCI.checked && row.ci[i] > 0.01) span.style.borderBottom = "2px solid #0a58ca";
+      span.onmousemove = (event) => {
+        tip.style.display = "block";
+        tip.style.left = Math.min(event.clientX + 12, window.innerWidth - 260) + "px";
+        tip.style.top = event.clientY + 16 + "px";
+        tip.textContent =
+          `position ${i}\nKL ${fmt(row.kl[i])}\nCI ${fmt(row.ci[i])}\n` +
+          `model: ${JSON.stringify(row.model_top1[i])}\nablated: ${JSON.stringify(row.ablated_top1[i])}`;
+      };
+      span.onmouseleave = () => (tip.style.display = "none");
+      div.append(span);
+    });
+    rowsEl.append(div);
+  }
+}
+[componentSelect, countSelect, metricSelect, showCI].forEach((el) => el.addEventListener("change", render));
+render();
+</script>
+</body>
+</html>

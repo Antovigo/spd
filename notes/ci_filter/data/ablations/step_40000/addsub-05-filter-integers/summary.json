@@ -1,0 +1,13 @@
+{
+  "source": "addsub-05-filter-integers",
+  "n_prompts": 20000,
+  "mean_score": -3.911503553390503,
+  "mean_clean_score": -3.709228515625,
+  "accuracy": 0.6209999918937683,
+  "clean_accuracy": 0.6671000123023987,
+  "n_rows": {
+    "all": 20000,
+    "add": 10000,
+    "sub": 10000
+  }
+}

@@ -241,8 +241,22 @@ def _restore_decomposition(
     return restore_decomposition(manager, resolved_step, abstract), resolved_step
 
 
-def open_jax_run(run_dir: Path, step: int | None = None, *, data_root: Path) -> LoadedJaxRun:
-    """Restore one decomposition and prepare its immutable offline compute state.
+@dataclass(frozen=True)
+class RestoredJaxRun:
+    """A decomposition's fp32 master checkpoint on the consumer mesh, before any compute
+    preparation — for consumers that train on top of it (e.g. `param_decomp.ci_filter`)."""
+
+    step: int
+    placed: PlacedModel
+    deliverable: ResolvedDeliverable
+    components: ComponentStacks
+    ci_fn: PlacedCIFn
+    """fp32 master parameters, paired with their resolved placement."""
+    mesh: jax.sharding.Mesh
+
+
+def restore_jax_run(run_dir: Path, step: int | None = None, *, data_root: Path) -> RestoredJaxRun:
+    """Restore one decomposition's master weights onto an all-devices fsdp mesh.
 
     Args:
         run_dir: Run directory containing the product description and `ckpts`.
@@ -259,23 +273,43 @@ def open_jax_run(run_dir: Path, step: int | None = None, *, data_root: Path) -> 
     )
     assert isinstance(decomposition.components, ComponentStacks)
     assert isinstance(decomposition.ci_fn, LMCIFn)
-    with jax.set_mesh(mesh):
-        prepared_weights, ci_fn = _prepare_read_only_consumer(
-            placed, decomposition.components, decomposition.ci_fn
-        )
-        jax.block_until_ready((prepared_weights, ci_fn))
-    del decomposition
-
     rules = placed.placement
     assert rules is not None, "build_target always resolves the consumer rules"
-    return LoadedJaxRun(
-        run_id=run_dir.name,
+    return RestoredJaxRun(
         step=resolved_step,
         placed=placed,
         deliverable=deliverable,
-        prepared_weights=prepared_weights,
-        ci_fn=PlacedCIFn(fn=ci_fn, placement=resolve_ci_placement(deliverable.ci_fn, rules)),
+        components=decomposition.components,
+        ci_fn=PlacedCIFn(
+            fn=decomposition.ci_fn, placement=resolve_ci_placement(deliverable.ci_fn, rules)
+        ),
         mesh=mesh,
+    )
+
+
+def open_jax_run(run_dir: Path, step: int | None = None, *, data_root: Path) -> LoadedJaxRun:
+    """Restore one decomposition and prepare its immutable offline compute state.
+
+    Args:
+        run_dir: Run directory containing the product description and `ckpts`.
+        step: Checkpoint step, or `None` for the latest complete step.
+        data_root: Explicit root used to resolve named datasets and target caches.
+    """
+    restored = restore_jax_run(run_dir, step, data_root=data_root)
+    assert isinstance(restored.ci_fn.fn, LMCIFn)
+    with jax.set_mesh(restored.mesh):
+        prepared_weights, ci_fn = _prepare_read_only_consumer(
+            restored.placed, restored.components, restored.ci_fn.fn
+        )
+        jax.block_until_ready((prepared_weights, ci_fn))
+    return LoadedJaxRun(
+        run_id=run_dir.name,
+        step=restored.step,
+        placed=restored.placed,
+        deliverable=restored.deliverable,
+        prepared_weights=prepared_weights,
+        ci_fn=PlacedCIFn(fn=ci_fn, placement=restored.ci_fn.placement),
+        mesh=restored.mesh,
     )
 
 

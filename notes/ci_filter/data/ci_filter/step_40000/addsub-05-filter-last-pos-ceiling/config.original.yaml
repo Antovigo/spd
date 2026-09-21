@@ -1,0 +1,127 @@
+accumulate_on_host: false
+alive_threshold: 0.01
+batch_size: 1024
+betas:
+- 0.9
+- 0.999
+ci_ceiling: true
+compilation_cache_dir: ~/.cache/param-decomp/xla
+eval_batch_size: 1000
+eval_every: 1000
+grad_clip_norm: null
+grid:
+  chunk_prompts: 500
+  mean_ci_floor: 0.05
+imp_min:
+  coeff:
+    max_val: 0.0002
+    points:
+    - at: 0.0
+      frac: 1.0
+      interp: linear
+    - at: 0.25
+      frac: 0.25
+      interp: linear
+    - at: 1.0
+      frac: 0.25
+      interp: linear
+  frequency_coeff:
+    max_val: 0.0001
+    points:
+    - at: 0.0
+      frac: 1.0
+      interp: linear
+    - at: 0.25
+      frac: 0.25
+      interp: linear
+    - at: 1.0
+      frac: 0.25
+      interp: linear
+  gamma:
+    max_val: 1.0
+    points:
+    - at: 0.0
+      frac: 1.0
+      interp: linear
+    - at: 0.5
+      frac: 1.0
+      interp: linear
+    - at: 1.0
+      frac: 0.01
+      interp: linear
+  normalize_at_one: true
+  reference_datapoint_count: 640
+init:
+  kind: run
+log_every: 10
+lr_schedule:
+  max_val: 4.0e-05
+  points:
+  - at: 0.0
+    frac: 1.0
+    interp: linear
+  - at: 1.0
+    frac: 0.1
+    interp: cosine
+microbatch_size: null
+objective:
+  kind: last_position_kl
+pgd_eval:
+  batch_size: 128
+  n_batches: 4
+  n_steps: 20
+  step_size: 0.1
+pool:
+  a_range:
+  - 1
+  - 100
+  b_range:
+  - 1
+  - 100
+  operations:
+  - add
+  - sub
+prune_dead: false
+recon:
+  adv_fraction:
+    max_val: 0.3333333
+    points:
+    - at: 0.0
+      frac: 0.0
+      interp: linear
+    - at: 0.05
+      frac: 1.0
+      interp: linear
+    - at: 1.0
+      frac: 1.0
+      interp: linear
+  coeff: 1.5
+  kind: merged_stochastic_ppgd
+  n_warmup_steps: 0
+  optimizer:
+    beta1: 0.5
+    beta2: 0.99
+    eps: 1.0e-08
+    lr_schedule:
+      max_val: 0.01
+      points:
+      - at: 0.0
+        frac: 0.0
+        interp: linear
+      - at: 0.0125
+        frac: 1.0
+        interp: linear
+      - at: 1.0
+        frac: 1.0
+        interp: linear
+    type: adam
+remat: true
+run:
+  id: p-ba5a0c05
+  kind: id
+seed: 0
+step: 40000
+steps: 5000
+wandb:
+  entity: null
+  project: param-decomp-llama
