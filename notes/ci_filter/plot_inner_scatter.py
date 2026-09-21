@@ -57,7 +57,9 @@ def on_sample(
             picked[m][win] = flat[arg, cols][win]
         prompt[win] = start + arg[win] // n_pos
         position[win] = arg[win] % n_pos
-    assert (best >= 0).all(), f"{(best < 0).sum()} alive components never on"
+    never = best < 0
+    print(f"{never.sum()} alive components never on in this dataset (dropped: threshold noise)")
+    picked = {m: np.where(never, np.nan, v) for m, v in picked.items()}
     return picked["original"], picked["decomposed"], prompt, position
 
 
@@ -82,7 +84,7 @@ def main() -> None:
     fig, axes = plt.subplots(2, 4, figsize=(17, 8.5), constrained_layout=True)
     norm = plt.Normalize(0, meta["n_layer"] - 1)
     for ax, k in zip(axes.flat, KINDS, strict=False):
-        sel = kind == k
+        sel = (kind == k) & np.isfinite(x)
         lo = min(x[sel].min(), y[sel].min())
         hi = max(x[sel].max(), y[sel].max())
         pad = 0.05 * (hi - lo)
@@ -108,7 +110,7 @@ def main() -> None:
     fig.colorbar(points, ax=axes, label="layer", shrink=0.6)
     fig.suptitle(
         f"Inner activation x·V_c at one random (prompt, position) where the component is on — {meta['source']}, "
-        f"{meta['n_alive']} alive components, {meta['n_prompts']} prompts"
+        f"{int(np.isfinite(x).sum())} of {meta['n_alive']} alive components, {meta['n_prompts']} prompts"
     )
     fig.savefig(out / "inner_scatter.png", dpi=150)
     print(f"-> {out / 'inner_scatter.png'}")
