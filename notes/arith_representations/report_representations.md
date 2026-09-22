@@ -3,10 +3,10 @@
 Companion to [`plan.md`](plan.md), which fixes the method before any data was read. Decomposition
 `p-ba5a0c05` step 40000, read basis = alive set of `addsub-05-filter-last-pos-ceiling` (6,022
 residual-reading components: q/k/v/gate/up over 32 layers), prompts `a+b=` (10,000) and `a-b=`
-with `a >= b` (5,050). Data: `~/out/arith_repr/` (`V_alive.npz`, `resid/`, `analysis/`); code
+with `a >= b` (5,050). Everything decomposition-specific lives in the run dir, `<run_dir>/analysis/arith_repr/` (`/mnt/nw/home/a.vigouroux/out/pod-backup/p-ba5a0c05/analysis/arith_repr`: `V_alive.npz`, `resid/`, `analysis/`, `figures/`, `app/`, `synth_app/`); code
 `param_decomp/arith_repr/`; branch `experiment/arith_representations`. Applet:
-[`app/index.html`](app/index.html) (open over `file://`; presence map + per-cluster centroid
-clouds); its synthetic-test twin is [`synth_app/index.html`](synth_app/index.html).
+`<run_dir>/analysis/arith_repr/app/index.html` (open over `file://`; presence map + per-cluster centroid
+clouds); its synthetic-test twin is `<run_dir>/analysis/arith_repr/synth_app/index.html`.
 
 Vocabulary. A **read point** is `attn_in.l` (the post-norm residual layer `l`'s q/k/v read) or
 `mlp_in.l` (what its gate/up read); `k` is the dimension of the read basis there. A hypothesis
@@ -124,7 +124,7 @@ the same read point (mean over read points, position 4): `res:5` 0.97, `res:10` 
 
 ## 2. Geometry: Fourier circles first, then something closer to a lookup
 
-![residue centroids](figures/result_residue_centroids.png)
+![residue centroids](/mnt/nw/home/a.vigouroux/out/pod-backup/p-ba5a0c05/analysis/arith_repr/figures/result_residue_centroids.png)
 
 Residue centroids of the result codes at `=` (addition), projected on the top-2 principal axes
 of each recovered subspace `S_H` (hsv colour = residue, line joins consecutive residues).
@@ -139,7 +139,7 @@ of each recovered subspace `S_H` (hsv colour = residue, line joins consecutive r
   centroid curve has 72 % of its power in harmonic `k = 1` and 25 % in `k = 3` (below); the first
   plane is still a circle in order, the second plane is the `k = 3` winding.
 
-![res:10 harmonics](figures/res10_harmonics_mlp24.png)
+![res:10 harmonics](/mnt/nw/home/a.vigouroux/out/pod-backup/p-ba5a0c05/analysis/arith_repr/figures/res10_harmonics_mlp24.png)
 
 - **From layer 26 on the long periods stop being circles**: `res:25`, `res:50`, `res:100`,
   `res:direct` grow from 2-4 dimensions to 10-30 (`mlp_in.30`: `res:100` 28-D, `res:50` 17-D),
@@ -149,7 +149,7 @@ of each recovered subspace `S_H` (hsv colour = residue, line joins consecutive r
   is flat (0.76-0.78) while this happens: the same energy is re-expressed in more dimensions.
   `res:5` and `res:10` stay 4-D to the end.
 
-![result-value centroids](figures/result_value_centroids.png)
+![result-value centroids](/mnt/nw/home/a.vigouroux/out/pod-backup/p-ba5a0c05/analysis/arith_repr/figures/result_value_centroids.png)
 
 The centroids of the 199 result values in the union of all result subspaces (`mlp_in.24` 30-D,
 `mlp_in.30` 100-D) wind around with the value; the top-2 axes hold only ~20 % of the variance,
