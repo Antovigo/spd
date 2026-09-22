@@ -17,7 +17,13 @@ from typing import Any
 
 import numpy as np
 
-from param_decomp.arith_repr.hypotheses import Labels, supported
+from param_decomp.arith_repr.hypotheses import (
+    QUANTITIES_BY_POSITION,
+    Labels,
+    build_hypotheses,
+    pooled_quantities,
+    supported,
+)
 from param_decomp.arith_repr.scripts.analyse import load_labels, load_position
 
 
@@ -58,10 +64,22 @@ def export_key(key: str, resid: Path, analysis: Path, labels_all: Labels, out: P
             mask = op_masks[op_name] & keep_prompt
             labels = labels_all.subset(mask)
             Y = Y_all[mask]  # NOT centred: the origin is the zero of the post-norm residual
+            # The pure part's fitted directions (row space of `Phi^T Y`, centred), ordered by
+            # energy: what "this code" means elsewhere in the applet, unlike the full class
+            # centroids whose span contains every coarser period and the mean.
+            quantities = QUANTITIES_BY_POSITION[int(position)]
+            if op_name == "both":
+                quantities = pooled_quantities(quantities)
+            Yc = Y - Y.mean(axis=0)
+            pure: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+            for h in build_hypotheses(labels, quantities):
+                _, sv, Wt = np.linalg.svd(h.Phi.T @ Yc, full_matrices=False)
+                pure[h.name] = (Wt.T, sv**2 / max(float(np.sum(Yc**2)), 1e-300))
             hyps: dict[str, Any] = {}
             for fit in op["fits"]:
                 if not fit["dim_S"]:
                     continue
+                W, energy = pure[fit["name"]]
                 cls, n = classes_of(fit, labels)
                 valid = cls >= 0
                 counts = np.bincount(cls[valid], minlength=n)
@@ -70,6 +88,9 @@ def export_key(key: str, resid: Path, analysis: Path, labels_all: Labels, out: P
                 hyps[fit["name"]] = {
                     "counts": counts.tolist(),
                     "centroids": f16(sums / np.maximum(counts, 1)[:, None]),
+                    "dirs": f16(W),
+                    "dir_energy": [round(float(e), 6) for e in energy],
+                    "kept": fit["kept"],
                 }
             per_op[op_name] = hyps
         payload["positions"][position] = per_op
