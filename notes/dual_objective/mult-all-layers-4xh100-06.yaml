@@ -1,0 +1,608 @@
+# mult-all-layers-4xh100-06 (2026-09-22): a COPY of mult-all-layers-4xh100-05.yaml
+# (`p-3c1a0c05`, the multiplication twin of the addsub SOTA) with ONE recipe change, plus
+# `run_name`. The -05 file is left untouched as the reference. Run id `p-3c1a0c06`; launch it
+# explicitly, resume byte-compares the pinned config so reusing -05's id is not an option:
+#     CONFIG=$REPO/notes/dual_objective/mult-all-layers-4xh100-06.yaml RUN_ID=p-3c1a0c06 \
+#         ./launch_run.sh --profile 4xh100
+#
+# THE ENTIRE DELTA FROM mult-05 (Antoine, 2026-09-22)
+#   ADVERSARIAL SHARE 0.9 ON EVERY MERGED RECON TERM, all four — `pd.recon`,
+#   `pd.hidden.recon`, `nontarget.recon`, `nontarget.hidden.recon`:
+#     adv_fraction.max_val  0.3333333 (target) / 0.5 (non-target)  ->  0.9 everywhere
+#     adv_fraction anneal   full share at `at: 0.05` (step 2000)   ->  `at: 0.025` (step 1000)
+#   TOTAL `coeff` UNCHANGED on all four (1.5 / 6.8571429 / 1.0 / 2.2857143): `coeff` is the
+#   total and `adv_fraction` splits it, so this moves the mix to PGD:stochastic 9:1 without
+#   changing how much reconstruction pressure each pass carries. Both knots keep -05's shape
+#   — 0 at step 0, linear to the full share, held for the rest of the 40k steps — only the
+#   ramp is half as long. Same field convention as addsub-all-layers-4xh100-06.yaml: 0.9 is
+#   the FIELD, not the 0.9/1.9 ratio the L18 line writes as adv_fraction 0.4736842.
+#
+# UNTESTED. Nothing else moves: init, C, LRs, normalization, impmin, the output_coeff riders,
+# the CI-scaled weight decay (`all`/`all`, unlike addsub -06), mesh, batches, the 40k
+# schedule, the prompt pool and its neuron ranks are all mult-05's. The -05 header follows.
+#
+# mult-all-layers-4xh100-05 (2026-09-21): `addsub-all-layers-4xh100-05` (p-ba5a0c05, the
+# canonical 32-block addsub SOTA) with the TASK swapped to multiplication, `a×b=` for a, b in
+# 1..100 (Antoine, 2026-09-21). Everything else — sites, C, CI fn, every loss and schedule,
+# non-target stream, eval, mesh, batch — is -05 unchanged. Exactly four leaves change:
+#   run_name                     addsub-all-layers-4xh100-05 -> mult-all-layers-4xh100-05
+#   prompts.path                 addition_subtraction_1-100.txt -> multiplication_1-100.txt
+#                                (10000 prompts, 5 tokens with BOS like addsub; "×" is one
+#                                Llama-3.1 token. The addsub pool has 20000.)
+#   sites.neuron_ranks           addsub1-100_llama31-8b_unit-energy -> mult1-100_llama31-8b_unit-energy
+#                                (the init's rankings are statistics of the prompt pool, and
+#                                the load asserts the pool's token fingerprint, so the addsub
+#                                artifact refuses here; harvested with harvest_neuron_ranks
+#                                against THIS config, same statistic.)
+#   ABGridDataset.operation      add -> mul (the probe writes "×", matching the pool)
+# Run id p-3c1a0c05, NOT in PROFILES: pass it explicitly —
+#     CONFIG=$REPO/notes/dual_objective/mult-all-layers-4xh100-05.yaml RUN_ID=p-3c1a0c05 \
+#         ./launch_run.sh --profile 4xh100
+# The rest of this header is -05's lineage, carried over verbatim.
+#
+# -05 (2026-09-14): -04 with a different INITIALIZATION — `neuron_aligned_zero_u`
+# (branch feature/neuron_aligned_zero_u). Exactly two leaves change from -04: this and
+# `run_name`. The init is `neuron_aligned_targeted`'s V — the SAME top-C coordinates from
+# the SAME `neuron_ranks` artifact — with U zeroed, so the component sum is exactly zero
+# at init and the delta carries all of W. A subcomponent the reconstruction losses never
+# ask for therefore stays at exactly zero rather than holding W-scale weights a mask
+# adversary could switch on, which is what `zero_u` buys; the aligned V keeps `x @ V` a
+# live, targeted signal from step 0, which is what plain `zero_u` lacks.
+#   ASYMMETRY, worth knowing when reading the result (SPEC T13 `selected_unit_factors`):
+#     where the aligned units sit on d_out (q/k/v, gate/up) V IS the coordinate's weight
+#     vector, so zeroing U keeps the alignment in full; where they sit on d_in (o, down)
+#     the weights live in U and V is the one-hot, so those sites start aligned in WHICH
+#     coordinate they read but carry none of its magnitude.
+# -04 (2026-09-13): -03 plus the hidden pass's e2e KL RIDER at 1x strength, on both hidden
+# passes (`pd.hidden.output_coeff: 0.21875`, `nontarget.hidden.output_coeff: 0.4375`; code
+# 3f7e1fc2a), and the NON-TARGET minimality doubled again (Antoine, 2026-09-13):
+# `nontarget.impmin_coeff` and `nontarget.hidden.impmin_coeff` 4.0e-04 -> 8.0e-04, i.e. 4x
+# the target passes' 2.0e-04 at every knot (final 2.0e-04 vs 5.0e-05). Each non-target pass
+# scales the TARGET pass's penalty config by its own impmin_coeff (T6/T12), so this doubles
+# both the imp-min and the frequency pressure on the broad stream; the target terms are
+# untouched. Exactly five leaves change from -03: those two, the two `output_coeff`, and
+# `run_name`. Rationale at the `output_coeff` lines; evidence from the 4-block L16-19 arms
+# (addsub-4L16-19-hidkl 0.1x / -1x / -control, ~/pd_scratch/dual_obj_jax, L40 cluster).
+# SOTA for the 32-block addsub task. GENERATED by make_final_run.py from
+# addsub-all-layers-4xh100-bal-perpos.yaml (the balanced hidden recipe) with every measured result folded in:
+#   LR x0.5 — the 2026-09-10 sweep optimum (2.953 at 0.5x, vs 4.864 at 0.125x
+#     and 43.535 at 2x; mean of the last 5 train/loss/total at step 2000, seed 0).
+#     That sweep ran at C1x under `batch` normalization with the DILUTED hidden
+#     coefficients, so this is the best estimate for this objective, not a measured
+#     optimum under it.
+#   C x2 — measured 41.6 GB/rank of 80 and 2.49 s/step at C2x.
+#   hidden recon coefficients UNCHANGED (rho = 1). MEASURED 2026-09-11 with
+#     arms-4xh100/normcal.yaml under PD_LOG_ALT_HIDDEN_NORM=1: the aggregate
+#     per_position/batch ratio is 0.897 (target stochastic), 0.950 (target PPGD) and
+#     1.037 (nontarget merged) — i.e. ~1, so per_position already carries the L18
+#     exchange rate and needs no rescaling. It redistributes pressure WITHIN each point
+#     rather than changing the total: L0/L1/L31 come alive (L1 goes 0.0033 -> 0.229, a
+#     factor of 69 — under `batch` those points read as DEAD), while layers 2-28 fall
+#     ~10% because their high-energy position no longer carries the whole measurement.
+#     The two effects cancel in the 32-point sum. The streams also disagree in direction
+#     (0.90 vs 1.04) so no single constant satisfies all three, and the target stochastic
+#     value was still drifting (0.95 -> 0.90 over 140 steps).
+# Comments below are the source's, preserved: the edits are textual, never a yaml
+# round-trip. Regenerate rather than hand-editing.
+# addsub-all-layers-4xh100-bal-perpos: `addsub-all-layers-4xh100-sota.yaml` with the two
+# loss-balance changes from addsub-all-layers/report.md (2026-09-11), and nothing else:
+#   1. `pd.hidden.normalization: per_position` (S35 amended 2026-09-11) — each (batch,
+#      position) entry of a hidden point is scored against its OWN clean energy, so the BOS
+#      massive activation (97/100/90 % of the layer-0/1/31 MLP-output energy on these prompts)
+#      no longer silences the arithmetic positions there. Needs the code at or after the
+#      commit that added `PerPositionHiddenActsNormalization`.
+#   2. The three hidden-pass recon coefficients x 32/14, so each of the 32 points carries the
+#      L18 SOTA's per-point weight (2.0 / 1.0 / 1.0 over 14 points).
+# Routing stays uniform-k over all 224 sites; no teacher forcing. Imp-min, frequency and the
+# output terms are per-token means and needed nothing (report §1).
+#
+# --- original header follows ---
+# Llama-3.1-8B (224 sites, 62464 subcomponents) sized for FOUR H100 SXM 80 GB instead of
+# eight. Derived from `addsub-all-layers-8xh100-sota.yaml` and IDENTICAL to it except for the five
+# lines listed below; read that file's header for the recipe itself, the CI-fn sizing, the
+# schedule re-placement, and every "deliberately kept" decision. Nothing here re-opens any
+# of those.
+#
+# REFERENCE CONFIG, not a canonical seat: outside `param_decomp/experiments/lm/configs/`,
+# so CONFIGS.md's cap does not count it and `test_repo_configs_parse.py` does NOT gate it.
+# Written 2026-09-09 against feature/dual_obj_jax. Re-check it parses before launching:
+# `python notes/dual_objective/addsub-all-layers/make_trials.py --sota <this> --check`.
+#
+# Runs via `python -m param_decomp.experiments.lm.run_targeted <this> <data_root> 4
+# --run_id p-b4132c01`. Guide: `addsub-all-layers-4xh100-guide.md`. Note the `4`, not `8`.
+#
+# ---------------------------------------------------------------------------------------
+# THE ENTIRE DELTA FROM addsub-all-layers-8xh100-sota.yaml
+# ---------------------------------------------------------------------------------------
+#   run_name              addsub-all-layers-01 -> addsub-all-layers-4xh100-01
+#   pd.batch_size         256 -> 128
+#   runtime.fsdp          8 -> 4
+#   two comments          the per-rank arithmetic, which changes with the device count
+# `nontarget.batch_size` (128) and `eval.batch_size` (128) are UNCHANGED. Everything else in
+# this file is byte-identical to the 8-GPU config.
+#
+# ---------------------------------------------------------------------------------------
+# WHY 128 / 128, AND WHAT IS AT RISK
+# ---------------------------------------------------------------------------------------
+# Halving the devices doubles the per-rank batch, and this codebase has no gradient
+# accumulation (`batch_size` is GLOBAL and shards over the data mesh), so the global batch
+# is the only lever. At 8 GPUs the authored 256/128 puts 32 target prompts and 16 broad rows
+# on each rank; at 4 GPUs the same numbers would put 64/32 on each, which the memory
+# estimate does not support (below). 128/128 restores the per-rank TARGET geometry exactly
+# (32 prompts x 5 positions, as at 8 GPUs) and lands 32 broad rows per rank.
+#
+# The target batch 128 is also the better-precedented value, not a concession: every run on
+# this line — the 1-block seat, the 4-block scale-ups, the neuron-aligned arms — trained at
+# `pd.batch_size: 128`. The 8-GPU file's 256 is the scale-up brief's bet that a bigger batch
+# helps at 32 blocks, and no arm has tested it. This config declines that bet; it does not
+# test it either. The two are NOT interchangeable as science: at equal steps they see
+# different amounts of target data, so read 40k steps here as 40k steps at the line's
+# historical batch, and do not compare a curve from this run against one from the 8-GPU
+# config step-for-step.
+#
+# `nontarget.batch_size` stays at 128 rather than dropping to the line's 96, per Antoine
+# 2026-09-09. That is the memory risk in this file: the broad stream carries seq 64 against
+# the pool's 5 tokens, so it dominates the activation term, and 32 rows per rank is 1.33x
+# the 4-block L40 run's 24. Memory arithmetic under `zero1` at `fsdp: 4` (see the guide for
+# the derivation):
+#     trainable 1.86G params x 12 B (fp32 + Adam), sharded over the 4-wide data mesh   5.6 GB
+#     frozen Llama-3.1-8B bf16, sharded over fsdp 4                                    4.0 GB
+#     sequential-passes gradient accumulator, sharded                                  1.9 GB
+#     ---------------------------------------------------------------------------- 11.4 GB
+#   leaving ~63 GB per 80 GB card at `mem_fraction 0.95` for activations. Extrapolating the
+#   4-block L40 run's ~10.5 GB of activations (28 live sites, 32/24 per rank) to 224 sites
+#   gives 30-60 GB here depending on how much of that term is site-proportional. That fits,
+#   but not by much, and the estimate's error bars straddle nothing worse than the fallback.
+#   THE LADDER DECIDES: `fallback-128x96` is a generated rung, not a manual escape hatch, and
+#   if 128/128 does not fit, 96 is where the broad stream goes.
+#
+# MESH: `replicate 1, fsdp 4, tp 1, zero1` — AUTHORED PENDING THE LADDER, which A/Bs it
+# against `replicate 2 / fsdp 2 / zero1` (15.4 GB static: the optimizer state still shards
+# over the full 4-wide data mesh, but the frozen target only halves, bought against half the
+# per-forward gathers). `replicate 4 / fsdp 1 / ddp` is generated as an EXTRA rung only: it
+# replicates everything for 45.7 GB of static, leaving ~29 GB for activations, which this
+# estimate does not support. Never `zero1` at `fsdp: 1` (report §8.5's 26x all-reduce
+# regression) — note that the config builder ACCEPTS that combination, so the guard is lore,
+# not code.
+#
+# Everything else — dropping the L40-era allocator/`fsdp: 1` workarounds,
+# `sequential_passes`, both remat flags,
+# `mem_fraction 0.95` — carries over unchanged from the 8-GPU file's header, and for the
+# same reasons: this is the same hardware, four of it.
+run_name: mult-all-layers-4xh100-06
+decomposition:
+  sites:
+    kind: glu_transformer
+    layers:
+      kind: all
+    cs:
+      q: 144
+      k: 144
+      v: 256
+      o: 512
+      gate: 912
+      up: 912
+      down: 1024
+    initialization: neuron_aligned_zero_u
+    neuron_ranks: {kind: name, name: mult1-100_llama31-8b_unit-energy}
+  ci:
+    type: chunkwise_transformer
+    # 32 decomposed blocks at blocks_per_chunk 1 is 32 homogeneous chunks, each spanning
+    # its block's seven sites; `all_block_taps` feeds each chunk its own block's input
+    # activations (attn in/out, MLP in, MLP hidden; input_dim 26624). Sizing in the header.
+    blocks_per_chunk: 1
+    input_tap: all_block_taps
+    d_model: 512
+    n_blocks: 4
+    attention:
+      kind: mha
+      n_heads: 8
+      # `xla`, as the L40 line: see target.attention_implementation. MEASURED on the
+      # Runpod H100 pod 2026-09-10 — `auto` does not load there.
+      attention_implementation: xla
+    ffn:
+      kind: gelu
+      hidden: 2048
+    # The torch trainer's default init, replicated: every readout head starts W=0,
+    # bias 0.5 — all CI logits mid-window, within gradient reach of both losses.
+    zero_init_readout: true
+    dual: true
+pd:
+  seed: 0
+  steps: 40000
+  batch_size: 128
+  # REMOVED (reference 0.3): the one recipe change. `null` is the off switch (SPEC T11).
+  # BACK ON at 0.2 (-01 had it off; the L18 reference used 0.3).
+  ci_scaled_weight_decay: 0.2
+  components_optimizer:
+    lr_schedule:
+      max_val: 8.0e-05
+      points:
+        - {at: 0.0, frac: 1.0}
+        - {at: 1.0, frac: 0.1, interp: cosine}
+    betas: [0.9, 0.999]
+    weight_decay: 0.0
+    grad_clip_norm: 0.01
+  ci_fn_optimizer:
+    lr_schedule:
+      max_val: 4.0e-05
+      points:
+        - {at: 0.0, frac: 1.0}
+        - {at: 1.0, frac: 0.1, interp: cosine}
+    betas: [0.9, 0.999]
+    weight_decay: 0.0
+    grad_clip_norm: null
+  loss_metrics:
+    - type: ImportanceMinimalityLoss
+      # 4x the final 5.0e-05 at step 0, linear to 5.0e-05 at step 10000 (0.25 of 40k), then
+      # held — the reference's absolute step count, not its fraction.
+      coeff:
+        max_val: 2.0e-04
+        points:
+          - {at: 0.0, frac: 1.0}
+          - {at: 0.25, frac: 0.25}
+          - {at: 1.0, frac: 0.25}
+      normalize_at_one: true
+      # Held at 1.0 until step 30000 (0.75 of 40k), then linear to 0.01 at 40000.
+      gamma:
+        max_val: 1.0
+        points:
+          - {at: 0.0, frac: 1.0}
+          - {at: 0.75, frac: 1.0}
+          - {at: 1.0, frac: 0.01}
+      frequency:
+        # 4x the final 2.5e-05 at step 0, linear to 2.5e-05 at step 10000, then held.
+        # ONE frequency block shared across target and nontarget passes (SPEC T6).
+        coeff:
+          max_val: 1.0e-04
+          points:
+            - {at: 0.0, frac: 1.0}
+            - {at: 0.25, frac: 0.25}
+            - {at: 1.0, frac: 0.25}
+        reference_datapoint_count: auto
+    # MERGED (-02): replaces the -01 pair `StochasticReconSubsetLoss 1.0` +
+    # `PersistentPGDReconLoss 0.5`. `coeff` is the TOTAL and `adv_fraction` the adversarial
+    # share, so 1.5 x 0.3333 reproduces that pair IN EXPECTATION (1.0 stochastic + 0.5
+    # adversarial) while costing ONE masked forward instead of two. Each batch element is
+    # either adversarial or stochastic for the whole sequence, never a mixed context.
+    - type: MergedStochasticSubsetPPGDReconLoss
+      coeff: 1.5
+      adv_fraction:
+        max_val: 0.9
+        # -06: the share itself, and the ramp below, are THIS run's only change; the
+        # lineage comments around this term describe -05's 0.3333/0.5 and its 2000-step
+        # ramp, both superseded here (full share at step 1000).
+        # 0 -> full share over the first 2000 steps (0.05 of 40k). The -01 recipe ramped over
+        # 100 steps; slowed on every stream so the decomposition has a fit before the
+        # adversary bites.
+        points:
+          - {at: 0.0, frac: 0.0}
+          - {at: 0.025, frac: 1.0}
+          - {at: 1.0, frac: 1.0}
+      # 2 warmup + the S14 final ascent = 3 ascents per step, as -01's PersistentPGDReconLoss.
+      n_warmup_steps: 2
+      routing:
+        type: uniform_k_subset
+      optimizer:
+        type: adam
+        beta1: 0.5
+        beta2: 0.99
+        eps: 1.0e-08
+        # 0 -> 0.01 over the first 500 steps (0.0125 of 40k; the reference's 500 of 20k).
+        lr_schedule:
+          max_val: 0.01
+          points:
+            - {at: 0.0, frac: 0.0}
+            - {at: 0.0125, frac: 1.0}
+            - {at: 1.0, frac: 1.0}
+      source_shape: bsc
+    - type: UnmaskedReconLoss
+      coeff: 0.5
+  # The dual objective's HIDDEN pass (SPEC S36/T12): the CI fn's second head scored at every
+  # block's MLP output instead of the model logits, so components stay important for what
+  # each block writes, not only for what survives to the unembed. 32 points; the loss is
+  # their mean, so the coefficients below are the reference's.
+  hidden:
+    points:
+      - layers.0.mlp.down_proj.out
+      - layers.1.mlp.down_proj.out
+      - layers.2.mlp.down_proj.out
+      - layers.3.mlp.down_proj.out
+      - layers.4.mlp.down_proj.out
+      - layers.5.mlp.down_proj.out
+      - layers.6.mlp.down_proj.out
+      - layers.7.mlp.down_proj.out
+      - layers.8.mlp.down_proj.out
+      - layers.9.mlp.down_proj.out
+      - layers.10.mlp.down_proj.out
+      - layers.11.mlp.down_proj.out
+      - layers.12.mlp.down_proj.out
+      - layers.13.mlp.down_proj.out
+      - layers.14.mlp.down_proj.out
+      - layers.15.mlp.down_proj.out
+      - layers.16.mlp.down_proj.out
+      - layers.17.mlp.down_proj.out
+      - layers.18.mlp.down_proj.out
+      - layers.19.mlp.down_proj.out
+      - layers.20.mlp.down_proj.out
+      - layers.21.mlp.down_proj.out
+      - layers.22.mlp.down_proj.out
+      - layers.23.mlp.down_proj.out
+      - layers.24.mlp.down_proj.out
+      - layers.25.mlp.down_proj.out
+      - layers.26.mlp.down_proj.out
+      - layers.27.mlp.down_proj.out
+      - layers.28.mlp.down_proj.out
+      - layers.29.mlp.down_proj.out
+      - layers.30.mlp.down_proj.out
+      - layers.31.mlp.down_proj.out
+    # S35 amended 2026-09-11: one ratio per (batch, position) entry against its own clean
+    # scale, then the mean — so the BOS massive activation (97/100/90 % of the layer-0/1/31
+    # MLP-output energy on these prompts) no longer silences the arithmetic positions at those
+    # points. Floor = 0.01 x the median per-entry clean energy. Shared with nontarget.hidden.
+    normalization: {kind: per_position, floor_fraction: 0.01}
+    # -04: the e2e KL RIDER on the hidden pass (T12 amended 2026-09-11, `pd.hidden.
+    # output_coeff`): the merged hidden term scores `mean_points + output_coeff * KL` on its
+    # one masked forward, so the hidden head is also asked to keep what the output needs. At
+    # 1x STRENGTH: 0.21875 x the term's 6.8571429 puts the KL at 1.5 — the output pass's own
+    # merged-term weight. Chosen from the 4-block L16-19 arms (0.1x / 1x / control, read at
+    # 12k, 2026-09-13): the output head is unchanged across arms while the hidden head gets
+    # sparser and more output-faithful the stronger the rider.
+    output_coeff: 0.21875
+    # 4x the final 5.0e-05 at step 0, linear to 5.0e-05 at step 10000, then held.
+    impmin_coeff:
+      max_val: 2.0e-04
+      points:
+        - {at: 0.0, frac: 1.0}
+        - {at: 0.25, frac: 0.25}
+        - {at: 1.0, frac: 0.25}
+    recon:
+      # MERGED (-02), as the output pass: 4.5714286 stochastic + 2.2857143 adversarial
+      # becomes coeff 6.8571429 at adv_fraction 0.3333 — identical in expectation, one
+      # masked forward instead of two, and still the L18 per-point weight (x32/14).
+      - type: MergedStochasticSubsetPPGDReconLoss
+        name: HiddenMergedStochasticPPGDRecon
+        coeff: 6.8571429
+        adv_fraction:
+          max_val: 0.9
+          # -06: the share itself, and the ramp below, are THIS run's only change; the
+          # lineage comments around this term describe -05's 0.3333/0.5 and its 2000-step
+          # ramp, both superseded here (full share at step 1000).
+          points:
+            - {at: 0.0, frac: 0.0}
+            - {at: 0.025, frac: 1.0}
+            - {at: 1.0, frac: 1.0}
+        routing:
+          type: uniform_k_subset
+        n_warmup_steps: 2
+        optimizer:
+          type: adam
+          beta1: 0.5
+          beta2: 0.99
+          eps: 1.0e-08
+          lr_schedule:
+            max_val: 0.01
+            points:
+              - {at: 0.0, frac: 0.0}
+              - {at: 0.0125, frac: 1.0}
+              - {at: 1.0, frac: 1.0}
+        source_shape: bsc
+prompts:
+  kind: prompts_file
+  path: param_decomp/experiments/lm/prompts/multiplication_1-100.txt
+nontarget:
+  batch_size: 128  # 32 rows x 64 tokens per rank on 4 GPUs (reference: 96 on 2 -> 48/rank).
+  # The broad-stream passes dominate the step (seq 64 vs the pool's 5 tokens); an OOM at
+  # dp>1 HANGS instead of raising (rank 0 dies mid-allocation, the others wait on the
+  # clique) — the probe ladder runs every shape under `timeout -k` for exactly this reason.
+  # Matched to the target stream: 4x 5.0e-05 at step 0, linear to 5.0e-05 at step 10000.
+  impmin_coeff:
+    max_val: 8.0e-04
+    points:
+      - {at: 0.0, frac: 1.0}
+      - {at: 0.25, frac: 0.25}
+      - {at: 1.0, frac: 0.25}
+  recon:
+    # Merged stochastic + PPGD term (S34): same TOTAL coeff as a plain stochastic term; the
+    # adversarial share ramps 0 -> 0.5 over the first 100 steps (0.0025 of 40k; the
+    # reference's 100 of 20k). n_warmup 0: the bundle's one update per step is the S14'
+    # final ascent — zero extra broad-stream forwards. source_shape c matches the eval
+    # probe's threat model exactly.
+    - type: MergedStochasticSubsetPPGDReconLoss
+      coeff: 1.0
+      adv_fraction:
+        max_val: 0.9
+        # -06: the share itself, and the ramp below, are THIS run's only change; the
+        # lineage comments around this term describe -05's 0.3333/0.5 and its 2000-step
+        # ramp, both superseded here (full share at step 1000).
+        points:
+          - {at: 0.0, frac: 0.0}
+          - {at: 0.025, frac: 1.0}
+          - {at: 1.0, frac: 1.0}
+      # 1 warmup + the final ascent = 2 ascents (-01 had 1): the broad stream's adversary
+      # was too weak — its PGD recon collapsed 66 -> 11.8 between steps 20000 and 24000.
+      n_warmup_steps: 1
+      routing:
+        type: uniform_k_subset
+      optimizer:
+        type: adam
+        beta1: 0.5
+        beta2: 0.99
+        eps: 1.0e-08
+        lr_schedule:
+          max_val: 0.01
+          points:
+            - {at: 0.0, frac: 0.0}
+            - {at: 0.0125, frac: 1.0}
+            - {at: 1.0, frac: 1.0}
+      # `bsc`, not -01's `c`: one scalar per component shared by the whole batch could not
+      # express a per-token attack, which is why the broad stream became reconstructible.
+      source_shape: bsc
+  hidden:
+    # -04: the same 1x e2e KL rider as pd.hidden — 0.4375 x the merged term's 2.2857143 puts
+    # the KL at 1.0, the non-target OUTPUT pass's merged-term weight. Costs the seq-64
+    # full-vocabulary logits on the broad-stream hidden forward (fp32 [32 rows x 64 x 128k]
+    # per rank ~1 GB); the 4-block L40 arms paid it at 30.6 GB/rank, unchanged from the
+    # KL-free control.
+    output_coeff: 0.4375
+    # Matched to the target stream: 4x 5.0e-05 at step 0, linear to 5.0e-05 at step 10000.
+    impmin_coeff:
+      max_val: 8.0e-04
+      points:
+        - {at: 0.0, frac: 1.0}
+        - {at: 0.25, frac: 0.25}
+        - {at: 1.0, frac: 0.25}
+    recon:
+      # The merged term rides the same one masked forward the stochastic term used, so the
+      # nontarget hidden adversary is compute-free too (T5/T12 2026-08-20 amendment).
+      - type: MergedStochasticSubsetPPGDReconLoss
+        name: NontargetHiddenMergedStochasticPPGDRecon
+        # 1.0 x 32/14: the SOTA's per-point weight on the broad-stream hidden pass.
+        coeff: 2.2857143
+        adv_fraction:
+          max_val: 0.9
+          # -06: the share itself, and the ramp below, are THIS run's only change; the
+          # lineage comments around this term describe -05's 0.3333/0.5 and its 2000-step
+          # ramp, both superseded here (full share at step 1000).
+          points:
+            - {at: 0.0, frac: 0.0}
+            - {at: 0.025, frac: 1.0}
+            - {at: 1.0, frac: 1.0}
+        n_warmup_steps: 1
+        routing:
+          type: uniform_k_subset
+        optimizer:
+          type: adam
+          beta1: 0.5
+          beta2: 0.99
+          eps: 1.0e-08
+          lr_schedule:
+            max_val: 0.01
+            points:
+              - {at: 0.0, frac: 0.0}
+              - {at: 0.0125, frac: 1.0}
+              - {at: 1.0, frac: 1.0}
+        source_shape: bsc
+eval:
+  # Tracks nontarget.batch_size's geometry on the broad stream (32 rows/rank); the
+  # target-stream probes run at the pool's own (unpadded) geometry.
+  batch_size: 128
+  n_steps: 10
+  every: 500
+  slow_every: 4000
+  # DELIBERATELY true: this run would rather OOM at step 0, minutes in, than discover at
+  # step 4000 that it cannot afford a slow eval pass. Do not "fix" to false.
+  slow_on_first_step: true
+  metrics:
+    # No UnmaskedNoDeltaReconLoss next to CEandKLLosses (same `ce_kl/kl_*` arms — the
+    # evaluator refuses the pair); CIMaskedReconLoss stays for hidden_ci coverage.
+    - type: CIMaskedReconLoss
+    - type: CEandKLLosses
+      rounding_threshold: 0.0
+    - type: CI_L0
+      ci_alive_threshold: 0.0
+      groups:
+        total: ["*"]
+    # Slow-tier by declaration, and capped: on a targeted dual run this probe fans out
+    # over stream x CI-role (4 ops), each 20 full fwd+bwd ascents per batch.
+    - type: PGDReconLoss
+      init: random
+      source_shape: c
+      n_steps: 20
+      step_size: 0.1
+      n_batches: 4
+    # NO CIHistograms (kills a run in its first slow eval pass post-#1000, see the L18
+    # seat's header) and NO CIHiddenActsReconLoss (deleted by #1001).
+    - type: TwoStreamCIMeanPerComponent
+    - type: WeightMagnitude
+    # Fires at 4000, 8000, ... (never on the first pass, by its own schedule). Snapshot size
+    # is bounded only by the floor: ~40 KB per saved component; the 4-block run's snapshots
+    # were ~22 MB each at 7808 components, so expect ~0.2 GB each here.
+    - type: ABGridDataset
+      mean_ci_floor: 0.05
+      operation: mul
+      a_range: [1, 100]
+      b_range: [1, 100]
+      positions: null
+      chunk_prompts: 1000
+cadence:
+  train_log_every: 100
+  checkpointing:
+    kind: periodic
+    # 4000 (reference 5000): lands on every slow-eval step, so a death in a slow pass
+    # (the 4L line's two step-4000 deaths, report §8.7/8.8) loses at most the eval itself.
+    save_every: 4000
+    retention:
+      kind: keep_last
+      n: 2
+target:
+  # `xla`, NOT `auto`. This was authored `auto` on the theory that the L40 line's `xla`
+  # was a pre-CUDA-12.8-driver workaround and H100 + driver 580 would take cuDNN flash
+  # attention. MEASURED FALSE on the Runpod 4x H100 pod, 2026-09-10 (driver 580.126.09,
+  # jax 0.10.1 / CUDA 12.8 wheels): with `auto`, `jit_targeted_step` compiles and then
+  # FAILS TO LOAD —
+  #     INTERNAL: There was an error before calling cuModuleGetFunction (1):
+  #     cudaErrorInvalidValue [executable_name='jit_targeted_step']
+  # — reproduced at 1 block and at 4, on 1 GPU and on 4, with a fresh compile cache and
+  # with `compiler_options: bare`, so it is neither scale, nor collectives, nor the cache,
+  # nor the tuned flag set. On 4 GPUs it presents as a SILENT HANG in `execute_sharded`
+  # (the ranks block on a peer that never loads its module), which is what cost a day.
+  # With `xla` the same config trains: 0.09 s/step at 1 block, batch 16, 22.1 GB/rank.
+  # Keep BOTH this and `decomposition.ci.attention.attention_implementation` at `xla`.
+  attention_implementation: xla
+  spec:
+    kind: hf_weights_in_vendored
+    model_class: param_decomp.experiments.lm.vendored.llama_3_1.model.VendoredLlama
+    model_name: meta-llama/Llama-3.1-8B
+  weights_dtype: bfloat16
+data:
+  train:
+    kind: name
+    name: fineweb_llama_tok_64
+  eval:
+    kind: name
+    name: fineweb_llama_tok_64_eval
+runtime:
+  # `~` expands to the pod user's home; the guide symlinks it onto the network volume so
+  # the multi-minute compile survives a pod restart.
+  compilation_cache_dir: ~/.cache/param-decomp/xla
+  compiler_options: tuned-v1
+  # The explicit (replicate, fsdp, tp) mesh — 4 GPUs. SETTLED by the ladder on the Runpod
+  # 4x H100 pod, 2026-09-10: `mesh-f4` (replicate 1 / fsdp 4) FITS at 34.8 GB/rank of 80 and
+  # runs 2.55 s/step at batch 128/128 — 30.0 h projected for 40k steps including eval and
+  # checkpoint overhead. `mesh-r2f2` was never run: f4 fits with 45 GB of headroom, so the
+  # memory question the A/B existed to answer is already answered.
+  # Both shard optimizer state 8-way under `zero1`; they differ in how the frozen target and
+  # compute weights are sharded and gathered (over NVLink either way). Header has the memory
+  # argument against the 1-block line's `replicate 8 / fsdp 1 / ddp`.
+  replicate: 1
+  fsdp: 4
+  tp: 1
+  # `zero1`, NOT `ddp`: see the header. NEVER `zero1` at `fsdp: 1` (report §8.5).
+  sharding: zero1
+  remat_recon_forwards: true
+  remat_ci_fn: true
+  # A/B'd on the 1-block line at zero step-time cost; with 32 hidden points and 224 live
+  # sites the one-pass-at-a-time residual lifetime is worth more here, not less.
+  sequential_passes: true
+  launch_env:
+    # 0.88, not the 8-GPU file's 0.95: at 0.95 an 81.5 GB card leaves ~3 GB outside the
+    # pool for NCCL's communication buffers, cuDNN workspaces and the CUDA context, which is
+    # thin for 4 ranks under `zero1` — NCCL allocates outside XLA's pool and can block rather
+    # than raise when it cannot. Lowered 2026-09-09 while chasing a startup stall; it did NOT
+    # fix that stall, so this is prudence, not a diagnosis. ~10 GB outside the pool now,
+    # against an activation estimate of 30-60 GB and ~57 GB of remaining headroom.
+    xla_python_client_mem_fraction: 0.88
+    env:
+      # Disable NVLS (NVLink SHARP), whose multicast buffers need CUDA FABRIC memory
+      # handles. A Runpod container does not grant them: every launch logs
+      # `VMM cuMemCreate with FABRIC+POSIX_FD handle types failed: CUDA_ERROR_NOT_PERMITTED`.
+      # DIAGNOSED 2026-09-10 from a faulthandler stack: the run compiled fine and then
+      # blocked in `xla_executable.execute_sharded` on the FIRST training step with all four
+      # GPUs at 0% utilisation. A plain sharded matmul plus one cross-shard reduction ran
+      # correctly on the same pod, so simple ring collectives work and it is the algorithms
+      # needing fabric memory that hang. Costs some collective throughput; a hang costs
+      # everything. Remove only on hardware where `nvidia-smi` shows working fabric/IMEX.
+      NCCL_NVLS_ENABLE: "0"
+wandb:
+  project: param-decomp-llama
