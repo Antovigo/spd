@@ -3,7 +3,7 @@
 hidden-recon run (-05) on the left of the page and its outputs-only twin on the right.
 
     python plot_l18_up_proj_inner_grids.py     # reads ~/out/pod-backup/*/ab_grids
-                                               # writes plots/l18_up_proj_inner_grids.png
+                                               # writes plots/outputs_only_vs_dual/
 
 Rows are the slow-eval steps at which a grid was written; each row shows that step's ten
 most active components side by side, nothing else drawn on them. A grid is the component's normalized inner
@@ -94,7 +94,10 @@ def main() -> None:
     ap.add_argument("--site", default=SITE)
     ap.add_argument("--top", type=int, default=TOP)
     ap.add_argument(
-        "-o", "--out", type=Path, default=HERE / "plots" / "l18_up_proj_inner_grids.png"
+        "-o",
+        "--out",
+        type=Path,
+        default=HERE / "plots" / "outputs_only_vs_dual" / "l18_up_proj_inner_grids.png",
     )
     a = ap.parse_args()
 

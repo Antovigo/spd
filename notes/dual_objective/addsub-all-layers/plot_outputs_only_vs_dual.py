@@ -2,9 +2,8 @@
 """Output-head metrics of the dual objective (-05) against its outputs-only twin, by step and
 by wall time on the SAME hardware. One figure per stream:
 
-    python plot_outputs_only_vs_dual.py     # reads ~/out/pod-backup, writes
-                                            #   plots/outputs_only_vs_dual_target.png
-                                            #   plots/outputs_only_vs_dual_nontarget.png
+    python plot_outputs_only_vs_dual.py     # writes plots/outputs_only_vs_dual/
+                                            #   outputs_only_vs_dual_{target,nontarget}.png
 
 Four output-head metrics per stream: CI-masked KL (`ce_kl/kl_ci_masked`, the arm
 CIMaskedReconLoss emits in a single-role run), the fresh-PGD adversarial recon eval
@@ -239,7 +238,7 @@ def main() -> None:
     ap.add_argument("--dual", type=Path, default=BACKUP / "p-ba5a0c05" / "metrics.jsonl")
     ap.add_argument("--dual-a100-clock", type=Path, default=BACKUP / "p-ba7a0c07" / "metrics.jsonl")
     ap.add_argument("--outputs-only", type=Path, default=BACKUP / "p-ba5a0c0f" / "metrics.jsonl")
-    ap.add_argument("-o", "--out-dir", type=Path, default=HERE / "plots")
+    ap.add_argument("-o", "--out-dir", type=Path, default=HERE / "plots" / "outputs_only_vs_dual")
     a = ap.parse_args()
 
     dual, oo = load(a.dual), load(a.outputs_only)

@@ -3,8 +3,8 @@
 outputs-only twin on ONE shared log colour scale. Two figures, because the two quantities
 live at different cadences:
 
-    python plot_block_ci_heatmaps.py     # writes plots/block_alive_l0_heatmap{,_linear}.png
-                                         #        plots/block_total_ci_heatmap{,_linear}.png
+    python plot_block_ci_heatmaps.py     # writes plots/outputs_only_vs_dual/
+                                         #   block_{alive_l0,total_ci}_heatmap{,_linear}.png
 
 1. ALIVE COMPONENTS (L0), fast-eval cadence (every 500 steps). `eval/l0/0.0_<site>` is the
    per-token count of components with CI > 0 on the target stream, output head; a block's
@@ -179,7 +179,7 @@ def main() -> None:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     ap.add_argument("--backup", type=Path, default=BACKUP)
-    ap.add_argument("-o", "--out-dir", type=Path, default=HERE / "plots")
+    ap.add_argument("-o", "--out-dir", type=Path, default=HERE / "plots" / "outputs_only_vs_dual")
     a = ap.parse_args()
 
     l0 = [(name, *l0_by_block(a.backup / rid / "metrics.jsonl")) for name, rid in RUNS]
