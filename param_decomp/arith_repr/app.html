@@ -79,7 +79,7 @@
 <h3>Detail panel (click a cell)</h3>
 <p>Header: <i>outside read basis</i> = share of ‖x‖² the alive reads cannot see; <i>joint</i> = share explained by all hypotheses; <i>kept</i> = by generalising directions only; the null R² threshold. <b>Hypotheses table</b>: dim H (hypothesis dimension), marginal/unique/generalising energy, dim S, #reads (alive components reading it above the null), held-out R² of the top directions. <b>Separability</b>: green = some alive read lands in the row subspace at the 99.9th percentile of the random-direction null while sitting at that null on the column subspace, <i>and</i> vice versa; red = not separable. Per-kind clusters below. A hypothesis no component reads is <i>unread</i> and left out of the graph. Caution: at attention read points (k ≤ ~60) the null is nearly degenerate and most hypotheses come out unread — a limit of the null, not evidence. <b>add vs sub cosines</b>: principal cosines between the subspaces fitted on each operation (≈1 = same code). <b>Clusters</b>: connected components of “not separable”, with the union dimension and the singular values of the stacked class centroids (two equal values then a drop = one plane).</p>
 <h3>3-D view</h3>
-<p>Pick a value and a period (only codes with at least one generalising direction; absent codes are the grey cells of the map and cannot be selected). The class centroids of that code (one per residue, or per value for lin/direct; label = class; hsv colour by class when it is the only code displayed, one colour per code otherwise; line joins consecutive classes) are shown on the top-3 principal components of the code's <i>full residue centroids</i> (PCA of the class centroids, prompt-count weighted). That span also contains every coarser period, the linear part and centroid noise — a mod-10 code has up to 9 non-zero bars in the spectrum although its pure part is 4-dimensional. The origin (small ×) is the zero of the post-RMSNorm residual in read coordinates — the reads have no bias, so it is the reference the model uses; the PCA axes are taken about the prompt-mean activation while the coordinates are not re-centred; the bar chart above is the centroid spectrum, so you can see how much of the code's centroid energy the three axes miss. Other hypotheses can be overlaid (collapsible list, none on by default; the cluster mates — those not linearly separable from the selected code by the alive reads — are marked): their centroids are projected on the <i>same</i> axes and do not influence them, which shows how much they would leak into a readout along these directions. <b>Component arrows</b>: every alive read of this read point's kinds (colour = matrix: blue q/gate, green k, orange v/up), drawn from the origin as the <i>projection of its unit read vector into the displayed 3-D space</i>, scaled by the cloud radius — so an arrow reaching the cloud is a component whose read direction lies entirely in these three PCs, and its direction is literally where it reads. The slider hides arrows shorter than a minimum projected length. Hover/click also report the overlap (‖P_S V_c‖/‖V_c‖) and first principal angle with the code's subspace, which is a different question — <i>which subspace</i> matters: by default the <b>pure part's kept directions</b> S_H — what the code means everywhere else in the applet (functions of Q mod τ orthogonal to every coarser period and to the linear part, restricted to the generalising directions); alternatively all fitted directions of the pure part, or the span of the full class centroids, which is much more inclusive (it contains every coarser period, the linear part and the mean, so a component reading b mod 10 overlaps the b mod 50 centroid span almost fully) — a component reading the code fully reaches the cloud, an orthogonal one has zero length. Click an arrow tip for the matrix, the component index, the projected length and the overlap/angle.</p>
+<p>Pick a value and a period (only codes with at least one generalising direction; absent codes are the grey cells of the map and cannot be selected). <b>show</b> chooses what a class centroid is: the <i>full residue centroid</i> (raw mean activation of the class — for <code>a+b mod 20</code> this contains the whole mod-10 structure, so residues r and r+10 nearly coincide when the period-20 part is weak), or the <i>pure-part centroid</i> (its projection on the pure part's fitted directions: what is left once every coarser period, the linear part and the mean are removed — the object the energies, clusters and separability are about; overlaid hypotheses are shown as their own pure parts). The class centroids of that code (one per residue, or per value for lin/direct; label = class; hsv colour by class when it is the only code displayed, one colour per code otherwise; line joins consecutive classes) are shown on the top-3 principal components of the code's <i>full residue centroids</i> (PCA of the class centroids, prompt-count weighted). That span also contains every coarser period, the linear part and centroid noise — a mod-10 code has up to 9 non-zero bars in the spectrum although its pure part is 4-dimensional. The origin (small ×) is the zero of the post-RMSNorm residual in read coordinates — the reads have no bias, so it is the reference the model uses; the PCA axes are taken about the prompt-mean activation while the coordinates are not re-centred; the bar chart above is the centroid spectrum, so you can see how much of the code's centroid energy the three axes miss. Other hypotheses can be overlaid (collapsible list, none on by default; the cluster mates — those not linearly separable from the selected code by the alive reads — are marked): their centroids are projected on the <i>same</i> axes and do not influence them, which shows how much they would leak into a readout along these directions. <b>Component arrows</b>: every alive read of this read point's kinds (colour = matrix: blue q/gate, green k, orange v/up), drawn from the origin as the <i>projection of its unit read vector into the displayed 3-D space</i>, scaled by the cloud radius — so an arrow reaching the cloud is a component whose read direction lies entirely in these three PCs, and its direction is literally where it reads. The slider hides arrows shorter than a minimum projected length. Hover/click also report the overlap (‖P_S V_c‖/‖V_c‖) and first principal angle with the code's subspace, which is a different question — <i>which subspace</i> matters: by default the <b>pure part's kept directions</b> S_H — what the code means everywhere else in the applet (functions of Q mod τ orthogonal to every coarser period and to the linear part, restricted to the generalising directions); alternatively all fitted directions of the pure part, or the span of the full class centroids, which is much more inclusive (it contains every coarser period, the linear part and the mean, so a component reading b mod 10 overlaps the b mod 50 centroid span almost fully) — a component reading the code fully reaches the cloud, an orthogonal one has zero length. Click an arrow tip for the matrix, the component index, the projected length and the overlap/angle.</p>
 <h3>Suggested tour (ops = add)</h3>
 <p>Column <code>a+b:10</code>, position 4: empty until <code>mlp_in.19</code>, then solid. Click <code>mlp_in.19</code> → dim S 2/4, a residue circle in the scatter. <code>mlp_in.24</code> → 4/4, the digit family {2,5,10,20} red among themselves, green against {25,100} and 50. <code>mlp_in.28</code> → each period its own cluster, <code>a+b:100</code> in the teens of dimensions. Switch to <code>sub</code>: same periods for <code>a-b</code>, one big red cluster with <code>b:lin</code>.</p>
 </div></div>
@@ -199,7 +199,7 @@ function renderDetail() {
   }
   const periods = live.filter(f => f.quantity === view.q).map(f => f.name.split(":")[1]);
   h += "<h4 style='margin:8px 0 4px'>3-D view: class centroids on the top-3 principal components of one code</h4>";
-  h += `<div class='ctrl'>value <select id='vq'>${quantities.map(q => `<option ${q === view.q ? "selected" : ""}>${q}</option>`).join("")}</select> period <select id='vp'>${periods.map(t => `<option ${t === view.per ? "selected" : ""}>${t}</option>`).join("")}</select>`;
+  h += `<div class='ctrl'>show <select id='vpart'><option value='full' ${view.part === "full" ? "selected" : ""}>full residue centroids</option><option value='pure' ${view.part === "pure" ? "selected" : ""}>pure-part centroids</option></select> value <select id='vq'>${quantities.map(q => `<option ${q === view.q ? "selected" : ""}>${q}</option>`).join("")}</select> period <select id='vp'>${periods.map(t => `<option ${t === view.per ? "selected" : ""}>${t}</option>`).join("")}</select>`;
   h += ` <label><input type='checkbox' id='arrows' ${view.arrows ? "checked" : ""}> component arrows</label> min projected length <input type='range' id='amin' min='0' max='1' step='0.02' value='${view.amin}' style='width:90px'> <span id='aminv'>${view.amin}</span> <label><input type='checkbox' id='lines' ${view.lines ? "checked" : ""}> join consecutive classes</label> overlap against <select id='ovsub'><option value='kept' ${view.ovsub === "kept" ? "selected" : ""}>pure part, kept dirs (S_H)</option><option value='pure' ${view.ovsub === "pure" ? "selected" : ""}>pure part, all fitted dirs</option><option value='full' ${view.ovsub === "full" ? "selected" : ""}>full class-centroid span</option></select></div>`;
   h += "<details class='hyplist'><summary>other hypotheses to display (none by default; cluster mates are marked)</summary><div id='hyplist'></div></details>";
   h += "<div id='spectrum'></div><div id='view3d'></div><div id='compinfo' class='muted'>click an arrow tip for the component</div>";
@@ -237,6 +237,7 @@ function renderDetail() {
   });
   h += "</div>";
   el.innerHTML = h;
+  el.querySelector("#vpart").onchange = e => { view.part = e.target.value; draw3d(); };
   el.querySelector("#vq").onchange = e => { view.q = e.target.value; view.per = null; view.shown = null; renderDetail(); };
   el.querySelector("#vp").onchange = e => { view.per = e.target.value; view.shown = null; renderDetail(); };
   el.querySelector("#arrows").onchange = e => { view.arrows = e.target.checked; draw3d(); };
@@ -247,7 +248,7 @@ function renderDetail() {
 }
 
 // ---------------- 3-D view ----------------
-const view = {q: null, per: null, shown: null, arrows: false, amin: 0.1, lines: true, ovsub: "kept"};
+const view = {q: null, per: null, shown: null, arrows: false, amin: 0.1, lines: true, ovsub: "kept", part: "full"};
 const GEOM = {};
 window.registerArithGeom = (key, payload) => { GEOM[key] = payload; (GEOM_CB[key] || []).forEach(cb => cb()); GEOM_CB[key] = []; };
 const GEOM_CB = {};
@@ -306,10 +307,24 @@ function draw3d() {
   const hyps = g.positions[sel.p][opKey];
   const name = view.q + ":" + view.per, gname = genericName(name, opKey);
   const H = hyps[gname]; if (!H) { document.getElementById("view3d").innerHTML = "<span class='muted'>no geometry for " + name + "</span>"; return; }
-  const C = f16(H.centroids), n = C.shape[0], k = C.shape[1];
+  // Class centroids of a hypothesis: raw means, or their projection onto the pure part's fitted
+  // directions (what is left once every coarser period, the linear part and the mean are removed).
+  const centroidsOf = (Hh) => {
+    const Cf = f16(Hh.centroids), nn = Cf.shape[0], kk = Cf.shape[1];
+    if (view.part !== "pure" || !Hh.dirs) return Cf;
+    const Wd = f16(Hh.dirs), m = Wd.shape[1], out = new Float32Array(nn * kk);
+    for (let i = 0; i < nn; i++) for (let j = 0; j < m; j++) {
+      let d = 0; for (let t = 0; t < kk; t++) d += Cf.data[i * kk + t] * Wd.data[t * m + j];
+      for (let t = 0; t < kk; t++) out[i * kk + t] += d * Wd.data[t * m + j];
+    }
+    return {shape: Cf.shape, data: out};
+  };
+  const C = centroidsOf(H), n = C.shape[0], k = C.shape[1];
   const P = pca(C.data, n, k, H.counts);
   const axes = P.axes.slice(0, 3), fr = P.evals.map(x => x / (P.total || 1));
-  const specTitle = `centroid spectrum of ${name} — the 3 shown PCs hold ${(100 * fr.slice(0, 3).reduce((s, x) => s + x, 0)).toFixed(0)}% of its residue-centroid energy (${P.evals.length} non-zero; includes coarser periods, linear part and noise)`;
+  const specTitle = view.part === "pure"
+    ? `pure-part centroid spectrum of ${name} — the 3 shown PCs hold ${(100 * fr.slice(0, 3).reduce((s, x) => s + x, 0)).toFixed(0)}% (${P.evals.length} non-zero of at most dim H)`
+    : `centroid spectrum of ${name} — the 3 shown PCs hold ${(100 * fr.slice(0, 3).reduce((s, x) => s + x, 0)).toFixed(0)}% of its residue-centroid energy (${P.evals.length} non-zero; includes coarser periods, linear part and noise)`;
   while (axes.length < 3) axes.push(new Float64Array(k));
   const proj = (vec) => axes.map(w => dot(w, vec));
   const ticks = fr.map((_, i) => String(i + 1));
@@ -325,7 +340,7 @@ function draw3d() {
   const traces = [];
   let R = 1e-9;
   const centroidTrace = (hname, Hn, main, colorIdx) => {
-    const Cn = f16(Hn.centroids), nn = Cn.shape[0], pts = [];
+    const Cn = centroidsOf(Hn), nn = Cn.shape[0], pts = [];
     for (let i = 0; i < nn; i++) if (Hn.counts[i] > 0) { const vec = Cn.data.subarray(i * k, (i + 1) * k); const q = proj(vec); pts.push({i, q, n: Hn.counts[i]}); }
     pts.sort((a, b) => a.i - b.i);
     pts.forEach(p => R = Math.max(R, Math.hypot(...p.q)));
