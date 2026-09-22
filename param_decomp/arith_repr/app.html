@@ -188,6 +188,19 @@ function renderDetail() {
   if (!o) { el.innerHTML = "<span class='muted'>not analysed</span>"; return; }
   let h = `<b>${sel.key}</b> position ${sel.p} (${POS_LABEL[sel.p]}), ops ${pooledOnly ? "both (pooled fit — the operator is not visible at this position)" : op}, k=${rec.k}, reads ${rec.n_reads}<br>`;
   h += `<span class='muted'>outside read basis ${(100 * pos.outside_basis_energy).toFixed(1)}% of ||x||² · joint hypotheses ${(100 * o.joint_energy).toFixed(1)}% · kept subspaces ${(100 * o.explained_by_kept).toFixed(1)}% · null R² threshold ${o.null_threshold.toFixed(3)}</span>`;
+  // ---- 3-D view controls
+  const live = o.fits.filter(f => f.dim_S);
+  const quantities = [...new Set(live.map(f => f.quantity))];
+  if (!view.q || !live.some(f => f.name === view.q + ":" + view.per)) {
+    const f0 = live.find(f => f.name === sel.name) || live[0];
+    if (f0) { view.q = f0.quantity; view.per = f0.name.split(":")[1]; view.shown = null; }
+  }
+  const periods = live.filter(f => f.quantity === view.q).map(f => f.name.split(":")[1]);
+  h += "<h4 style='margin:8px 0 4px'>3-D view: class centroids on the top-3 principal components of one code</h4>";
+  h += `<div class='ctrl'>value <select id='vq'>${quantities.map(q => `<option ${q === view.q ? "selected" : ""}>${q}</option>`).join("")}</select> period <select id='vp'>${periods.map(t => `<option ${t === view.per ? "selected" : ""}>${t}</option>`).join("")}</select>`;
+  h += ` <label><input type='checkbox' id='arrows' ${view.arrows ? "checked" : ""}> component arrows</label> min projected length <input type='range' id='amin' min='0' max='1' step='0.02' value='${view.amin}' style='width:90px'> <span id='aminv'>${view.amin}</span> <label><input type='checkbox' id='lines' ${view.lines ? "checked" : ""}> join consecutive classes</label> overlap against <select id='ovsub'><option value='kept' ${view.ovsub === "kept" ? "selected" : ""}>pure part, kept dirs (S_H)</option><option value='pure' ${view.ovsub === "pure" ? "selected" : ""}>pure part, all fitted dirs</option><option value='full' ${view.ovsub === "full" ? "selected" : ""}>full class-centroid span</option></select></div>`;
+  h += "<details class='hyplist'><summary>other hypotheses to display (none by default; cluster mates are marked)</summary><div id='hyplist'></div></details>";
+  h += "<div id='spectrum'></div><div id='view3d'></div><div id='compinfo' class='muted'>click an arrow tip for the component</div>";
   const emin = parseFloat(document.getElementById("emin").value) || 0;
   const readsBy = {}; if (o.separability.all) o.separability.all.names.forEach((n, i) => readsBy[n] = o.separability.all.reads_count[i]);
   h += "<h4 style='margin:8px 0 4px'>Hypotheses (dim S > 0)</h4><table class='sep'><tr><th>name</th><th>dim H</th><th>marg</th><th>uniq</th><th>gen</th><th>dim S</th><th>#reads</th><th>held-out R² (top dirs)</th></tr>";
@@ -221,19 +234,6 @@ function renderDetail() {
     h += `<div class='c' data-i='${i}'>#${i} dim ${c.dim}: ${c.members.join(", ")} <span class='muted'>centroid spectrum ${spec}</span></div>`;
   });
   h += "</div>";
-  // ---- 3-D view controls
-  const live = o.fits.filter(f => f.dim_S);
-  const quantities = [...new Set(live.map(f => f.quantity))];
-  if (!view.q || !live.some(f => f.name === view.q + ":" + view.per)) {
-    const f0 = live.find(f => f.name === sel.name) || live[0];
-    if (f0) { view.q = f0.quantity; view.per = f0.name.split(":")[1]; view.shown = null; }
-  }
-  const periods = live.filter(f => f.quantity === view.q).map(f => f.name.split(":")[1]);
-  h += "<h4 style='margin:10px 0 4px'>3-D view: class centroids on the top-3 principal components of one code</h4>";
-  h += `<div class='ctrl'>value <select id='vq'>${quantities.map(q => `<option ${q === view.q ? "selected" : ""}>${q}</option>`).join("")}</select> period <select id='vp'>${periods.map(t => `<option ${t === view.per ? "selected" : ""}>${t}</option>`).join("")}</select>`;
-  h += ` <label><input type='checkbox' id='arrows' ${view.arrows ? "checked" : ""}> component arrows</label> min projected length <input type='range' id='amin' min='0' max='1' step='0.02' value='${view.amin}' style='width:90px'> <span id='aminv'>${view.amin}</span> <label><input type='checkbox' id='lines' ${view.lines ? "checked" : ""}> join consecutive classes</label> overlap against <select id='ovsub'><option value='kept' ${view.ovsub === "kept" ? "selected" : ""}>pure part, kept dirs (S_H)</option><option value='pure' ${view.ovsub === "pure" ? "selected" : ""}>pure part, all fitted dirs</option><option value='full' ${view.ovsub === "full" ? "selected" : ""}>full class-centroid span</option></select></div>`;
-  h += "<details class='hyplist'><summary>other hypotheses to display (none by default; cluster mates are marked)</summary><div id='hyplist'></div></details>";
-  h += "<div id='spectrum'></div><div id='view3d'></div><div id='compinfo' class='muted'>click an arrow tip for the component</div>";
   el.innerHTML = h;
   el.querySelector("#vq").onchange = e => { view.q = e.target.value; view.per = null; view.shown = null; renderDetail(); };
   el.querySelector("#vp").onchange = e => { view.per = e.target.value; view.shown = null; renderDetail(); };
