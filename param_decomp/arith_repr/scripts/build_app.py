@@ -14,8 +14,18 @@ from typing import Any
 APP = Path(__file__).parent.parent / "app.html"
 
 
+def rounded(x: Any, nd: int = 3) -> Any:
+    if isinstance(x, float):
+        return round(x, nd)
+    if isinstance(x, list):
+        return [rounded(v, nd) for v in x]
+    if isinstance(x, dict):
+        return {k: rounded(v, nd) for k, v in x.items()}
+    return x
+
+
 def compact(record: dict[str, Any]) -> dict[str, Any]:
-    """Drop the bulky per-direction arrays the applet does not draw."""
+    """Drop the bulky per-direction arrays the applet does not draw; round the rest."""
     out: dict[str, Any] = {
         "key": record["key"],
         "k": record["k"],
@@ -48,13 +58,13 @@ def compact(record: dict[str, Any]) -> dict[str, Any]:
                 "null_threshold": op["null_threshold"],
                 "y_spectrum": [round(x, 5) for x in op["y_spectrum"][:20]],
                 "fits": fits,
-                "separability": op["separability"],
-                "clusters": op["clusters"],
+                "separability": rounded(op["separability"]),
+                "clusters": rounded(op["clusters"]),
             }
         out["positions"][p] = {
             "outside_basis_energy": pos["outside_basis_energy"],
             "ops": ops,
-            "add_vs_sub_cosines": pos.get("add_vs_sub_cosines", {}),
+            "add_vs_sub_cosines": rounded(pos.get("add_vs_sub_cosines", {})),
         }
     return out
 
