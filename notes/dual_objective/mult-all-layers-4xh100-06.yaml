@@ -9,13 +9,16 @@
 #   ADVERSARIAL SHARE 0.9 ON EVERY MERGED RECON TERM, all four — `pd.recon`,
 #   `pd.hidden.recon`, `nontarget.recon`, `nontarget.hidden.recon`:
 #     adv_fraction.max_val  0.3333333 (target) / 0.5 (non-target)  ->  0.9 everywhere
-#     adv_fraction anneal   full share at `at: 0.05` (step 2000)   ->  `at: 0.025` (step 1000)
+#     adv_fraction anneal   full share at `at: 0.05` (step 2000)   ->  `at: 0.25` (step 10000)
 #   TOTAL `coeff` UNCHANGED on all four (1.5 / 6.8571429 / 1.0 / 2.2857143): `coeff` is the
 #   total and `adv_fraction` splits it, so this moves the mix to PGD:stochastic 9:1 without
 #   changing how much reconstruction pressure each pass carries. Both knots keep -05's shape
-#   — 0 at step 0, linear to the full share, held for the rest of the 40k steps — only the
-#   ramp is half as long. Same field convention as addsub-all-layers-4xh100-06.yaml: 0.9 is
-#   the FIELD, not the 0.9/1.9 ratio the L18 line writes as adv_fraction 0.4736842.
+#   — 0 at step 0, linear to the full share, held for the rest of the 40k steps — but the ramp
+#   is FIVE TIMES LONGER (Antoine, 2026-09-22): the adversary reaches its full 0.9 share at
+#   step 10000, a quarter of training, so the components see a gentle handover from the
+#   stochastic mask rather than a hard adversary from step 1000 on. Same field convention as
+#   addsub-all-layers-4xh100-06.yaml: 0.9 is the FIELD, not the 0.9/1.9 ratio the L18 line
+#   writes as adv_fraction 0.4736842.
 #
 # UNTESTED. Nothing else moves: init, C, LRs, normalization, impmin, the output_coeff riders,
 # the CI-scaled weight decay (`all`/`all`, unlike addsub -06), mesh, batches, the 40k
@@ -271,13 +274,13 @@ pd:
         max_val: 0.9
         # -06: the share itself, and the ramp below, are THIS run's only change; the
         # lineage comments around this term describe -05's 0.3333/0.5 and its 2000-step
-        # ramp, both superseded here (full share at step 1000).
+        # ramp, both superseded here (full share at step 10000).
         # 0 -> full share over the first 2000 steps (0.05 of 40k). The -01 recipe ramped over
         # 100 steps; slowed on every stream so the decomposition has a fit before the
         # adversary bites.
         points:
           - {at: 0.0, frac: 0.0}
-          - {at: 0.025, frac: 1.0}
+          - {at: 0.25, frac: 1.0}
           - {at: 1.0, frac: 1.0}
       # 2 warmup + the S14 final ascent = 3 ascents per step, as -01's PersistentPGDReconLoss.
       n_warmup_steps: 2
@@ -367,10 +370,10 @@ pd:
           max_val: 0.9
           # -06: the share itself, and the ramp below, are THIS run's only change; the
           # lineage comments around this term describe -05's 0.3333/0.5 and its 2000-step
-          # ramp, both superseded here (full share at step 1000).
+          # ramp, both superseded here (full share at step 10000).
           points:
             - {at: 0.0, frac: 0.0}
-            - {at: 0.025, frac: 1.0}
+            - {at: 0.25, frac: 1.0}
             - {at: 1.0, frac: 1.0}
         routing:
           type: uniform_k_subset
@@ -414,10 +417,10 @@ nontarget:
         max_val: 0.9
         # -06: the share itself, and the ramp below, are THIS run's only change; the
         # lineage comments around this term describe -05's 0.3333/0.5 and its 2000-step
-        # ramp, both superseded here (full share at step 1000).
+        # ramp, both superseded here (full share at step 10000).
         points:
           - {at: 0.0, frac: 0.0}
-          - {at: 0.025, frac: 1.0}
+          - {at: 0.25, frac: 1.0}
           - {at: 1.0, frac: 1.0}
       # 1 warmup + the final ascent = 2 ascents (-01 had 1): the broad stream's adversary
       # was too weak — its PGD recon collapsed 66 -> 11.8 between steps 20000 and 24000.
@@ -463,10 +466,10 @@ nontarget:
           max_val: 0.9
           # -06: the share itself, and the ramp below, are THIS run's only change; the
           # lineage comments around this term describe -05's 0.3333/0.5 and its 2000-step
-          # ramp, both superseded here (full share at step 1000).
+          # ramp, both superseded here (full share at step 10000).
           points:
             - {at: 0.0, frac: 0.0}
-            - {at: 0.025, frac: 1.0}
+            - {at: 0.25, frac: 1.0}
             - {at: 1.0, frac: 1.0}
         n_warmup_steps: 1
         routing:
