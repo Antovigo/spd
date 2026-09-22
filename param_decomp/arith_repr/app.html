@@ -69,9 +69,11 @@ function hypNames() {
   return names.map(f => f.name);
 }
 let HYPS = hypNames();
-function visibleHyps() {
+// Per position: the hypotheses actually fitted there (for this op set) that reach the energy
+// filter at some read point. Columns never fitted at a position are not drawn.
+function visibleHyps(p) {
   const emin = parseFloat(document.getElementById("emin").value) || 0, op = document.getElementById("op").value;
-  return hypNames().filter(n => D.keys.some(key => POS.some(p => { const f = cell(key, p, op, n); return f && f.generalising >= emin; })));
+  return hypNames().filter(n => D.keys.some(key => { const f = cell(key, p, op, n); return f && f.generalising >= emin; }));
 }
 
 function colour(v, vmax, log) {
@@ -94,20 +96,20 @@ function cell(key, p, op, name) {
 function renderMap() {
   const op = document.getElementById("op").value, score = document.getElementById("score").value;
   const vmax = parseFloat(document.getElementById("vmax").value), log = document.getElementById("log").checked;
-  HYPS = visibleHyps();
+  const byPos = {}; for (const p of POS) byPos[p] = visibleHyps(p);
   let h = "<table class='map'><thead><tr><th class='row'></th>";
-  for (const p of POS) HYPS.forEach((n, i) => {
-    const cls = i === 0 ? "pos" : (HYPS[i - 1].split(":")[0] !== n.split(":")[0] ? "q" : "");
+  for (const p of POS) byPos[p].forEach((n, i, H) => {
+    const cls = i === 0 ? "pos" : (H[i - 1].split(":")[0] !== n.split(":")[0] ? "q" : "");
     h += `<th class='vert ${cls}' title='position ${p}'>${i === 0 ? "pos " + p + " (" + POS_LABEL[p] + ")  " : ""}${n}</th>`;
   });
   h += "</tr></thead><tbody>";
   for (const key of D.keys) {
     const r = D.records[key];
     h += `<tr><th class='row'>${key} <span class='muted'>k=${r.k}</span></th>`;
-    for (const p of POS) HYPS.forEach((n, i) => {
+    for (const p of POS) byPos[p].forEach((n, i, H) => {
       const f = cell(key, p, op, n);
       const v = f ? f[score] : null;
-      const cls = (i === 0 ? "pos" : (HYPS[i - 1].split(":")[0] !== n.split(":")[0] ? "q" : "")) +
+      const cls = (i === 0 ? "pos" : (H[i - 1].split(":")[0] !== n.split(":")[0] ? "q" : "")) +
         (sel && sel.key === key && sel.p === p && sel.name === n ? " sel" : "");
       const pooledOnly = f && !("add" in D.records[key].positions[p].ops) && op !== "both";
       const tip = f ? `${key} pos ${p} ${n}: gen ${f.generalising.toFixed(4)} uniq ${f.unique.toFixed(4)} marg ${f.marginal.toFixed(4)} dimS ${f.dim_S}/${f.dim_hypothesis}${pooledOnly ? " (pooled fit: operator not yet visible)" : ""}` : "";
