@@ -1,17 +1,17 @@
 #!/usr/bin/env python
 """Output-head metrics of the dual objective (-05) against its outputs-only twin, by step and
-by wall time on the SAME hardware.
+by wall time on the SAME hardware. One figure per stream:
 
-    python plot_outputs_only_vs_dual.py            # reads ~/out/pod-backup, writes plots/
+    python plot_outputs_only_vs_dual.py     # reads ~/out/pod-backup, writes
+                                            #   plots/outputs_only_vs_dual_target.png
+                                            #   plots/outputs_only_vs_dual_nontarget.png
 
-Four output-head metrics: CI-masked KL (`eval/ce_kl/kl_ci_masked`, the arm
+Four output-head metrics per stream: CI-masked KL (`ce_kl/kl_ci_masked`, the arm
 CIMaskedReconLoss emits in a single-role run), the fresh-PGD adversarial recon eval
-(`eval/loss/PGDReconLoss`), the output head's imp-min loss (`train/loss/
-ImportanceMinimalityLoss`) and the alive count (`eval/l0/0.0_total`). Each is drawn for the
-TARGET stream (solid, the addsub prompt pool) and the NON-TARGET stream (dashed, fineweb;
-the same key under `nontarget_data/`), on one shared axis per panel. The imp-min row is
-log-scale: the non-target loss runs ~30-50x below the target one, and a linear axis would
-flatten it to zero.
+(`loss/PGDReconLoss`), the output head's imp-min loss (`loss/ImportanceMinimalityLoss`) and
+the alive count (`l0/0.0_total`). The TARGET stream is the addsub prompt pool; the
+NON-TARGET stream is fineweb, the same keys under `nontarget_data/`. They get separate
+figures because the two streams tell different stories and share no scale.
 
 THE WALL-TIME AXIS IS A100 TIME FOR BOTH RUNS. -05 itself ran on 4x H100 (~2.55 s/step);
 outputs-only runs on 4x A100. Plotting each on its own clock would credit -05 with a ~2.3x
@@ -33,7 +33,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
-from matplotlib.lines import Line2D  # noqa: E402
+from matplotlib.ticker import FuncFormatter, LogLocator, NullFormatter  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 BACKUP = Path.home() / "out" / "pod-backup"
@@ -42,34 +42,34 @@ BACKUP = Path.home() / "out" / "pod-backup"
 DUAL, OUT_ONLY = "#2a78d6", "#eb6834"
 SURFACE, INK, INK_2, GRID = "#fcfcfb", "#0b0b0b", "#52514e", "#e6e5e1"
 
-# (target key, non-target key, title, log y)
-METRICS = [
+PGD = "loss/PGDReconLoss"
+# Per stream: (file suffix, headline, key prefix per phase, [(metric, title, log y)]).
+# `eval/` metrics take `eval/<prefix>`, train metrics `train/<prefix>`.
+STREAMS = [
     (
-        "eval/ce_kl/kl_ci_masked",
-        "eval/nontarget_data/ce_kl/kl_ci_masked",
-        "CI-masked KL",
-        True,
+        "target",
+        "target stream (addsub prompts)",
+        "",
+        [
+            ("ce_kl/kl_ci_masked", "CI-masked KL", True),
+            (PGD, "Adversarial recon (fresh PGD)", True),
+            ("loss/ImportanceMinimalityLoss", "Imp-min loss (output head)", False),
+            ("l0/0.0_total", "Alive components (L0, output head)", False),
+        ],
     ),
     (
-        "eval/loss/PGDReconLoss",
-        "eval/nontarget_data/loss/PGDReconLoss",
-        "Adversarial recon (fresh PGD)",
-        True,
-    ),
-    (
-        "train/loss/ImportanceMinimalityLoss",
-        "train/nontarget_data/loss/ImportanceMinimalityLoss",
-        "Imp-min loss (output head)",
-        True,
-    ),
-    (
-        "eval/l0/0.0_total",
-        "eval/nontarget_data/l0/0.0_total",
-        "Alive components (L0, output head)",
-        False,
+        "nontarget",
+        "non-target stream (fineweb)",
+        "nontarget_data/",
+        [
+            ("ce_kl/kl_ci_masked", "CI-masked KL", True),
+            (PGD, "Adversarial recon (fresh PGD)", True),
+            ("loss/ImportanceMinimalityLoss", "Imp-min loss (output head)", False),
+            ("l0/0.0_total", "Alive components (L0, output head)", False),
+        ],
     ),
 ]
-TARGET_LS, NONTARGET_LS = "-", (0, (4, 2))
+TRAIN_METRICS = {"loss/ImportanceMinimalityLoss"}
 
 
 def load(path: Path) -> dict[int, dict[str, Any]]:
@@ -130,69 +130,50 @@ def at_time(clock: dict[int, float], step: int) -> float | None:
     return t_lo + (clock[hi] - t_lo) * (step - lo) / (hi - lo)
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
-    )
-    ap.add_argument("--dual", type=Path, default=BACKUP / "p-ba5a0c05" / "metrics.jsonl")
-    ap.add_argument("--dual-a100-clock", type=Path, default=BACKUP / "p-ba7a0c07" / "metrics.jsonl")
-    ap.add_argument("--outputs-only", type=Path, default=BACKUP / "p-ba5a0c0f" / "metrics.jsonl")
-    ap.add_argument("-o", "--out", type=Path, default=HERE / "plots" / "outputs_only_vs_dual.png")
-    a = ap.parse_args()
-
-    dual, oo = load(a.dual), load(a.outputs_only)
-    clk_dual, clk_oo = a100_clock(load(a.dual_a100_clock)), a100_clock(oo)
-    oo_last = max(s for s, r in oo.items() if "train/perf/elapsed_s" in r)
-
-    plt.rcParams.update(
-        {
-            "font.size": 9,
-            "axes.edgecolor": INK_2,
-            "axes.labelcolor": INK_2,
-            "xtick.color": INK_2,
-            "ytick.color": INK_2,
-            "axes.facecolor": SURFACE,
-            "figure.facecolor": SURFACE,
-            "axes.spines.top": False,
-            "axes.spines.right": False,
-        }
-    )
-    fig, axes = plt.subplots(len(METRICS), 2, figsize=(11, 12), sharey="row")
-    runs = [(dual, clk_dual, DUAL), (oo, clk_oo, OUT_ONLY)]  # labels live in the legend
-
-    for row, (key, nt_key, title, logy) in enumerate(METRICS):
-        sparse = key == "eval/loss/PGDReconLoss"
+def render(
+    headline: str,
+    prefix: str,
+    metrics: list[tuple[str, str, bool]],
+    runs: list[tuple[str, dict[int, dict[str, Any]], dict[int, float], str]],
+    oo_last: int,
+    out: Path,
+) -> None:
+    fig, axes = plt.subplots(len(metrics), 2, figsize=(11, 12), sharey="row")
+    for row, (metric, title, logy) in enumerate(metrics):
+        key = f"{'train' if metric in TRAIN_METRICS else 'eval'}/{prefix}{metric}"
+        sparse = metric == PGD
         for col in range(2):
             ax = axes[row, col]
-            for rows, clk, color in runs:
-                for k, ls, nontarget in ((key, TARGET_LS, False), (nt_key, NONTARGET_LS, True)):
-                    pts = series(rows, k)
-                    if sparse and nontarget:
-                        # Step-0 non-target PGD is ~0 by construction (zero-U init: the
-                        # components carry nothing, so no mask can break the recon). On a
-                        # log axis it reads as -inf and stretches the row to 1e-3.
-                        pts = [(s, v) for s, v in pts if s > 0]
-                    if col == 1:
-                        pts = [(t, v) for s, v in pts if (t := at_time(clk, s)) is not None]
-                    if not pts:
-                        continue
-                    xs, ys = zip(*pts, strict=True)
-                    # Non-target: dashed, and hollow markers on the sparse row, so the stream
-                    # reads without relying on the dash alone.
-                    ax.plot(
-                        xs,
-                        ys,
-                        color=color,
-                        ls=ls,
-                        lw=1.5,
-                        marker="o" if sparse else None,
-                        ms=5,
-                        mec=color if nontarget else SURFACE,
-                        mfc=SURFACE if nontarget else color,
-                        mew=1.5,
-                    )
+            for name, rows, clk, color in runs:
+                pts = series(rows, key)
+                if sparse and prefix:
+                    # Step-0 non-target PGD is ~0 by construction (zero-U init: the
+                    # components carry nothing, so no mask can break the recon). On a log
+                    # axis it reads as -inf and stretches the row down to 1e-3.
+                    pts = [(s, v) for s, v in pts if s > 0]
+                if col == 1:
+                    pts = [(t, v) for s, v in pts if (t := at_time(clk, s)) is not None]
+                if not pts:
+                    continue
+                xs, ys = zip(*pts, strict=True)
+                ax.plot(
+                    xs,
+                    ys,
+                    color=color,
+                    lw=1.5,
+                    label=name,
+                    marker="o" if sparse else None,
+                    ms=5,
+                    mec=SURFACE,
+                    mew=1.5,
+                )
             if logy:
                 ax.set_yscale("log")
+                # Labelled ticks at 1-2-5: several rows span under a decade, where the
+                # default locator labels a single power of ten.
+                ax.yaxis.set_major_locator(LogLocator(base=10, subs=(1.0, 2.0, 5.0)))
+                ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g}"))
+                ax.yaxis.set_minor_formatter(NullFormatter())
             ax.grid(True, color=GRID, lw=0.6)
             ax.set_axisbelow(True)
             if col == 0:
@@ -211,33 +192,24 @@ def main() -> None:
                             color=INK_2,
                         )
         axes[row, 0].set_xlim(0, 40_000)
-    for ax in axes[-1]:
-        ax.set_xlabel("")
     axes[-1, 0].set_xlabel("Training step")
     axes[-1, 1].set_xlabel("Training wall time, hours on 4x A100 (compile excluded)")
     axes[0, 0].set_title("vs step", loc="right", color=INK_2, fontsize=9)
     axes[0, 1].set_title("vs wall time", loc="right", color=INK_2, fontsize=9)
 
-    # Two independent encodings, so two legend groups: colour = run, line style = stream.
-    # The stream samples are drawn in neutral ink so they claim no run.
-    handles = [
-        Line2D([], [], color=DUAL, lw=1.5, label="Dual objective (-05)"),
-        Line2D([], [], color=OUT_ONLY, lw=1.5, label="Outputs-only"),
-        Line2D([], [], color=INK_2, lw=1.5, ls=TARGET_LS, label="Target stream (addsub prompts)"),
-        Line2D([], [], color=INK_2, lw=1.5, ls=NONTARGET_LS, label="Non-target stream (fineweb)"),
-    ]
+    handles, labels = axes[0, 0].get_legend_handles_labels()
     fig.legend(
-        handles=handles,
+        handles,
+        labels,
         loc="upper left",
         bbox_to_anchor=(0.06, 0.975),
-        ncol=4,
+        ncol=2,
         frameon=False,
         fontsize=9,
         labelcolor=INK,
-        handlelength=2.6,
     )
     fig.suptitle(
-        "Output-head metrics: with vs without the hidden-activation recon",
+        f"Output-head metrics, {headline}: with vs without the hidden-activation recon",
         x=0.06,
         y=0.995,
         ha="left",
@@ -245,25 +217,58 @@ def main() -> None:
         fontsize=12,
         fontweight="semibold",
     )
-    fig.text(
-        0.06,
-        0.005,
+    note = (
         f"Outputs-only (p-ba5a0c0f) shown through step {oo_last:,} of 40,000. Dual = -05 (p-ba5a0c05); its "
         "wall-time axis uses -07's measured A100 clock (same compute graph, same pod), because -05 itself\n"
-        "ran on H100s and its own clock would credit it with a hardware speed-up. Log scale on the top three rows; "
-        "imp-min is log because the non-target loss sits ~30-50x below the target one.\n"
-        "Non-target PGD omits step 0, where it is ~0 by construction (zero-U init: components carry nothing yet).",
-        fontsize=7.5,
-        color=INK_2,
-        va="bottom",
+        "ran on H100s and its own clock would credit it with a hardware speed-up. Log scale on the top two rows."
     )
+    if prefix:
+        note += "\nPGD omits step 0, where it is ~0 by construction (zero-U init: components carry nothing yet)."
+    fig.text(0.06, 0.005, note, fontsize=7.5, color=INK_2, va="bottom")
     fig.tight_layout(rect=(0, 0.03, 1, 0.955))
-    a.out.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(a.out, dpi=150)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out, dpi=150)
+    plt.close(fig)
+    print(f"wrote {out}")
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    ap.add_argument("--dual", type=Path, default=BACKUP / "p-ba5a0c05" / "metrics.jsonl")
+    ap.add_argument("--dual-a100-clock", type=Path, default=BACKUP / "p-ba7a0c07" / "metrics.jsonl")
+    ap.add_argument("--outputs-only", type=Path, default=BACKUP / "p-ba5a0c0f" / "metrics.jsonl")
+    ap.add_argument("-o", "--out-dir", type=Path, default=HERE / "plots")
+    a = ap.parse_args()
+
+    dual, oo = load(a.dual), load(a.outputs_only)
+    clk_dual, clk_oo = a100_clock(load(a.dual_a100_clock)), a100_clock(oo)
+    oo_last = max(s for s, r in oo.items() if "train/perf/elapsed_s" in r)
+    runs = [
+        ("Dual objective (-05)", dual, clk_dual, DUAL),
+        ("Outputs-only", oo, clk_oo, OUT_ONLY),
+    ]
+
+    plt.rcParams.update(
+        {
+            "font.size": 9,
+            "axes.edgecolor": INK_2,
+            "axes.labelcolor": INK_2,
+            "xtick.color": INK_2,
+            "ytick.color": INK_2,
+            "axes.facecolor": SURFACE,
+            "figure.facecolor": SURFACE,
+            "axes.spines.top": False,
+            "axes.spines.right": False,
+        }
+    )
+    for suffix, headline, prefix, metrics in STREAMS:
+        out = a.out_dir / f"outputs_only_vs_dual_{suffix}.png"
+        render(headline, prefix, metrics, runs, oo_last, out)
     print(
-        f"wrote {a.out}  (outputs-only through step {oo_last}; "
-        f"A100 h at 40k: dual {clk_dual[40000]:.1f}, outputs-only "
-        f"{clk_oo[oo_last] * 40000 / oo_last:.1f} projected)"
+        f"outputs-only through step {oo_last}; A100 h at 40k: dual {clk_dual[40000]:.1f}, "
+        f"outputs-only {clk_oo[oo_last] * 40000 / oo_last:.1f} projected"
     )
 
 
