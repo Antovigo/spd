@@ -10,8 +10,9 @@ most active components side by side, nothing else drawn on them. A grid is the c
 activation `(x · V_c) / ‖V_c‖` at the answer position, over every `a + b =` prompt with
 a, b in 1..100 (a up, b right). "Most active" is the prompt-mean CI of the OUTPUT head at
 that position (`mean_ci`), the one CI both runs carry, ranked among the components the
-grid saved (only those have grids). Rankings are per step, so a column is a rank, not a
-fixed component. A row with fewer than ten saved components leaves the rest blank.
+grid saved (only those have grids). The top ten are chosen per step, then laid out in
+COMPONENT-INDEX order, so a component that stays in the top ten keeps roughly its place
+from row to row. A row with fewer than ten saved components leaves the rest blank.
 
 Inner activations are signed, so each grid uses a diverging scale centred on zero,
 symmetric to that grid's own largest magnitude. Magnitudes are not comparable across
@@ -75,7 +76,8 @@ def top_components(
     for path in sorted(grid_dir.glob("step_*.js"), key=lambda p: int(p.stem.split("_")[1])):
         step = int(path.stem.split("_")[1])
         saved, mean_ci, inner = site_grids(load_grid(path), site)
-        order = sorted(range(len(saved)), key=lambda i: -mean_ci[saved[i]])[:top]
+        chosen = sorted(range(len(saved)), key=lambda i: -mean_ci[saved[i]])[:top]
+        order = sorted(chosen, key=lambda i: saved[i])  # select by CI, display by index
         out[step] = [(saved[i], float(mean_ci[saved[i]]), inner[i]) for i in order]
         print(
             f"  {grid_dir.parent.name} step {step}: {len(saved)} saved, top {[saved[i] for i in order]}"
@@ -162,7 +164,8 @@ def main() -> None:
     fig.text(
         left / width,
         0.1 / height,
-        f"{a.site}: top {a.top} components per step by output-head mean CI. Each map: inner "
+        f"{a.site}: top {a.top} components per step by output-head mean CI, shown in "
+        "component-index order. Each map: inner "
         "activation (x·V)/‖V‖ at the answer position, a (1-100) up, b (1-100) right; diverging "
         "scale centred on 0 (blue < 0 < red), each map scaled to its own ±max.",
         fontsize=7,
