@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <title>Integer representations in the residual stream</title>
 <script src="data.js"></script>
+<script src="plotly.min.js"></script>
 <style>
   body { font: 13px/1.4 system-ui, sans-serif; margin: 0; color: #222; background: #fafafa; }
   header { padding: 8px 14px; background: #fff; border-bottom: 1px solid #ddd; display: flex; gap: 18px; align-items: center; flex-wrap: wrap; position: sticky; top: 0; z-index: 2; }
@@ -17,8 +18,8 @@
   table.map th.row { left: 0; text-align: right; padding-right: 6px; white-space: nowrap; }
   table.map td { width: 16px; height: 14px; padding: 0; border: 1px solid #f2f2f2; cursor: pointer; }
   table.map td.sel { outline: 2px solid #000; outline-offset: -2px; }
-  table.map th.pos { border-left: 2px solid #999; }
-  table.map td.pos { border-left: 2px solid #999; }
+  table.map th.pos { border-left: 4px solid #222; padding-left: 4px; }
+  table.map td.pos { border-left: 4px solid #222; }
   table.map th.q { border-left: 1px solid #bbb; }
   table.map td.q { border-left: 1px solid #bbb; }
   th.vert { writing-mode: vertical-rl; transform: rotate(180deg); height: 70px; font-size: 10px; }
@@ -37,6 +38,10 @@
   #help h3 { margin: 14px 0 4px; } #help h2 { margin: 0 0 6px; }
   #help .close { float: right; cursor: pointer; font-size: 18px; }
   #help code { background: #f3f3f3; padding: 0 3px; }
+  details.hyplist { margin: 4px 0; } details.hyplist label { display: inline-block; margin-right: 8px; font-size: 11px; }
+  #view3d { width: 100%; height: 480px; } #spectrum { width: 100%; height: 90px; }
+  #compinfo { font-size: 12px; min-height: 18px; }
+  .ctrl { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin: 6px 0; font-size: 12px; }
 </style>
 </head>
 <body>
@@ -70,7 +75,9 @@
 </ul>
 <p><b>max</b> sets colour saturation; <b>log colour</b> for the 0.5–2 % codes; the <b>energy filter</b> hides columns that never reach that generalising energy.</p>
 <h3>Detail panel (click a cell)</h3>
-<p>Header: <i>outside read basis</i> = share of ‖x‖² the alive reads cannot see; <i>joint</i> = share explained by all hypotheses; <i>kept</i> = by generalising directions only; the null R² threshold. <b>Hypotheses table</b>: dim H (hypothesis dimension), marginal/unique/generalising energy, dim S, #reads (alive components reading it above the null), held-out R² of the top directions. <b>Separability</b>: green = some alive read lands in the row subspace at the 99.9th percentile of the random-direction null while sitting at that null on the column subspace, <i>and</i> vice versa; red = not separable. Per-kind clusters below. A hypothesis no component reads is <i>unread</i> and left out of the graph. Caution: at attention read points (k ≤ ~60) the null is nearly degenerate and most hypotheses come out unread — a limit of the null, not evidence. <b>add vs sub cosines</b>: principal cosines between the subspaces fitted on each operation (≈1 = same code). <b>Clusters</b>: connected components of “not separable”, with the union dimension and the singular values of the stacked class centroids (two equal values then a drop = one plane). <b>Scatter</b>: class centroids of every member (one per residue, or per value for lin/direct) on the cluster's principal axes; colour = member, label = residue, grey line joins consecutive residues, size ∝ prompt count, hover for the centroid norm (magnitude is kept).</p>
+<p>Header: <i>outside read basis</i> = share of ‖x‖² the alive reads cannot see; <i>joint</i> = share explained by all hypotheses; <i>kept</i> = by generalising directions only; the null R² threshold. <b>Hypotheses table</b>: dim H (hypothesis dimension), marginal/unique/generalising energy, dim S, #reads (alive components reading it above the null), held-out R² of the top directions. <b>Separability</b>: green = some alive read lands in the row subspace at the 99.9th percentile of the random-direction null while sitting at that null on the column subspace, <i>and</i> vice versa; red = not separable. Per-kind clusters below. A hypothesis no component reads is <i>unread</i> and left out of the graph. Caution: at attention read points (k ≤ ~60) the null is nearly degenerate and most hypotheses come out unread — a limit of the null, not evidence. <b>add vs sub cosines</b>: principal cosines between the subspaces fitted on each operation (≈1 = same code). <b>Clusters</b>: connected components of “not separable”, with the union dimension and the singular values of the stacked class centroids (two equal values then a drop = one plane).</p>
+<h3>3-D view</h3>
+<p>Pick a value and a period. The class centroids of that code (one per residue, or per value for lin/direct; hsv colour = class, label = class, grey line joins consecutive classes) are shown on the top-3 principal components of the code's <i>full marginal fit</i> (PCA of its class centroids, prompt-count weighted); the bar chart above is the centroid spectrum, so you can see how much of the code's centroid energy the three axes miss. Other hypotheses can be overlaid (collapsible list; the cluster mates — those not linearly separable from the selected code by the alive reads — are on by default): their centroids are projected on the <i>same</i> axes and do not influence them, which shows how much they would leak into a readout along these directions. <b>Component arrows</b>: every alive read of this read point's kinds (q/k/v or gate/up), drawn from the origin along its read vector projected on the three PCs, with length = its overlap with the code's subspace (‖P_S V_c‖/‖V_c‖) times the cloud radius — a component reading the code fully reaches the cloud, an orthogonal one has zero length. The slider hides overlaps below a minimum. Click an arrow tip for the matrix, the component index and its first principal angle with the subspace (arccos of the overlap).</p>
 <h3>Suggested tour (ops = add)</h3>
 <p>Column <code>a+b:10</code>, position 4: empty until <code>mlp_in.19</code>, then solid. Click <code>mlp_in.19</code> → dim S 2/4, a residue circle in the scatter. <code>mlp_in.24</code> → 4/4, the digit family {2,5,10,20} red among themselves, green against {25,100} and 50. <code>mlp_in.28</code> → each period its own cluster, <code>a+b:100</code> in the teens of dimensions. Switch to <code>sub</code>: same periods for <code>a-b</code>, one big red cluster with <code>b:lin</code>.</p>
 </div></div>
@@ -84,7 +91,7 @@ const POS = ["1", "2", "3", "4"];
 const POS_LABEL = {"1": "a", "2": "op", "3": "b", "4": "="};
 const QUANT_ORDER = ["a", "op", "b", "b@add", "b@sub", "a+b", "a-b", "a±b", "a∓b"];
 const COLORS = ["#1f77b4", "#d62728", "#2ca02c", "#9467bd", "#ff7f0e", "#8c564b", "#e377c2", "#17becf", "#bcbd22", "#7f7f7f"];
-let sel = null, selCluster = 0, axX = 0, axY = 1;
+let sel = null;
 
 function hypNames() {
   // Union of hypothesis names across all records, ordered by quantity then period.
@@ -107,12 +114,21 @@ function visibleHyps(p, keys) {
   return hypNames().filter(n => keys.some(key => { const f = cell(key, p, op, n); return f && f.generalising >= emin; }));
 }
 
+// ColorBrewer RdPu (9 classes), interpolated.
+const RDPU = ["#fff7f3", "#fde0dd", "#fcc5c0", "#fa9fb5", "#f768a1", "#dd3497", "#ae017e", "#7a0177", "#49006a"].map(h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16)));
 function colour(v, vmax, log) {
   if (v === undefined || v === null) return "#f6f6f6";
   let t = Math.max(0, Math.min(1, v / vmax));
   if (log) t = Math.log1p(9 * t) / Math.log(10);
-  const r = Math.round(255 - 200 * t), g = Math.round(255 - 120 * t), b = Math.round(255 - 30 * t);
-  return `rgb(${r},${g},${b})`;
+  const x = t * (RDPU.length - 1), i = Math.min(RDPU.length - 2, Math.floor(x)), f = x - i;
+  const c = RDPU[i].map((a, j) => Math.round(a + f * (RDPU[i + 1][j] - a)));
+  return `rgb(${c[0]},${c[1]},${c[2]})`;
+}
+const LABELS = {add: {res: "a+b", cross: "a-b"}, sub: {res: "a-b", cross: "a+b"}, both: {res: "a±b", cross: "a∓b"}};
+function genericName(name, op) {  // display name -> the analysis's generic name (res/cross)
+  const [q, rest] = [name.split(":")[0], name.slice(name.indexOf(":"))];
+  for (const [g, d] of Object.entries(LABELS[op])) if (d === q) return g + rest;
+  return name;
 }
 
 // Positions before the operator token (0-1) are fitted on the pooled set only: the activation
@@ -153,37 +169,8 @@ function renderMap() {
   h += "</tbody></table>";
   document.getElementById("map").innerHTML = h;
   document.querySelectorAll("#map td").forEach(td => td.onclick = () => {
-    sel = {key: td.dataset.key, p: td.dataset.p, name: td.dataset.n}; selCluster = null; renderMap(); renderDetail();
+    sel = {key: td.dataset.key, p: td.dataset.p, name: td.dataset.n}; view.q = null; view.shown = null; renderMap(); renderDetail();
   });
-}
-
-function scatter(cl, w, h) {
-  const pts = [];
-  cl.members.forEach((m, mi) => {
-    const C = cl.centroids[m], cnt = cl.counts[m];
-    C.forEach((c, j) => { if (cnt[j] > 0) pts.push({x: c[axX], y: c[axY], m, mi, j, n: cnt[j], norm: cl.norms[m][j]}); });
-  });
-  if (!pts.length) return "<span class='muted'>no centroids</span>";
-  const xs = pts.map(p => p.x), ys = pts.map(p => p.y);
-  const lim = Math.max(...xs.map(Math.abs), ...ys.map(Math.abs), 1e-9) * 1.1;
-  const sx = x => w / 2 + (x / lim) * (w / 2 - 20), sy = y => h / 2 - (y / lim) * (h / 2 - 20);
-  let s = `<svg width='${w}' height='${h}' style='border:1px solid #eee;background:#fff'>`;
-  s += `<line x1='${sx(-lim)}' y1='${sy(0)}' x2='${sx(lim)}' y2='${sy(0)}' stroke='#eee'/><line x1='${sx(0)}' y1='${sy(-lim)}' x2='${sx(0)}' y2='${sy(lim)}' stroke='#eee'/>`;
-  // Connect consecutive classes of each member (residue order).
-  cl.members.forEach((m, mi) => {
-    const mp = pts.filter(p => p.m === m).sort((a, b) => a.j - b.j);
-    if (mp.length > 2 && mp.length <= 100) {
-      const d = mp.map((p, i) => (i ? "L" : "M") + sx(p.x) + " " + sy(p.y)).join(" ");
-      s += `<path d='${d}' fill='none' stroke='${COLORS[mi % 10]}' stroke-opacity='0.35'/>`;
-    }
-  });
-  for (const p of pts) {
-    const r = 2 + 2 * Math.sqrt(p.n / 200);
-    s += `<circle cx='${sx(p.x)}' cy='${sy(p.y)}' r='${r}' fill='${COLORS[p.mi % 10]}' fill-opacity='0.8'><title>${p.m} class ${p.j} (n=${p.n}, |c|=${p.norm.toFixed(3)})</title></circle>`;
-    if (pts.length <= 60) s += `<text x='${sx(p.x) + 4}' y='${sy(p.y) - 3}' fill='${COLORS[p.mi % 10]}'>${p.j}</text>`;
-  }
-  s += "</svg>";
-  return s;
 }
 
 function renderDetail() {
@@ -223,29 +210,154 @@ function renderDetail() {
       Object.entries(pos.add_vs_sub_cosines).filter(([, c]) => c.length).map(([n, c]) => `${n}: ${c.map(x => x.toFixed(2)).join(" ")}`).join("<br>") + "</div>";
   }
   h += "<h4 style='margin:8px 0 4px'>Clusters</h4><div class='clusters'>";
-  if (selCluster === null) {
-    selCluster = Math.max(0, o.clusters.findIndex(c => c.members.includes(sel.name)));
-  }
   o.clusters.forEach((c, i) => {
     const spec = c.spectrum.slice(0, 6).map(x => x.toFixed(2)).join(" ");
-    h += `<div class='c ${i === selCluster ? "sel" : ""}' data-i='${i}'>#${i} dim ${c.dim}: ${c.members.join(", ")} <span class='muted'>centroid spectrum ${spec}</span></div>`;
+    h += `<div class='c' data-i='${i}'>#${i} dim ${c.dim}: ${c.members.join(", ")} <span class='muted'>centroid spectrum ${spec}</span></div>`;
   });
   h += "</div>";
-  const c = o.clusters[selCluster];
-  if (c) {
-    h += `<div>axes: x <select id='axx'>${[0,1,2,3,4,5].map(i => `<option ${i === axX ? "selected" : ""}>${i}</option>`).join("")}</select> y <select id='axy'>${[0,1,2,3,4,5].map(i => `<option ${i === axY ? "selected" : ""}>${i}</option>`).join("")}</select></div>`;
-    h += scatter(c, 520, 420);
+  // ---- 3-D view controls
+  const live = o.fits.filter(f => f.dim_S);
+  const quantities = [...new Set(live.map(f => f.quantity))];
+  if (!view.q || !live.some(f => f.name === view.q + ":" + view.per)) {
+    const f0 = live.find(f => f.name === sel.name) || live[0];
+    if (f0) { view.q = f0.quantity; view.per = f0.name.split(":")[1]; view.shown = null; }
   }
+  const periods = live.filter(f => f.quantity === view.q).map(f => f.name.split(":")[1]);
+  h += "<h4 style='margin:10px 0 4px'>3-D view: class centroids on the top-3 principal components of one code</h4>";
+  h += `<div class='ctrl'>value <select id='vq'>${quantities.map(q => `<option ${q === view.q ? "selected" : ""}>${q}</option>`).join("")}</select> period <select id='vp'>${periods.map(t => `<option ${t === view.per ? "selected" : ""}>${t}</option>`).join("")}</select>`;
+  h += ` <label><input type='checkbox' id='arrows' ${view.arrows ? "checked" : ""}> component arrows</label> min overlap <input type='range' id='amin' min='0' max='1' step='0.02' value='${view.amin}' style='width:90px'> <span id='aminv'>${view.amin}</span> <label><input type='checkbox' id='lines' ${view.lines ? "checked" : ""}> join consecutive classes</label></div>`;
+  h += "<details class='hyplist'><summary>other hypotheses to display (cluster mates by default)</summary><div id='hyplist'></div></details>";
+  h += "<div id='spectrum'></div><div id='view3d'></div><div id='compinfo' class='muted'>click an arrow tip for the component</div>";
   el.innerHTML = h;
-  el.querySelectorAll(".clusters .c").forEach(d => d.onclick = () => { selCluster = +d.dataset.i; renderDetail(); });
-  const ax = el.querySelector("#axx"), ay = el.querySelector("#axy");
-  if (ax) ax.onchange = () => { axX = +ax.value; renderDetail(); };
-  if (ay) ay.onchange = () => { axY = +ay.value; renderDetail(); };
+  el.querySelector("#vq").onchange = e => { view.q = e.target.value; view.per = null; view.shown = null; renderDetail(); };
+  el.querySelector("#vp").onchange = e => { view.per = e.target.value; view.shown = null; renderDetail(); };
+  el.querySelector("#arrows").onchange = e => { view.arrows = e.target.checked; draw3d(); };
+  el.querySelector("#lines").onchange = e => { view.lines = e.target.checked; draw3d(); };
+  el.querySelector("#amin").oninput = e => { view.amin = +e.target.value; el.querySelector("#aminv").textContent = view.amin; draw3d(); };
+  withGeom(sel.key, () => draw3d());
 }
 
-document.getElementById("help-btn").onclick = () => document.getElementById("help").style.display = "block";
-document.getElementById("help-close").onclick = () => document.getElementById("help").style.display = "none";
-document.getElementById("help").onclick = e => { if (e.target.id === "help") e.target.style.display = "none"; };
+// ---------------- 3-D view ----------------
+const view = {q: null, per: null, shown: null, arrows: false, amin: 0.1, lines: true};
+const GEOM = {};
+window.registerArithGeom = (key, payload) => { GEOM[key] = payload; (GEOM_CB[key] || []).forEach(cb => cb()); GEOM_CB[key] = []; };
+const GEOM_CB = {};
+function withGeom(key, cb) {
+  if (GEOM[key]) return cb();
+  (GEOM_CB[key] = GEOM_CB[key] || []).push(cb);
+  if (GEOM_CB[key].length === 1) { const s = document.createElement("script"); s.src = `geom/${key}.js`; s.onerror = () => { document.getElementById("view3d").innerHTML = "<span class='muted'>geometry file geom/" + key + ".js not found (run export_geometry)</span>"; }; document.head.appendChild(s); }
+}
+function f16(obj) {  // {shape, f16: base64} -> {shape, data: Float32Array}
+  const bin = atob(obj.f16), n = bin.length / 2, out = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const hlf = bin.charCodeAt(2 * i) | (bin.charCodeAt(2 * i + 1) << 8);
+    const sgn = (hlf >> 15) & 1, exp = (hlf >> 10) & 0x1f, man = hlf & 0x3ff;
+    let v;
+    if (exp === 0) v = man * Math.pow(2, -24); else if (exp === 31) v = man ? NaN : Infinity; else v = (1 + man / 1024) * Math.pow(2, exp - 15);
+    out[i] = sgn ? -v : v;
+  }
+  return {shape: obj.shape, data: out};
+}
+function jacobiEig(A, n) {  // symmetric n x n (flat), returns {values, vectors(flat, column j = eigvec j)} sorted desc
+  const a = Float64Array.from(A), v = new Float64Array(n * n); for (let i = 0; i < n; i++) v[i * n + i] = 1;
+  for (let sweep = 0; sweep < 60; sweep++) {
+    let off = 0; for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) off += a[i * n + j] ** 2;
+    if (off < 1e-18) break;
+    for (let p = 0; p < n; p++) for (let q = p + 1; q < n; q++) {
+      const apq = a[p * n + q]; if (Math.abs(apq) < 1e-300) continue;
+      const theta = (a[q * n + q] - a[p * n + p]) / (2 * apq), t = Math.sign(theta || 1) / (Math.abs(theta) + Math.sqrt(theta * theta + 1)), c = 1 / Math.sqrt(t * t + 1), s = t * c;
+      for (let k = 0; k < n; k++) { const akp = a[k * n + p], akq = a[k * n + q]; a[k * n + p] = c * akp - s * akq; a[k * n + q] = s * akp + c * akq; }
+      for (let k = 0; k < n; k++) { const apk = a[p * n + k], aqk = a[q * n + k]; a[p * n + k] = c * apk - s * aqk; a[q * n + k] = s * apk + c * aqk; }
+      for (let k = 0; k < n; k++) { const vkp = v[k * n + p], vkq = v[k * n + q]; v[k * n + p] = c * vkp - s * vkq; v[k * n + q] = s * vkp + c * vkq; }
+    }
+  }
+  const idx = [...Array(n).keys()].sort((i, j) => a[j * n + j] - a[i * n + i]);
+  return {values: idx.map(i => Math.max(a[i * n + i], 0)), vectors: idx.map(i => Float64Array.from({length: n}, (_, k) => v[k * n + i]))};
+}
+function pca(C, n, k, counts) {  // rows of C (n x k, flat) -> {axes: [w1,w2,w3] (k-vectors), evals, basis (all PCs with energy)}
+  const rows = []; for (let i = 0; i < n; i++) if (!counts || counts[i] > 0) rows.push(i);
+  const m = rows.length, mean = new Float64Array(k), wsum = rows.reduce((s, i) => s + (counts ? counts[i] : 1), 0);
+  for (const i of rows) for (let j = 0; j < k; j++) mean[j] += (counts ? counts[i] : 1) * C[i * k + j] / wsum;
+  const X = new Float64Array(m * k); rows.forEach((i, r) => { for (let j = 0; j < k; j++) X[r * k + j] = C[i * k + j] - mean[j]; });
+  const K = new Float64Array(m * m);
+  for (let r = 0; r < m; r++) for (let t = r; t < m; t++) { let d = 0; for (let j = 0; j < k; j++) d += X[r * k + j] * X[t * k + j]; K[r * m + t] = K[t * m + r] = d; }
+  const e = jacobiEig(K, m), axes = [], evals = e.values;
+  const total = evals.reduce((s, x) => s + x, 0);
+  e.vectors.forEach((u, i) => { if (evals[i] > 1e-9 * total) { const w = new Float64Array(k); const sig = Math.sqrt(evals[i]); for (let r = 0; r < m; r++) for (let j = 0; j < k; j++) w[j] += u[r] * X[r * k + j] / sig; axes.push(w); } });
+  return {axes, evals, mean, total};
+}
+const dot = (u, v) => { let s = 0; for (let i = 0; i < u.length; i++) s += u[i] * v[i]; return s; };
+function hsv(i, n) { const h = i / n, f = (h * 6) % 1, q = Math.floor(h * 6) % 6, v = 230, t = [[v, v * f, 0], [v * (1 - f), v, 0], [0, v, v * f], [0, v * (1 - f), v], [v * f, 0, v], [v, 0, v * (1 - f)]][q]; return `rgb(${t.map(Math.round).join(",")})`; }
+function draw3d() {
+  if (!sel) return;
+  const op = document.getElementById("op").value;
+  const pos = D.records[sel.key].positions[sel.p], o = opsOf(pos, op);
+  const opKey = ("add" in pos.ops) ? op : "both";
+  const g = GEOM[sel.key]; if (!g || !g.positions[sel.p] || !g.positions[sel.p][opKey]) return;
+  const hyps = g.positions[sel.p][opKey];
+  const name = view.q + ":" + view.per, gname = genericName(name, opKey);
+  const H = hyps[gname]; if (!H) { document.getElementById("view3d").innerHTML = "<span class='muted'>no geometry for " + name + "</span>"; return; }
+  const C = f16(H.centroids), n = C.shape[0], k = C.shape[1];
+  const P = pca(C.data, n, k, H.counts);
+  const axes = P.axes.slice(0, 3); while (axes.length < 3) axes.push(new Float64Array(k));
+  const proj = (vec) => axes.map(w => dot(w, vec));
+  // spectrum
+  const fr = P.evals.map(x => x / (P.total || 1));
+  const vis = fr.slice(0, 3).reduce((s, x) => s + x, 0);
+  Plotly.newPlot("spectrum", [{type: "bar", x: fr.map((_, i) => i + 1), y: fr, marker: {color: fr.map((_, i) => i < 3 ? "#ae017e" : "#ccc")}, hovertemplate: "PC %{x}: %{y:.1%}<extra></extra>"}],
+    {margin: {l: 30, r: 5, t: 18, b: 20}, height: 90, title: {text: `centroid spectrum of ${name} — the 3 shown PCs hold ${(100 * vis).toFixed(0)}% of its centroid energy (${P.evals.length} non-zero)`, font: {size: 11}}, yaxis: {tickformat: ".0%"}, xaxis: {dtick: 1}}, {displayModeBar: false});
+  // which hypotheses to display: default = cluster mates
+  const cl = o.clusters.find(c => c.members.includes(name));
+  if (!view.shown) { view.shown = new Set(cl ? cl.members.filter(m => m !== name) : []); }
+  const list = document.getElementById("hyplist");
+  const names = o.fits.filter(f => f.dim_S && f.name !== name).map(f => f.name);
+  list.innerHTML = names.map(m => `<label><input type='checkbox' data-m='${m}' ${view.shown.has(m) ? "checked" : ""}> ${m}${cl && cl.members.includes(m) ? " <span class='muted'>(mate)</span>" : ""}</label>`).join("");
+  list.querySelectorAll("input").forEach(cb => cb.onchange = () => { cb.checked ? view.shown.add(cb.dataset.m) : view.shown.delete(cb.dataset.m); draw3d(); });
+  const traces = [];
+  let R = 1e-9;
+  const centroidTrace = (hname, Hn, main, colorIdx) => {
+    const Cn = f16(Hn.centroids), nn = Cn.shape[0], pts = [];
+    for (let i = 0; i < nn; i++) if (Hn.counts[i] > 0) { const vec = Cn.data.subarray(i * k, (i + 1) * k); const q = proj(Float64Array.from(vec, (x, j) => x - (main ? P.mean[j] : P.mean[j]))); pts.push({i, q, n: Hn.counts[i]}); }
+    pts.sort((a, b) => a.i - b.i);
+    pts.forEach(p => R = Math.max(R, Math.hypot(...p.q)));
+    const col = main ? pts.map(p => hsv(p.i, nn)) : COLORS[colorIdx % 10];
+    traces.push({type: "scatter3d", mode: view.lines && nn <= 100 ? "lines+markers" : "markers", name: hname, x: pts.map(p => p.q[0]), y: pts.map(p => p.q[1]), z: pts.map(p => p.q[2]),
+      text: pts.map(p => `${hname} class ${p.i} (n=${p.n})`), hoverinfo: "text",
+      marker: {size: main ? 6 : 3.5, color: col, opacity: main ? 0.95 : 0.6}, line: {color: main ? "#aaa" : COLORS[colorIdx % 10], width: main ? 2 : 1}});
+    if (main && nn <= 20) traces.push({type: "scatter3d", mode: "text", x: pts.map(p => p.q[0]), y: pts.map(p => p.q[1]), z: pts.map(p => p.q[2]), text: pts.map(p => String(p.i)), textfont: {size: 11}, hoverinfo: "skip", showlegend: false});
+  };
+  centroidTrace(name, H, true, 0);
+  let ci = 1; for (const m of names) if (view.shown.has(m)) { const Hm = hyps[genericName(m, opKey)]; if (Hm) centroidTrace(m, Hm, false, ci++); }
+  // component arrows
+  const comps = [];
+  if (view.arrows) {
+    const V = f16(g.reads.v), nc = V.shape[1], layer = sel.key.split(".")[1];
+    const basis = P.axes;  // orthonormal basis of the marginal fit's span
+    for (let c = 0; c < nc; c++) {
+      const vc = new Float64Array(k); let nrm = 0; for (let j = 0; j < k; j++) { vc[j] = V.data[j * nc + c]; nrm += vc[j] * vc[j]; } nrm = Math.sqrt(nrm) || 1;
+      let ov = 0; for (const w of basis) { const d = dot(w, vc) / nrm; ov += d * d; } ov = Math.sqrt(ov);
+      if (ov < view.amin) continue;
+      const d3 = axes.map(w => dot(w, vc) / nrm), l3 = Math.hypot(...d3) || 1e-9;
+      const tip = d3.map(x => x / l3 * ov * R);
+      const kind = g.reads.kinds[c], site = `layers.${layer}.${kind.endsWith("_proj") && ["q_proj", "k_proj", "v_proj"].includes(kind) ? "self_attn" : "mlp"}.${kind}`;
+      comps.push({site, id: g.reads.ids[c], ov, tip, kind});
+    }
+    const kindColor = {q_proj: "#1f77b4", k_proj: "#2ca02c", v_proj: "#ff7f0e", gate_proj: "#1f77b4", up_proj: "#ff7f0e"};
+    for (const c of comps) traces.push({type: "scatter3d", mode: "lines", x: [0, c.tip[0]], y: [0, c.tip[1]], z: [0, c.tip[2]], line: {color: kindColor[c.kind] || "#333", width: 3}, hoverinfo: "skip", showlegend: false});
+    traces.push({type: "scatter3d", mode: "markers", name: "components", x: comps.map(c => c.tip[0]), y: comps.map(c => c.tip[1]), z: comps.map(c => c.tip[2]), marker: {size: 4, symbol: "diamond", color: comps.map(c => kindColor[c.kind] || "#333")},
+      text: comps.map(c => `${c.site} #${c.id}<br>overlap ${c.ov.toFixed(3)}, angle ${(Math.acos(Math.min(1, c.ov)) * 180 / Math.PI).toFixed(1)}°`), hoverinfo: "text", customdata: comps.map((_, i) => i)});
+  }
+  const lim = R * 1.05;
+  const ax = {range: [-lim, lim], zeroline: true, showspikes: false};
+  Plotly.newPlot("view3d", traces, {margin: {l: 0, r: 0, t: 0, b: 0}, height: 480, showlegend: true, legend: {font: {size: 10}, x: 0, y: 1},
+    scene: {aspectmode: "cube", xaxis: {...ax, title: "PC1"}, yaxis: {...ax, title: "PC2"}, zaxis: {...ax, title: "PC3"}}}, {displaylogo: false});
+  document.getElementById("view3d").on("plotly_click", ev => {
+    const pt = ev.points[0]; if (!pt || pt.data.name !== "components") return;
+    const c = comps[pt.customdata];
+    document.getElementById("compinfo").innerHTML = `<b>${c.site}</b> component <b>${c.id}</b> — overlap with the ${name} subspace ${c.ov.toFixed(3)}, first principal angle ${(Math.acos(Math.min(1, c.ov)) * 180 / Math.PI).toFixed(1)}° (arrow length = overlap × cloud radius; direction = its read vector on these 3 PCs)`;
+  });
+}
+
 for (const id of ["op", "stream", "score", "vmax", "log", "emin"]) document.getElementById(id).onchange = () => { renderMap(); renderDetail(); };
 document.getElementById("status").textContent = `${D.keys.length} read points, ${HYPS.length} hypotheses`;
 renderMap();
