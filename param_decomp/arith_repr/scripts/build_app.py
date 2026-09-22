@@ -27,10 +27,11 @@ def rounded(x: Any, nd: int = 3) -> Any:
 LABELS = {
     "add": {"res": "a+b", "cross": "a-b"},
     "sub": {"res": "a-b", "cross": "a+b"},
-    "both": {"res": "a±b", "cross": "a∓b"},
+    "both": {"res": "a+b|a-b", "cross": "a-b|a+b"},
 }
 """Display names of the result quantities per operation set (`res` = a op b, `cross` = the
-other operation's result, a negative control); the analysis keeps the generic names."""
+other operation's result, a negative control); on the pooled set the name spells out what the
+quantity is on addition | subtraction prompts. The analysis keeps the generic names."""
 
 
 def relabel(x: Any, table: dict[str, str]) -> Any:
