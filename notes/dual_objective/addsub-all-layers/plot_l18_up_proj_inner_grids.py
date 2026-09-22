@@ -5,17 +5,17 @@ hidden-recon run (-05) on the left of the page and its outputs-only twin on the 
     python plot_l18_up_proj_inner_grids.py     # reads ~/out/pod-backup/*/ab_grids
                                                # writes plots/l18_up_proj_inner_grids.png
 
-Rows are the slow-eval steps at which a grid was written; each row shows that step's six
-most active components side by side. A grid is the component's normalized inner
+Rows are the slow-eval steps at which a grid was written; each row shows that step's ten
+most active components side by side, nothing else drawn on them. A grid is the component's normalized inner
 activation `(x · V_c) / ‖V_c‖` at the answer position, over every `a + b =` prompt with
 a, b in 1..100 (a up, b right). "Most active" is the prompt-mean CI of the OUTPUT head at
 that position (`mean_ci`), the one CI both runs carry, ranked among the components the
 grid saved (only those have grids). Rankings are per step, so a column is a rank, not a
-fixed component: the component id sits over each grid.
+fixed component. A row with fewer than ten saved components leaves the rest blank.
 
 Inner activations are signed, so each grid uses a diverging scale centred on zero,
-symmetric to that grid's own largest magnitude (printed under the id). Magnitudes are not
-comparable across grids; the patterns are.
+symmetric to that grid's own largest magnitude. Magnitudes are not comparable across
+grids; the patterns are.
 
 GRID DECODING IS COMPUTE: run it through SLURM, not on a login node — each snapshot is
 ~100 MB of JSON.
@@ -37,7 +37,7 @@ from matplotlib.colors import LinearSegmentedColormap  # noqa: E402
 HERE = Path(__file__).resolve().parent
 BACKUP = Path.home() / "out" / "pod-backup"
 SITE = "layers.18.mlp.up_proj"
-TOP = 6
+TOP = 10
 
 SURFACE, INK, INK_2 = "#fcfcfb", "#0b0b0b", "#52514e"
 # Diverging blue <-> red through the reference palette's neutral gray; equal steps per arm
@@ -102,48 +102,43 @@ def main() -> None:
     ]
     steps = sorted(set(runs[0][1]) | set(runs[1][1]))
 
-    plt.rcParams.update({"font.size": 7, "figure.facecolor": SURFACE})
-    n_cols = 2 * a.top + 1  # a spacer column between the two runs
-    fig = plt.figure(figsize=(1.1 * n_cols + 0.8, 1.3 * len(steps) + 1.2))
-    gs = fig.add_gridspec(
-        len(steps),
-        n_cols,
-        width_ratios=[1] * a.top + [0.35] + [1] * a.top,
-        left=0.06,
-        right=0.995,
-        top=1 - 0.95 / fig.get_figheight(),
-        bottom=0.55 / fig.get_figheight(),
-        hspace=0.55,
-        wspace=0.12,
-    )
+    plt.rcParams.update({"font.size": 8, "figure.facecolor": SURFACE})
+    # Placed in inches, so the gap between maps is a fixed few pixels at any page size.
+    cell, gap, spacer = 0.72, 0.03, 0.35  # 0.03 in = 4.5 px at 150 dpi
+    left, right, head, foot = 0.72, 0.1, 0.55, 0.3
+    half_w = a.top * cell + (a.top - 1) * gap
+    width = left + 2 * half_w + spacer + right
+    height = head + len(steps) * cell + (len(steps) - 1) * gap + foot
+    fig = plt.figure(figsize=(width, height))
+
+    def box(x_in: float, y_top_in: float) -> tuple[float, float, float, float]:
+        return (x_in / width, 1 - (y_top_in + cell) / height, cell / width, cell / height)
+
     for half, (title, per_step) in enumerate(runs):
-        col0 = half * (a.top + 1)
+        x0 = left + half * (half_w + spacer)
+        fig.text(
+            x0 / width,
+            1 - 0.12 / height,
+            title,
+            fontsize=11,
+            fontweight="semibold",
+            color=INK,
+            va="top",
+        )
         for row, step in enumerate(steps):
+            y = head + row * (cell + gap)
             comps = per_step.get(step)
-            for rank in range(a.top):
-                ax = fig.add_subplot(gs[row, col0 + rank])
-                ax.set_xticks([])
-                ax.set_yticks([])
-                for spine in ax.spines.values():
-                    spine.set_color("#d9d8d4")
-                if comps is None or rank >= len(comps):
-                    ax.set_facecolor(SURFACE)
-                    for spine in ax.spines.values():
-                        spine.set_visible(False)
-                    if rank == 0:
-                        what = "not reached yet" if comps is None else "no components saved"
-                        ax.text(0.02, 0.5, what, transform=ax.transAxes, color=INK_2, va="center")
-                    elif comps is not None and rank == len(comps):
-                        ax.text(
-                            0.02,
-                            0.5,
-                            f"only {len(comps)} saved",
-                            transform=ax.transAxes,
-                            color=INK_2,
-                            va="center",
-                        )
-                    continue
-                cid, mci, grid = comps[rank]
+            if comps is None:
+                fig.text(
+                    (x0 + 0.05) / width,
+                    1 - (y + cell / 2) / height,
+                    "not reached yet",
+                    color=INK_2,
+                    va="center",
+                )
+                continue
+            for rank, (_, _, grid) in enumerate(comps):
+                ax = fig.add_axes(box(x0 + rank * (cell + gap), y))
                 lim = float(np.abs(grid).max()) or 1.0
                 ax.imshow(
                     grid,
@@ -152,44 +147,24 @@ def main() -> None:
                     vmin=-lim,
                     vmax=lim,
                     interpolation="nearest",
-                    aspect="equal",
+                    aspect="auto",
                 )
-                ax.set_title(f"c{cid}  CI {mci:.2f}\n±{lim:.3g}", fontsize=6.5, color=INK, pad=2)
+                ax.set_axis_off()
             if half == 0:
                 fig.text(
-                    0.005,
-                    (gs[row, 0].get_position(fig).y0 + gs[row, 0].get_position(fig).y1) / 2,
+                    0.08 / width,
+                    1 - (y + cell / 2) / height,
                     f"step\n{step:,}",
                     ha="left",
                     va="center",
-                    fontsize=8,
                     color=INK,
                 )
-        x0 = gs[0, col0].get_position(fig).x0
-        fig.text(
-            x0,
-            1 - 0.35 / fig.get_figheight(),
-            title,
-            fontsize=11,
-            fontweight="semibold",
-            color=INK,
-            va="top",
-        )
-    fig.suptitle(
-        f"{a.site}: inner activations of the {a.top} most active components (by output-head mean CI)",
-        x=0.06,
-        y=1 - 0.05 / fig.get_figheight(),
-        ha="left",
-        va="top",
-        fontsize=9,
-        color=INK_2,
-    )
     fig.text(
-        0.06,
-        0.12 / fig.get_figheight(),
-        "Each grid: inner activation (x·V)/‖V‖ at the answer position over a + b = prompts, a (1-100) up, "
-        "b (1-100) right. Diverging scale centred on 0 (blue < 0 < red), symmetric to each grid's own ±max; "
-        "ranks are per step, so a column is a rank, not a fixed component.",
+        left / width,
+        0.1 / height,
+        f"{a.site}: top {a.top} components per step by output-head mean CI. Each map: inner "
+        "activation (x·V)/‖V‖ at the answer position, a (1-100) up, b (1-100) right; diverging "
+        "scale centred on 0 (blue < 0 < red), each map scaled to its own ±max.",
         fontsize=7,
         color=INK_2,
         va="bottom",
