@@ -1,5 +1,5 @@
 """Per read point, the geometry the applet's 3-D view needs: the class centroids (in read
-coordinates) of every hypothesis at every position and operation set, and the read point's
+coordinates) of every kept hypothesis at every position and operation set, and the read point's
 alive reads. One lazily loaded file per read point.
 
     python -m param_decomp.arith_repr.scripts.export_geometry --resid <harvest dir>
@@ -76,7 +76,9 @@ def export_key(key: str, resid: Path, analysis: Path, labels_all: Labels, out: P
                 _, sv, Wt = np.linalg.svd(h.Phi.T @ Yc, full_matrices=False)
                 pure[h.name] = (Wt.T, sv**2 / max(float(np.sum(Yc**2)), 1e-300))
             hyps: dict[str, Any] = {}
-            for fit in op["fits"]:  # every hypothesis, absent codes included
+            for fit in op["fits"]:
+                if not fit["dim_S"]:
+                    continue
                 W, energy = pure[fit["name"]]
                 cls, n = classes_of(fit, labels)
                 valid = cls >= 0
