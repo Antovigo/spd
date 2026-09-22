@@ -32,6 +32,9 @@ One filtering run:
         ab_grids/index.html         the applet (open over file://)
         ab_grids/manifest.js        slice index
         ab_grids/<op>_pos<p>.js     one (operation, position) slice
+        dataset/                    activations of the original and the rounded-CI decomposed
+                                    model over the pool (`scripts/collect_dataset.py`, its own
+                                    README.md)
 """
 
 import secrets
@@ -103,6 +106,10 @@ class CIFilterOutputs:
     @property
     def grids(self) -> Path:
         return self.root / "ab_grids"
+
+    @property
+    def dataset(self) -> Path:
+        return self.root / "dataset"
 
     def create(self) -> None:
         """Fail closed on an existing filter dir."""
