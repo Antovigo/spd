@@ -77,7 +77,7 @@
 <h3>Detail panel (click a cell)</h3>
 <p>Header: <i>outside read basis</i> = share of ‖x‖² the alive reads cannot see; <i>joint</i> = share explained by all hypotheses; <i>kept</i> = by generalising directions only; the null R² threshold. <b>Hypotheses table</b>: dim H (hypothesis dimension), marginal/unique/generalising energy, dim S, #reads (alive components reading it above the null), held-out R² of the top directions. <b>Separability</b>: green = some alive read lands in the row subspace at the 99.9th percentile of the random-direction null while sitting at that null on the column subspace, <i>and</i> vice versa; red = not separable. Per-kind clusters below. A hypothesis no component reads is <i>unread</i> and left out of the graph. Caution: at attention read points (k ≤ ~60) the null is nearly degenerate and most hypotheses come out unread — a limit of the null, not evidence. <b>add vs sub cosines</b>: principal cosines between the subspaces fitted on each operation (≈1 = same code). <b>Clusters</b>: connected components of “not separable”, with the union dimension and the singular values of the stacked class centroids (two equal values then a drop = one plane).</p>
 <h3>3-D view</h3>
-<p>Pick a value and a period. The class centroids of that code (one per residue, or per value for lin/direct; hsv colour = class, label = class, grey line joins consecutive classes) are shown on the top-3 principal components of the code's <i>full marginal fit</i> (PCA of its class centroids, prompt-count weighted); the bar chart above is the centroid spectrum, so you can see how much of the code's centroid energy the three axes miss. Other hypotheses can be overlaid (collapsible list; the cluster mates — those not linearly separable from the selected code by the alive reads — are on by default): their centroids are projected on the <i>same</i> axes and do not influence them, which shows how much they would leak into a readout along these directions. <b>Component arrows</b>: every alive read of this read point's kinds (q/k/v or gate/up), drawn from the origin along its read vector projected on the three PCs, with length = its overlap with the code's subspace (‖P_S V_c‖/‖V_c‖) times the cloud radius — a component reading the code fully reaches the cloud, an orthogonal one has zero length. The slider hides overlaps below a minimum. Click an arrow tip for the matrix, the component index and its first principal angle with the subspace (arccos of the overlap).</p>
+<p>Pick a value and a period. The class centroids of that code (one per residue, or per value for lin/direct; label = class; hsv colour by class when it is the only code displayed, one colour per code otherwise; line joins consecutive classes) are shown on the top-3 principal components of the code's <i>full marginal fit</i> (PCA of its class centroids, prompt-count weighted). The origin (×) is the zero of the post-RMSNorm residual in read coordinates — the reads have no bias, so it is the reference the model uses; the open circle is the mean activation over the prompts, and the PCA axes are taken about that mean while the coordinates are not re-centred; the bar chart above is the centroid spectrum, so you can see how much of the code's centroid energy the three axes miss. Other hypotheses can be overlaid (collapsible list; the cluster mates — those not linearly separable from the selected code by the alive reads — are on by default): their centroids are projected on the <i>same</i> axes and do not influence them, which shows how much they would leak into a readout along these directions. <b>Component arrows</b>: every alive read of this read point's kinds (colour = matrix: blue q/gate, green k, orange v/up), drawn from the origin along its read vector projected on the three PCs, with length = its overlap with the code's subspace (‖P_S V_c‖/‖V_c‖) times the cloud radius — a component reading the code fully reaches the cloud, an orthogonal one has zero length. The slider hides overlaps below a minimum. Click an arrow tip for the matrix, the component index and its first principal angle with the subspace (arccos of the overlap).</p>
 <h3>Suggested tour (ops = add)</h3>
 <p>Column <code>a+b:10</code>, position 4: empty until <code>mlp_in.19</code>, then solid. Click <code>mlp_in.19</code> → dim S 2/4, a residue circle in the scatter. <code>mlp_in.24</code> → 4/4, the digit family {2,5,10,20} red among themselves, green against {25,100} and 50. <code>mlp_in.28</code> → each period its own cluster, <code>a+b:100</code> in the teens of dimensions. Switch to <code>sub</code>: same periods for <code>a-b</code>, one big red cluster with <code>b:lin</code>.</p>
 </div></div>
@@ -317,13 +317,14 @@ function draw3d() {
   let R = 1e-9;
   const centroidTrace = (hname, Hn, main, colorIdx) => {
     const Cn = f16(Hn.centroids), nn = Cn.shape[0], pts = [];
-    for (let i = 0; i < nn; i++) if (Hn.counts[i] > 0) { const vec = Cn.data.subarray(i * k, (i + 1) * k); const q = proj(Float64Array.from(vec, (x, j) => x - (main ? P.mean[j] : P.mean[j]))); pts.push({i, q, n: Hn.counts[i]}); }
+    for (let i = 0; i < nn; i++) if (Hn.counts[i] > 0) { const vec = Cn.data.subarray(i * k, (i + 1) * k); const q = proj(vec); pts.push({i, q, n: Hn.counts[i]}); }
     pts.sort((a, b) => a.i - b.i);
     pts.forEach(p => R = Math.max(R, Math.hypot(...p.q)));
-    const col = main ? pts.map(p => hsv(p.i, nn)) : COLORS[colorIdx % 10];
+    const alone = main && ![...view.shown].some(m => hyps[genericName(m, opKey)]);
+    const col = alone ? pts.map(p => hsv(p.i, nn)) : COLORS[colorIdx % 10];
     traces.push({type: "scatter3d", mode: view.lines && nn <= 100 ? "lines+markers" : "markers", name: hname, x: pts.map(p => p.q[0]), y: pts.map(p => p.q[1]), z: pts.map(p => p.q[2]),
       text: pts.map(p => `${hname} class ${p.i} (n=${p.n})`), hoverinfo: "text",
-      marker: {size: main ? 6 : 3.5, color: col, opacity: main ? 0.95 : 0.6}, line: {color: main ? "#aaa" : COLORS[colorIdx % 10], width: main ? 2 : 1}});
+      marker: {size: main ? 6 : 3.5, color: col, opacity: main ? 0.95 : 0.6}, line: {color: alone ? "#aaa" : COLORS[colorIdx % 10], width: main ? 2 : 1}});
     if (main && nn <= 20) traces.push({type: "scatter3d", mode: "text", x: pts.map(p => p.q[0]), y: pts.map(p => p.q[1]), z: pts.map(p => p.q[2]), text: pts.map(p => String(p.i)), textfont: {size: 11}, hoverinfo: "skip", showlegend: false});
   };
   centroidTrace(name, H, true, 0);
@@ -343,10 +344,16 @@ function draw3d() {
       comps.push({site, id: g.reads.ids[c], ov, tip, kind});
     }
     const kindColor = {q_proj: "#1f77b4", k_proj: "#2ca02c", v_proj: "#ff7f0e", gate_proj: "#1f77b4", up_proj: "#ff7f0e"};
-    for (const c of comps) traces.push({type: "scatter3d", mode: "lines", x: [0, c.tip[0]], y: [0, c.tip[1]], z: [0, c.tip[2]], line: {color: kindColor[c.kind] || "#333", width: 3}, hoverinfo: "skip", showlegend: false});
+    const seenKinds = new Set();
+    for (const c of comps) { const first = !seenKinds.has(c.kind); seenKinds.add(c.kind); traces.push({type: "scatter3d", mode: "lines", name: "reads: " + c.kind, legendgroup: c.kind, showlegend: first, x: [0, c.tip[0]], y: [0, c.tip[1]], z: [0, c.tip[2]], line: {color: kindColor[c.kind] || "#333", width: 3}, hoverinfo: "skip"}); }
     traces.push({type: "scatter3d", mode: "markers", name: "components", x: comps.map(c => c.tip[0]), y: comps.map(c => c.tip[1]), z: comps.map(c => c.tip[2]), marker: {size: 4, symbol: "diamond", color: comps.map(c => kindColor[c.kind] || "#333")},
       text: comps.map(c => `${c.site} #${c.id}<br>overlap ${c.ov.toFixed(3)}, angle ${(Math.acos(Math.min(1, c.ov)) * 180 / Math.PI).toFixed(1)}°`), hoverinfo: "text", customdata: comps.map((_, i) => i)});
   }
+  // the origin is the zero of the post-norm residual; mark the prompt mean too
+  const mq = proj(P.mean);
+  traces.push({type: "scatter3d", mode: "markers", name: "origin (zero activation)", x: [0], y: [0], z: [0], marker: {size: 5, color: "#000", symbol: "x"}, hoverinfo: "name"});
+  traces.push({type: "scatter3d", mode: "markers", name: "mean activation", x: [mq[0]], y: [mq[1]], z: [mq[2]], marker: {size: 5, color: "#000", symbol: "circle-open"}, hoverinfo: "name"});
+  R = Math.max(R, Math.hypot(...mq));
   const lim = R * 1.05;
   const ax = {range: [-lim, lim], zeroline: true, showspikes: false};
   Plotly.newPlot("view3d", traces, {margin: {l: 0, r: 0, t: 0, b: 0}, height: 480, showlegend: true, legend: {font: {size: 10}, x: 0, y: 1},

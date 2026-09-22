@@ -6,7 +6,8 @@ alive reads. One lazily loaded file per read point.
         --analysis <dir> --out <app dir>/geom --keys attn_in.18 mlp_in.18
 
 Writes `<out>/<key>.js` = `window.registerArithGeom("<key>", {...})` with float16 arrays as
-base64 (`{"shape": [...], "f16": "..."}`)."""
+base64 (`{"shape": [...], "f16": "..."}`). Centroids are raw means of the read-basis
+coordinates (no centring), so the applet's origin is the zero of the post-norm residual."""
 
 import argparse
 import base64
@@ -56,7 +57,7 @@ def export_key(key: str, resid: Path, analysis: Path, labels_all: Labels, out: P
         for op_name, op in pos["ops"].items():
             mask = op_masks[op_name] & keep_prompt
             labels = labels_all.subset(mask)
-            Y = Y_all[mask] - Y_all[mask].mean(axis=0)
+            Y = Y_all[mask]  # NOT centred: the origin is the zero of the post-norm residual
             hyps: dict[str, Any] = {}
             for fit in op["fits"]:
                 if not fit["dim_S"]:
