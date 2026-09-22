@@ -31,6 +31,12 @@
   .sep td, .sep th { border: 1px solid #eee; padding: 1px 3px; text-align: center; }
   .sep td.y { background: #cfe8cf; }
   .sep td.n { background: #f2c9c9; }
+  #help-btn { margin-left: auto; width: 26px; height: 26px; border-radius: 50%; border: 1px solid #999; background: #fff; font-weight: 600; cursor: pointer; }
+  #help { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.35); z-index: 10; }
+  #help .box { background: #fff; max-width: 860px; max-height: 88vh; overflow: auto; margin: 5vh auto; padding: 18px 26px; border-radius: 6px; box-shadow: 0 4px 24px rgba(0,0,0,0.3); font-size: 13px; }
+  #help h3 { margin: 14px 0 4px; } #help h2 { margin: 0 0 6px; }
+  #help .close { float: right; cursor: pointer; font-size: 18px; }
+  #help code { background: #f3f3f3; padding: 0 3px; }
 </style>
 </head>
 <body>
@@ -42,7 +48,29 @@
   <label><input id="log" type="checkbox"> log colour</label>
   <label>hide hypotheses with generalising energy below <input id="emin" type="number" step="0.001" value="0.005" style="width:64px"> everywhere</label>
   <span class="muted" id="status"></span>
+  <button id="help-btn" title="What am I looking at?">?</button>
 </header>
+<div id="help"><div class="box">
+<span class="close" id="help-close">&times;</span>
+<h2>Integer representations — how to read this applet</h2>
+<p>Decomposition <code>p-ba5a0c05</code> step 40000. The <b>read basis</b> at a read point is the span of the input vectors <code>V</code> of the CI filter's alive components that read the residual there (q/k/v at <code>attn_in.l</code>, gate/up at <code>mlp_in.l</code>); <code>k</code> is its dimension. Every number is about the residual projected on that basis. Method: <code>notes/arith_representations/plan.md</code>; findings: <code>report_representations.md</code>.</p>
+<h3>Hypotheses (columns)</h3>
+<p>A hypothesis is a subspace of functions of the prompt. <code>Q:tau</code> = the <i>pure period-tau</i> code of quantity <code>Q</code> (functions of <code>Q mod tau</code> orthogonal to every coarser period and to the linear part; periods = divisors of 100). <code>Q:lin</code> = the linear (magnitude) part. <code>Q:direct</code> = the non-periodic remainder (only when the range exceeds 100). Quantities: <code>a</code>, <code>b</code>, <code>op</code>, <code>res</code> (= a+b on addition, a−b on subtraction), <code>cross</code> (the other one, a negative control). Result hypotheses are interaction-only (orthogonal to every function of <code>a</code> alone and of <code>b</code> alone), so a linear result code is credited to <code>a:lin + b:lin</code>. <code>Q:100</code> is token identity for the operands and cannot generalise by construction. Columns are drawn per position only for hypotheses fitted there; a quantity is only sought once its tokens are visible (0 BOS, 1 a, 2 op, 3 b, 4 =).</p>
+<h3>ops</h3>
+<p><code>add</code> / <code>sub</code>: fits on one operation's prompts (subtraction only <code>a ≥ b</code>). <code>both</code>: pooled; <code>b</code> becomes the op-conditional <code>b@add</code>/<code>b@sub</code>, <code>res</code> is the pooled <code>a op b</code>, <code>op:2</code> exists. Positions 0–1 precede the operator, so only the pooled fit exists there and is shown under every setting.</p>
+<h3>score (cell colour)</h3>
+<ul>
+<li><b>generalising energy</b> — fraction of the read-basis energy at (read point, position) carried by the fitted directions that predict prompts whose <code>a</code> or <code>b</code> value was <i>held out</i> (5 folds, 20 % of values each), above the 99.9th percentile of a label-permutation null. The presence score.</li>
+<li><b>unique energy</b> — energy lost when this hypothesis is dropped from the joint fit; the conservative number when hypotheses overlap (subtraction, pooled set).</li>
+<li><b>marginal energy</b> — the raw fit, generalising or not (token identity shows up here).</li>
+<li><b>dim S_H</b> — number of kept (generalising) directions: 2 = one Fourier pair / circle, 4 = both harmonics of mod 5 or mod 10.</li>
+</ul>
+<p><b>max</b> sets colour saturation; <b>log colour</b> for the 0.5–2 % codes; the <b>energy filter</b> hides columns that never reach that generalising energy.</p>
+<h3>Detail panel (click a cell)</h3>
+<p>Header: <i>outside read basis</i> = share of ‖x‖² the alive reads cannot see; <i>joint</i> = share explained by all hypotheses; <i>kept</i> = by generalising directions only; the null R² threshold. <b>Hypotheses table</b>: dim H (hypothesis dimension), marginal/unique/generalising energy, dim S, #reads (alive components reading it above the null), held-out R² of the top directions. <b>Separability</b>: green = some alive read lands in the row subspace at the 99.9th percentile of the random-direction null while sitting at that null on the column subspace, <i>and</i> vice versa; red = not separable. Per-kind clusters below. A hypothesis no component reads is <i>unread</i> and left out of the graph. Caution: at attention read points (k ≤ ~60) the null is nearly degenerate and most hypotheses come out unread — a limit of the null, not evidence. <b>add vs sub cosines</b>: principal cosines between the subspaces fitted on each operation (≈1 = same code). <b>Clusters</b>: connected components of “not separable”, with the union dimension and the singular values of the stacked class centroids (two equal values then a drop = one plane). <b>Scatter</b>: class centroids of every member (one per residue, or per value for lin/direct) on the cluster's principal axes; colour = member, label = residue, grey line joins consecutive residues, size ∝ prompt count, hover for the centroid norm (magnitude is kept).</p>
+<h3>Suggested tour (ops = add)</h3>
+<p>Column <code>res:10</code>, position 4: empty until <code>mlp_in.19</code>, then solid. Click <code>mlp_in.19</code> → dim S 2/4, a residue circle in the scatter. <code>mlp_in.24</code> → 4/4, the digit family {2,5,10,20} red among themselves, green against {25,100} and 50. <code>mlp_in.28</code> → each period its own cluster, <code>res:100</code> in the teens of dimensions. Switch to <code>sub</code>: same periods, one big red cluster with <code>b:lin</code>.</p>
+</div></div>
 <main>
   <div id="map"></div>
   <div id="detail"><span class="muted">Click a cell.</span></div>
@@ -210,6 +238,9 @@ function renderDetail() {
   if (ay) ay.onchange = () => { axY = +ay.value; renderDetail(); };
 }
 
+document.getElementById("help-btn").onclick = () => document.getElementById("help").style.display = "block";
+document.getElementById("help-close").onclick = () => document.getElementById("help").style.display = "none";
+document.getElementById("help").onclick = e => { if (e.target.id === "help") e.target.style.display = "none"; };
 for (const id of ["op", "score", "vmax", "log", "emin"]) document.getElementById(id).onchange = () => { renderMap(); renderDetail(); };
 document.getElementById("status").textContent = `${D.keys.length} read points, ${HYPS.length} hypotheses`;
 renderMap();
