@@ -71,15 +71,26 @@ def export_key(key: str, resid: Path, analysis: Path, labels_all: Labels, out: P
             if op_name == "both":
                 quantities = pooled_quantities(quantities)
             Yc = Y - Y.mean(axis=0)
-            pure: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+            pure: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
             for h in build_hypotheses(labels, quantities):
-                _, sv, Wt = np.linalg.svd(h.Phi.T @ Yc, full_matrices=False)
-                pure[h.name] = (Wt.T, sv**2 / max(float(np.sum(Yc**2)), 1e-300))
+                fitted = h.Phi.T @ Yc  # (m, k)
+                _, sv, Wt = np.linalg.svd(fitted, full_matrices=False)
+                # Pure-part class centroids IN FUNCTION SPACE: the class means of the pure
+                # part's fitted signal `Phi Phi^T Y`; exactly orthogonal to every coarser period
+                # (projecting raw centroids onto the fitted directions is not — the noise
+                # directions of the fit overlap the coarser periods' planes).
+                cls = h.classes(labels)
+                valid = cls >= 0
+                counts = np.bincount(cls[valid], minlength=h.n_classes)
+                ind = np.zeros((labels.n, h.n_classes))
+                ind[np.flatnonzero(valid), cls[valid]] = 1.0
+                weights = (h.Phi.T @ ind) / np.maximum(counts, 1)[None, :]  # (m, n_classes)
+                pure[h.name] = (Wt.T, sv**2 / max(float(np.sum(Yc**2)), 1e-300), weights.T @ fitted)
             hyps: dict[str, Any] = {}
             for fit in op["fits"]:
                 if not fit["dim_S"]:
                     continue
-                W, energy = pure[fit["name"]]
+                W, energy, pure_centroids = pure[fit["name"]]
                 cls, n = classes_of(fit, labels)
                 valid = cls >= 0
                 counts = np.bincount(cls[valid], minlength=n)
@@ -89,6 +100,7 @@ def export_key(key: str, resid: Path, analysis: Path, labels_all: Labels, out: P
                     "counts": counts.tolist(),
                     "centroids": f16(sums / np.maximum(counts, 1)[:, None]),
                     "dirs": f16(W),
+                    "pure_centroids": f16(pure_centroids),
                     "dir_energy": [round(float(e), 6) for e in energy],
                     "kept": fit["kept"],
                 }
