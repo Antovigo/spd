@@ -82,9 +82,12 @@ function colour(v, vmax, log) {
   return `rgb(${r},${g},${b})`;
 }
 
+// Positions before the operator token (0-1) are fitted on the pooled set only: the activation
+// is identical on both operations there, so the pooled fit stands in for `add`/`sub`.
+function opsOf(pos, op) { return pos.ops[op] || (pos.ops.both && !("add" in pos.ops) ? pos.ops.both : null); }
 function cell(key, p, op, name) {
   const pos = D.records[key].positions[p]; if (!pos) return null;
-  const o = pos.ops[op]; if (!o) return null;
+  const o = opsOf(pos, op); if (!o) return null;
   return o.fits.find(f => f.name === name) || null;
 }
 
@@ -106,7 +109,8 @@ function renderMap() {
       const v = f ? f[score] : null;
       const cls = (i === 0 ? "pos" : (HYPS[i - 1].split(":")[0] !== n.split(":")[0] ? "q" : "")) +
         (sel && sel.key === key && sel.p === p && sel.name === n ? " sel" : "");
-      const tip = f ? `${key} pos ${p} ${n}: gen ${f.generalising.toFixed(4)} uniq ${f.unique.toFixed(4)} marg ${f.marginal.toFixed(4)} dimS ${f.dim_S}/${f.dim_hypothesis}` : "";
+      const pooledOnly = f && !("add" in D.records[key].positions[p].ops) && op !== "both";
+      const tip = f ? `${key} pos ${p} ${n}: gen ${f.generalising.toFixed(4)} uniq ${f.unique.toFixed(4)} marg ${f.marginal.toFixed(4)} dimS ${f.dim_S}/${f.dim_hypothesis}${pooledOnly ? " (pooled fit: operator not yet visible)" : ""}` : "";
       h += `<td class='${cls}' style='background:${colour(v, score === "dim_S" ? vmax * 50 : vmax, log)}' title='${tip}' data-key='${key}' data-p='${p}' data-n='${n}'></td>`;
     });
     h += "</tr>";
@@ -150,10 +154,11 @@ function scatter(cl, w, h) {
 function renderDetail() {
   if (!sel) return;
   const op = document.getElementById("op").value;
-  const rec = D.records[sel.key], pos = rec.positions[sel.p], o = pos && pos.ops[op];
+  const rec = D.records[sel.key], pos = rec.positions[sel.p], o = pos && opsOf(pos, op);
+  const pooledOnly = pos && !("add" in pos.ops) && op !== "both";
   const el = document.getElementById("detail");
   if (!o) { el.innerHTML = "<span class='muted'>not analysed</span>"; return; }
-  let h = `<b>${sel.key}</b> position ${sel.p} (${POS_LABEL[sel.p]}), ops ${op}, k=${rec.k}, reads ${rec.n_reads}<br>`;
+  let h = `<b>${sel.key}</b> position ${sel.p} (${POS_LABEL[sel.p]}), ops ${pooledOnly ? "both (pooled fit — the operator is not visible at this position)" : op}, k=${rec.k}, reads ${rec.n_reads}<br>`;
   h += `<span class='muted'>outside read basis ${(100 * pos.outside_basis_energy).toFixed(1)}% of ||x||² · joint hypotheses ${(100 * o.joint_energy).toFixed(1)}% · kept subspaces ${(100 * o.explained_by_kept).toFixed(1)}% · null R² threshold ${o.null_threshold.toFixed(3)}</span>`;
   const emin = parseFloat(document.getElementById("emin").value) || 0;
   const readsBy = {}; if (o.separability.all) o.separability.all.names.forEach((n, i) => readsBy[n] = o.separability.all.reads_count[i]);
