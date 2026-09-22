@@ -3,8 +3,8 @@
 outputs-only twin on ONE shared log colour scale. Two figures, because the two quantities
 live at different cadences:
 
-    python plot_block_ci_heatmaps.py     # writes plots/block_alive_l0_heatmap.png
-                                         #        plots/block_total_ci_heatmap.png
+    python plot_block_ci_heatmaps.py     # writes plots/block_alive_l0_heatmap{,_linear}.png
+                                         #        plots/block_total_ci_heatmap{,_linear}.png
 
 1. ALIVE COMPONENTS (L0), fast-eval cadence (every 500 steps). `eval/l0/0.0_<site>` is the
    per-token count of components with CI > 0 on the target stream, output head; a block's
@@ -16,9 +16,12 @@ live at different cadences:
    sum of CI values per prompt — but only on the addsub `+` grid, and only when a grid was
    written.
 
-The colour scale spans the smallest positive to the largest value across BOTH runs, so
-nothing clips. A log scale cannot place zero: zero cells are drawn in neutral gray and
-counted in the footnote. Steps a run has not reached yet are left blank.
+Each figure comes in a LOG and a LINEAR colour scale, both shared by the two runs and
+spanning the full range, so nothing clips. The log scale runs from the smallest positive to
+the largest value; it cannot place zero, so zero cells are drawn in neutral gray and
+counted in the footnote. The linear scale runs from 0 to the largest value, so colour stays
+proportional to magnitude and zero needs no special case. Steps a run has not reached yet
+are left blank.
 
 GRID DECODING IS COMPUTE: run it through SLURM, not on a login node.
 """
@@ -34,7 +37,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
-from matplotlib.colors import LogNorm  # noqa: E402
+from matplotlib.colors import LogNorm, Normalize  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 BACKUP = Path.home() / "out" / "pod-backup"
@@ -94,13 +97,22 @@ def edges(steps: list[int]) -> np.ndarray:
 
 
 def render(
-    data: list[tuple[str, list[int], np.ndarray]], label: str, title: str, cadence: str, out: Path
+    data: list[tuple[str, list[int], np.ndarray]],
+    label: str,
+    title: str,
+    cadence: str,
+    out: Path,
+    log: bool,
 ) -> None:
-    positive = np.concatenate([g[g > 0] for _, _, g in data])
-    norm = LogNorm(vmin=float(positive.min()), vmax=float(positive.max()))
+    top = float(max(g.max() for _, _, g in data))
     cmap = plt.get_cmap("viridis").copy()
-    cmap.set_bad(ZERO)
     n_zero = sum(int((g <= 0).sum()) for _, _, g in data)
+    if log:
+        positive = np.concatenate([g[g > 0] for _, _, g in data])
+        norm = LogNorm(vmin=float(positive.min()), vmax=top)
+        cmap.set_bad(ZERO)
+    else:
+        norm = Normalize(vmin=0.0, vmax=top)
 
     plt.rcParams.update({"font.size": 9, "figure.facecolor": SURFACE, "axes.facecolor": SURFACE})
     fig, axes = plt.subplots(1, 2, figsize=(13, 6.2), sharey=True)
@@ -108,7 +120,7 @@ def render(
         mesh = ax.pcolormesh(
             edges(steps),
             np.arange(N_BLOCKS + 1) - 0.5,
-            np.ma.masked_less_equal(grid, 0),
+            np.ma.masked_less_equal(grid, 0) if log else grid,
             cmap=cmap,
             norm=norm,
             shading="flat",
@@ -136,18 +148,25 @@ def render(
     # `axes` is undone by the later subplots_adjust and ends up over the right panel.
     fig.subplots_adjust(left=0.06, right=0.88, top=0.88, bottom=0.12, wspace=0.06)
     cbar = fig.colorbar(mesh, cax=fig.add_axes((0.9, 0.12, 0.013, 0.76)))
-    cbar.set_label(f"{label} (log scale, shared by both runs)", color=INK_2)
+    scale = "log" if log else "linear"
+    cbar.set_label(f"{label} ({scale} scale, shared by both runs)", color=INK_2)
     cbar.outline.set_visible(False)
     fig.suptitle(title, x=0.06, ha="left", color=INK, fontsize=12, fontweight="semibold")
-    note = (
-        f"Colour spans the full positive range across both runs: {norm.vmin:.3g} to {norm.vmax:.3g}, "
-        "no clipping."
-    )
-    note += (
-        f" {n_zero} zero cell(s), which a log scale cannot place, are drawn gray."
-        if n_zero
-        else " No zero cells."
-    )
+    if log:
+        note = (
+            f"Log colour scale spanning the full positive range across both runs: "
+            f"{norm.vmin:.3g} to {norm.vmax:.3g}, no clipping."
+        )
+        note += (
+            f" {n_zero} zero cell(s), which a log scale cannot place, are drawn gray."
+            if n_zero
+            else " No zero cells."
+        )
+    else:
+        note = (
+            f"Linear colour scale from 0 to the largest value across both runs ({norm.vmax:.3g}), "
+            "no clipping."
+        )
     fig.text(0.06, 0.012, note, fontsize=7.5, color=INK_2)
     out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out, dpi=150)
@@ -163,20 +182,25 @@ def main() -> None:
     ap.add_argument("-o", "--out-dir", type=Path, default=HERE / "plots")
     a = ap.parse_args()
 
-    render(
-        [(name, *l0_by_block(a.backup / rid / "metrics.jsonl")) for name, rid in RUNS],
-        "Alive components per block (L0, CI > 0)",
-        "Alive components per block, target stream, output head",
-        "fast eval, every 500",
-        a.out_dir / "block_alive_l0_heatmap.png",
-    )
-    render(
-        [(name, *total_ci_by_block(a.backup / rid / "ab_grids")) for name, rid in RUNS],
-        "Total CI per block (sum of mean CI)",
-        "Total CI per block on the addsub grid, output head",
-        "slow eval, every 4000",
-        a.out_dir / "block_total_ci_heatmap.png",
-    )
+    l0 = [(name, *l0_by_block(a.backup / rid / "metrics.jsonl")) for name, rid in RUNS]
+    total_ci = [(name, *total_ci_by_block(a.backup / rid / "ab_grids")) for name, rid in RUNS]
+    for log, suffix in ((True, ""), (False, "_linear")):
+        render(
+            l0,
+            "Alive components per block (L0, CI > 0)",
+            "Alive components per block, target stream, output head",
+            "fast eval, every 500",
+            a.out_dir / f"block_alive_l0_heatmap{suffix}.png",
+            log,
+        )
+        render(
+            total_ci,
+            "Total CI per block (sum of mean CI)",
+            "Total CI per block on the addsub grid, output head",
+            "slow eval, every 4000",
+            a.out_dir / f"block_total_ci_heatmap{suffix}.png",
+            log,
+        )
 
 
 if __name__ == "__main__":
