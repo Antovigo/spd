@@ -21,6 +21,8 @@ from param_decomp.arith_repr.hypotheses import (
     QUANTITIES_BY_POSITION,
     Labels,
     build_hypotheses,
+    display,
+    generic,
     pooled_quantities,
     supported,
 )
@@ -32,8 +34,8 @@ def f16(a: np.ndarray) -> dict[str, Any]:
     return {"shape": list(arr.shape), "f16": base64.b64encode(arr.tobytes()).decode()}
 
 
-def classes_of(fit: dict[str, Any], labels: Labels) -> tuple[np.ndarray, int]:
-    values = labels.quantity(fit["quantity"])
+def classes_of(fit: dict[str, Any], labels: Labels, op_name: str) -> tuple[np.ndarray, int]:
+    values = labels.quantity(generic(fit["quantity"], op_name))
     ok = supported(values)
     if fit["kind"] == "periodic":
         tau = int(fit["period"])
@@ -85,13 +87,17 @@ def export_key(key: str, resid: Path, analysis: Path, labels_all: Labels, out: P
                 ind = np.zeros((labels.n, h.n_classes))
                 ind[np.flatnonzero(valid), cls[valid]] = 1.0
                 weights = (h.Phi.T @ ind) / np.maximum(counts, 1)[None, :]  # (m, n_classes)
-                pure[h.name] = (Wt.T, sv**2 / max(float(np.sum(Yc**2)), 1e-300), weights.T @ fitted)
+                pure[display(h.name, op_name)] = (
+                    Wt.T,
+                    sv**2 / max(float(np.sum(Yc**2)), 1e-300),
+                    weights.T @ fitted,
+                )
             hyps: dict[str, Any] = {}
             for fit in op["fits"]:
                 if not fit["dim_S"]:
                     continue
                 W, energy, pure_centroids = pure[fit["name"]]
-                cls, n = classes_of(fit, labels)
+                cls, n = classes_of(fit, labels, op_name)
                 valid = cls >= 0
                 counts = np.bincount(cls[valid], minlength=n)
                 sums = np.zeros((n, Y.shape[1]))

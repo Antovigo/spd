@@ -9,6 +9,7 @@ prompts it is fitted on and re-evaluated on other prompts through its residue-we
 values were never seen exactly as the hypothesis says it should."""
 
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 
@@ -195,6 +196,37 @@ def additive_space(labels: Labels) -> np.ndarray:
 
 
 INTERACTION_QUANTITIES = ("res", "cross", "sum", "diff")
+
+DISPLAY_NAMES: dict[str, dict[str, str]] = {
+    "add": {"res": "a+b", "cross": "a-b"},
+    "sub": {"res": "a-b", "cross": "a+b"},
+    "both": {"res": "a+b|a-b", "cross": "a-b|a+b"},
+}
+"""What the result quantities are on each operation set: `res` = a op b, `cross` = the other
+operation's result (a negative control). The code works with the generic names; every
+written output (analysis JSON/NPZ, geometry, applet) carries the explicit ones, spelt
+`<on add>|<on sub>` on the pooled set."""
+
+
+def display(x: Any, op_name: str) -> Any:
+    """Rename `res`/`cross` to the explicit name in a hypothesis name (`res:10` -> `a+b:10`),
+    a quantity, or recursively in the keys and values of a nested structure."""
+    table = DISPLAY_NAMES[op_name]
+    if isinstance(x, str):
+        head, sep, tail = x.partition(":")
+        return table.get(head, head) + sep + tail
+    if isinstance(x, list):
+        return [display(v, op_name) for v in x]
+    if isinstance(x, dict):
+        return {display(k, op_name): display(v, op_name) for k, v in x.items()}
+    return x
+
+
+def generic(name: str, op_name: str) -> str:
+    """Inverse of `display` for one name."""
+    head, sep, tail = name.partition(":")
+    inverse = {v: k for k, v in DISPLAY_NAMES[op_name].items()}
+    return inverse.get(head, head) + sep + tail
 
 
 def pure_parts(

@@ -24,28 +24,6 @@ def rounded(x: Any, nd: int = 3) -> Any:
     return x
 
 
-LABELS = {
-    "add": {"res": "a+b", "cross": "a-b"},
-    "sub": {"res": "a-b", "cross": "a+b"},
-    "both": {"res": "a+b|a-b", "cross": "a-b|a+b"},
-}
-"""Display names of the result quantities per operation set (`res` = a op b, `cross` = the
-other operation's result, a negative control); on the pooled set the name spells out what the
-quantity is on addition | subtraction prompts. The analysis keeps the generic names."""
-
-
-def relabel(x: Any, table: dict[str, str]) -> Any:
-    """Rename `res`/`cross` in every hypothesis name (`res:10` -> `a+b:10`) and quantity."""
-    if isinstance(x, str):
-        head, sep, tail = x.partition(":")
-        return table.get(head, head) + sep + tail
-    if isinstance(x, list):
-        return [relabel(v, table) for v in x]
-    if isinstance(x, dict):
-        return {relabel(k, table): relabel(v, table) for k, v in x.items()}
-    return x
-
-
 def compact(record: dict[str, Any]) -> dict[str, Any]:
     """Drop the bulky per-direction arrays the applet does not draw; round the rest."""
     out: dict[str, Any] = {
@@ -74,31 +52,19 @@ def compact(record: dict[str, Any]) -> dict[str, Any]:
                 }
                 for f in op["fits"]
             ]
-            table = LABELS[op_name]
             ops[op_name] = {
                 "joint_energy": op["joint_energy"],
                 "explained_by_kept": op["explained_by_kept"],
                 "null_threshold": op["null_threshold"],
                 "y_spectrum": [round(x, 5) for x in op["y_spectrum"][:20]],
-                "fits": [
-                    {
-                        **f,
-                        "name": relabel(f["name"], table),
-                        "quantity": relabel(f["quantity"], table),
-                    }
-                    for f in fits
-                ],
-                "separability": relabel(rounded(op["separability"]), table),
-                "clusters": relabel(rounded(op["clusters"]), table),
+                "fits": fits,
+                "separability": rounded(op["separability"]),
+                "clusters": rounded(op["clusters"]),
             }
         out["positions"][p] = {
             "outside_basis_energy": pos["outside_basis_energy"],
             "ops": ops,
-            # Compared across operations: `res` is a+b on add vs a-b on sub.
-            "add_vs_sub_cosines": relabel(
-                rounded(pos.get("add_vs_sub_cosines", {})),
-                {"res": "result(a+b|a-b)", "cross": "cross(a-b|a+b)"},
-            ),
+            "add_vs_sub_cosines": rounded(pos.get("add_vs_sub_cosines", {})),
         }
     return out
 

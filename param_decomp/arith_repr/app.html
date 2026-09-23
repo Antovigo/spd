@@ -127,13 +127,6 @@ function colour(v, vmax, log) {
   const c = RDPU[i].map((a, j) => Math.round(a + f * (RDPU[i + 1][j] - a)));
   return `rgb(${c[0]},${c[1]},${c[2]})`;
 }
-const LABELS = {add: {res: "a+b", cross: "a-b"}, sub: {res: "a-b", cross: "a+b"}, both: {res: "a+b|a-b", cross: "a-b|a+b"}};
-function genericName(name, op) {  // display name -> the analysis's generic name (res/cross)
-  const [q, rest] = [name.split(":")[0], name.slice(name.indexOf(":"))];
-  for (const [g, d] of Object.entries(LABELS[op])) if (d === q) return g + rest;
-  return name;
-}
-
 // Positions before the operator token (0-1) are fitted on the pooled set only: the activation
 // is identical on both operations there, so the pooled fit stands in for `add`/`sub`.
 function opsOf(pos, op) { return pos.ops[op] || (pos.ops.both && !("add" in pos.ops) ? pos.ops.both : null); }
@@ -305,8 +298,8 @@ function draw3d() {
   const opKey = ("add" in pos.ops) ? op : "both";
   const g = GEOM[sel.key]; if (!g || !g.positions[sel.p] || !g.positions[sel.p][opKey]) return;
   const hyps = g.positions[sel.p][opKey];
-  const name = view.q + ":" + view.per, gname = genericName(name, opKey);
-  const H = hyps[gname]; if (!H) { document.getElementById("view3d").innerHTML = "<span class='muted'>no geometry for " + name + "</span>"; return; }
+  const name = view.q + ":" + view.per;
+  const H = hyps[name]; if (!H) { document.getElementById("view3d").innerHTML = "<span class='muted'>no geometry for " + name + "</span>"; return; }
   // Class centroids of a hypothesis: raw means, or the pure-part centroids (class means of the
   // pure part's fitted signal — exactly orthogonal to every coarser period, the linear part and
   // the mean; exported by export_geometry as `pure_centroids`).
@@ -336,7 +329,7 @@ function draw3d() {
     for (let i = 0; i < nn; i++) if (Hn.counts[i] > 0) { const vec = Cn.data.subarray(i * k, (i + 1) * k); const q = proj(vec); pts.push({i, q, n: Hn.counts[i]}); }
     pts.sort((a, b) => a.i - b.i);
     pts.forEach(p => R = Math.max(R, Math.hypot(...p.q)));
-    const alone = main && ![...view.shown].some(m => hyps[genericName(m, opKey)]);
+    const alone = main && ![...view.shown].some(m => hyps[m]);
     const col = alone ? pts.map(p => hsv(p.i, nn)) : COLORS[colorIdx % 10];
     traces.push({type: "scatter3d", mode: view.lines && nn <= 100 ? "lines+markers" : "markers", name: hname, x: pts.map(p => p.q[0]), y: pts.map(p => p.q[1]), z: pts.map(p => p.q[2]),
       text: pts.map(p => `${hname} class ${p.i} (n=${p.n})`), hoverinfo: "text",
@@ -344,7 +337,7 @@ function draw3d() {
     if (main && nn <= 20) traces.push({type: "scatter3d", mode: "text", x: pts.map(p => p.q[0]), y: pts.map(p => p.q[1]), z: pts.map(p => p.q[2]), text: pts.map(p => String(p.i)), textfont: {size: 11}, hoverinfo: "skip", showlegend: false});
   };
   centroidTrace(name, H, true, 0);
-  let ci = 1; for (const m of names) if (view.shown.has(m)) { const Hm = hyps[genericName(m, opKey)]; if (Hm) centroidTrace(m, Hm, false, ci++); }
+  let ci = 1; for (const m of names) if (view.shown.has(m)) { const Hm = hyps[m]; if (Hm) centroidTrace(m, Hm, false, ci++); }
   // component arrows
   const comps = [];
   if (view.arrows) {

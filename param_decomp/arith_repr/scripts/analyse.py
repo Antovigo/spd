@@ -19,6 +19,7 @@ from param_decomp.arith_repr.hypotheses import (
     QUANTITIES_BY_POSITION,
     Labels,
     ValueFolds,
+    display,
     pooled_quantities,
 )
 from param_decomp.arith_repr.resid import load_read_input
@@ -177,16 +178,18 @@ def analyse_key(
                         )
                     op_record["clusters"] = geoms
             for f in fits:
-                arrays[f"p{position}/{op_name}/S/{f.hypothesis.name}"] = f.S.astype(np.float32)
-            pos_record["ops"][op_name] = op_record
+                name = display(f.hypothesis.name, op_name)
+                arrays[f"p{position}/{op_name}/S/{name}"] = f.S.astype(np.float32)
+            pos_record["ops"][op_name] = display(op_record, op_name)
         if "add" in per_op_fits and "sub" in per_op_fits:
             angles: dict[str, list[float]] = {}
             sub_by = {f.hypothesis.name: f for f in per_op_fits["sub"]}
             for f in per_op_fits["add"]:
                 g = sub_by.get(f.hypothesis.name)
                 if g is not None:
+                    # `res` is a+b on add vs a-b on sub: the comparison is named accordingly.
                     angles[f.hypothesis.name] = principal_angles(f.S, g.S).tolist()
-            pos_record["add_vs_sub_cosines"] = angles
+            pos_record["add_vs_sub_cosines"] = display(angles, "both")
         record["positions"][str(position)] = pos_record
         print(f"{key} p{position}: {time.time() - t0:.0f}s", flush=True)
     (out_dir / f"{key}.json").write_text(json.dumps(record))
