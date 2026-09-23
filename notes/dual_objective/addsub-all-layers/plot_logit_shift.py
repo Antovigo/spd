@@ -9,8 +9,10 @@ model minus its logit in the original model — taken PRE-RMSNORM (the residual 
 last block dotted with the unembedding row), so a uniform rescaling of the residual shows up
 instead of being normalized away.
 
-Two panels: the pre-norm shift, and the ordinary post-norm shift for reference. A decomposed
-model that reproduces the original exactly sits on 0 in both.
+Two panels, both pre-norm: the shift (decomposed − original) and the ratio
+(decomposed / original). A decomposed model that reproduces the original exactly sits on 0
+in the first and 1 in the second. The ratio is well defined here because the top-1 token's
+pre-norm logit is positive on every prompt (min 5.05 over the pool).
 """
 
 import json
@@ -58,12 +60,19 @@ def main() -> None:
     )
     fig, axes = plt.subplots(1, 2, figsize=(12, 4.6))
     panels = (
-        ("pre", "Pre-RMSNorm logit shift", "decomposed − original (pre-norm)"),
-        ("post", "Post-RMSNorm logit shift (reference)", "decomposed − original (post-norm)"),
+        ("diff", "Pre-RMSNorm logit shift", "decomposed − original", 0.0),
+        ("ratio", "Pre-RMSNorm logit ratio", "decomposed / original", 1.0),
     )
-    for ax, (prefix, title, xlabel) in zip(axes, panels, strict=True):
+    for ax, (kind, title, xlabel, unity) in zip(axes, panels, strict=True):
         shifts = [
-            (n, c[f"{prefix}_decomposed"] - c[f"{prefix}_original"], col) for n, c, _, col in runs
+            (
+                n,
+                c["pre_decomposed"] - c["pre_original"]
+                if kind == "diff"
+                else c["pre_decomposed"] / c["pre_original"],
+                col,
+            )
+            for n, c, _, col in runs
         ]
         lo = min(np.percentile(s, 0.5) for _, s, _ in shifts)
         hi = max(np.percentile(s, 99.5) for _, s, _ in shifts)
@@ -73,7 +82,7 @@ def main() -> None:
                 shift, bins=bins, histtype="step", lw=1.6, color=color, label=name, density=True
             )
             ax.axvline(np.median(shift), color=color, lw=1, ls=":", zorder=0)
-        ax.axvline(0, color=INK_2, lw=0.8, zorder=0)
+        ax.axvline(unity, color=INK_2, lw=0.8, zorder=0)
         ax.set_title(title, loc="left", color=INK, fontsize=10, fontweight="semibold")
         ax.set_xlabel(xlabel)
         ax.set_ylabel("density")
@@ -84,15 +93,16 @@ def main() -> None:
     lines = []
     for name, cols, _meta, _ in runs:
         s = cols["pre_decomposed"] - cols["pre_original"]
-        q = cols["post_decomposed"] - cols["post_original"]
+        r = cols["pre_decomposed"] / cols["pre_original"]
         lines.append(
-            f"{name}: pre-norm median {np.median(s):+.3g}, mean {s.mean():+.3g}, "
-            f"5-95% [{np.percentile(s, 5):+.3g}, {np.percentile(s, 95):+.3g}]; "
-            f"post-norm median {np.median(q):+.3g}"
+            f"{name}: shift median {np.median(s):+.3g}, 5-95% [{np.percentile(s, 5):+.3g}, "
+            f"{np.percentile(s, 95):+.3g}]; ratio median {np.median(r):.3g}, "
+            f"5-95% [{np.percentile(r, 5):.3g}, {np.percentile(r, 95):.3g}]"
         )
     meta0 = runs[0][2]
     fig.suptitle(
-        "Logit of the original model's top-1 next token: rounded-mask decomposed vs original",
+        "Pre-RMSNorm logit of the original model's top-1 next token: rounded-mask decomposed "
+        "vs original",
         x=0.06,
         ha="left",
         color=INK,
