@@ -3,7 +3,7 @@
 by wall time on the SAME hardware. One figure per stream:
 
     python plot_outputs_only_vs_dual.py     # writes plots/outputs_only_vs_dual/
-                                            #   outputs_only_vs_dual_{target,nontarget}.png
+                                            #   outputs_only_vs_dual_{target,nontarget}_{by_step,by_time}.png
 
 Three output-head metrics per stream: CI-masked KL (`ce_kl/kl_ci_masked`, the arm
 CIMaskedReconLoss emits in a single-role run), the fresh-PGD adversarial recon eval
@@ -133,95 +133,101 @@ def render(
     runs: list[tuple[str, dict[int, dict[str, Any]], dict[int, float], str]],
     oo_last: int,
     out: Path,
+    by_time: bool,
 ) -> None:
-    fig, axes = plt.subplots(len(metrics), 2, figsize=(11, 9), sharey="row")
+    """One figure, one x-axis: training step or A100 wall time (step and time live in
+    separate files so either can be shown on its own)."""
+    fig, axes = plt.subplots(len(metrics), 1, figsize=(6.5, 9))
     for row, (metric, title, logy) in enumerate(metrics):
         key = f"eval/{prefix}{metric}"
         sparse = metric == PGD
-        for col in range(2):
-            ax = axes[row, col]
-            for name, rows, clk, color in runs:
-                pts = series(rows, key)
-                if sparse and prefix:
-                    # Step-0 non-target PGD is ~0 by construction (zero-U init: the
-                    # components carry nothing, so no mask can break the recon). On a log
-                    # axis it reads as -inf and stretches the row down to 1e-3.
-                    pts = [(s, v) for s, v in pts if s > 0]
-                if col == 1:
-                    pts = [(t, v) for s, v in pts if (t := at_time(clk, s)) is not None]
-                if not pts:
-                    continue
-                xs, ys = zip(*pts, strict=True)
-                ax.plot(
-                    xs,
-                    ys,
-                    color=color,
-                    lw=1.5,
-                    label=name,
-                    marker="o" if sparse else None,
-                    ms=5,
-                    mec=SURFACE,
-                    mew=1.5,
-                )
-            if logy:
-                ax.set_yscale("log")
-                # Labelled ticks at 1-2-5: several rows span under a decade, where the
-                # default locator labels a single power of ten.
-                ax.yaxis.set_major_locator(LogLocator(base=10, subs=(1.0, 2.0, 5.0)))
-                ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g}"))
-                ax.yaxis.set_minor_formatter(NullFormatter())
-            ax.grid(True, color=GRID, lw=0.6)
-            ax.set_axisbelow(True)
-            if col == 0:
-                ax.set_title(title, loc="left", color=INK, fontsize=10, fontweight="semibold")
-                for step, what in ((10_000, "imp-min ramp ends"), (30_000, "γ anneal starts")):
-                    ax.axvline(step, color=INK_2, lw=0.6, ls=":", zorder=0)
-                    if row == 0:
-                        ax.annotate(
-                            what,
-                            (step, 1),
-                            xycoords=("data", "axes fraction"),
-                            xytext=(3, -2),
-                            textcoords="offset points",
-                            va="top",
-                            fontsize=7.5,
-                            color=INK_2,
-                        )
-        axes[row, 0].set_xlim(0, 40_000)
-    axes[-1, 0].set_xlabel("Training step")
-    axes[-1, 1].set_xlabel("Training wall time, hours on 4x A100 (compile excluded)")
-    axes[0, 0].set_title("vs step", loc="right", color=INK_2, fontsize=9)
-    axes[0, 1].set_title("vs wall time", loc="right", color=INK_2, fontsize=9)
+        ax = axes[row]
+        for name, rows, clk, color in runs:
+            pts = series(rows, key)
+            if sparse and prefix:
+                # Step-0 non-target PGD is ~0 by construction (zero-U init: the
+                # components carry nothing, so no mask can break the recon). On a log
+                # axis it reads as -inf and stretches the row down to 1e-3.
+                pts = [(s, v) for s, v in pts if s > 0]
+            if by_time:
+                pts = [(t, v) for s, v in pts if (t := at_time(clk, s)) is not None]
+            if not pts:
+                continue
+            xs, ys = zip(*pts, strict=True)
+            ax.plot(
+                xs,
+                ys,
+                color=color,
+                lw=1.5,
+                label=name,
+                marker="o" if sparse else None,
+                ms=5,
+                mec=SURFACE,
+                mew=1.5,
+            )
+        if logy:
+            ax.set_yscale("log")
+            # Labelled ticks at 1-2-5: several rows span under a decade, where the
+            # default locator labels a single power of ten.
+            ax.yaxis.set_major_locator(LogLocator(base=10, subs=(1.0, 2.0, 5.0)))
+            ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g}"))
+            ax.yaxis.set_minor_formatter(NullFormatter())
+        ax.grid(True, color=GRID, lw=0.6)
+        ax.set_axisbelow(True)
+        ax.set_title(title, loc="left", color=INK, fontsize=10, fontweight="semibold")
+        if not by_time:
+            for step, what in ((10_000, "imp-min ramp ends"), (30_000, "γ anneal starts")):
+                ax.axvline(step, color=INK_2, lw=0.6, ls=":", zorder=0)
+                if row == 0:
+                    ax.annotate(
+                        what,
+                        (step, 1),
+                        xycoords=("data", "axes fraction"),
+                        xytext=(3, -2),
+                        textcoords="offset points",
+                        va="top",
+                        fontsize=7.5,
+                        color=INK_2,
+                    )
+        if not by_time:
+            axes[row].set_xlim(0, 40_000)
+    axes[-1].set_xlabel(
+        "Training wall time, hours on 4x A100 (compile excluded)" if by_time else "Training step"
+    )
 
-    handles, labels = axes[0, 0].get_legend_handles_labels()
+    handles, labels = axes[0].get_legend_handles_labels()
     fig.legend(
         handles,
         labels,
         loc="upper left",
-        bbox_to_anchor=(0.06, 0.975),
+        bbox_to_anchor=(0.1, 0.945),
         ncol=2,
         frameon=False,
         fontsize=9,
         labelcolor=INK,
     )
     fig.suptitle(
-        f"Output-head metrics, {headline}: with vs without the hidden-activation recon",
-        x=0.06,
-        y=0.995,
+        f"Output-head metrics, {headline}\nwith vs without the hidden-activation recon, "
+        f"by {'wall time' if by_time else 'step'}",
+        x=0.1,
+        y=0.998,
         ha="left",
         color=INK,
-        fontsize=12,
+        fontsize=11,
         fontweight="semibold",
     )
-    note = (
-        f"Outputs-only (p-ba5a0c0f) shown through step {oo_last:,} of 40,000. Dual = -05 (p-ba5a0c05); its "
-        "wall-time axis uses -07's measured A100 clock (same compute graph, same pod), because -05 itself\n"
-        "ran on H100s and its own clock would credit it with a hardware speed-up. Log scale on the top two rows."
+    note = f"Outputs-only (p-ba5a0c0f) to step {oo_last:,} of 40,000; dual = -05 (p-ba5a0c05).\n"
+    note += (
+        "The axis is -07's measured A100 clock for the dual run (same compute graph, same pod):\n"
+        "-05 itself ran on H100s, whose clock would credit it with a hardware speed-up.\n"
+        if by_time
+        else ""
     )
+    note += "Log scale on the top two rows."
     if prefix:
         note += "\nPGD omits step 0, where it is ~0 by construction (zero-U init: components carry nothing yet)."
-    fig.text(0.06, 0.005, note, fontsize=7.5, color=INK_2, va="bottom")
-    fig.tight_layout(rect=(0, 0.03, 1, 0.955))
+    fig.text(0.1, 0.005, note, fontsize=7.5, color=INK_2, va="bottom")
+    fig.tight_layout(rect=(0, 0.06, 1, 0.925))
     out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out, dpi=150)
     plt.close(fig)
@@ -260,8 +266,9 @@ def main() -> None:
         }
     )
     for suffix, headline, prefix, metrics in STREAMS:
-        out = a.out_dir / f"outputs_only_vs_dual_{suffix}.png"
-        render(headline, prefix, metrics, runs, oo_last, out)
+        for by_time, axis in ((False, "by_step"), (True, "by_time")):
+            out = a.out_dir / f"outputs_only_vs_dual_{suffix}_{axis}.png"
+            render(headline, prefix, metrics, runs, oo_last, out, by_time)
     print(
         f"outputs-only through step {oo_last}; A100 h at 40k: dual {clk_dual[40000]:.1f}, "
         f"outputs-only {clk_oo[oo_last] * 40000 / oo_last:.1f} projected"
