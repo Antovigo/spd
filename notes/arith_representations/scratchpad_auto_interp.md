@@ -160,3 +160,68 @@ periods/values each component handles, and the reason for each claim; heavy use 
   * largest attention share of a result code: +0.17 (L20 attention, mod 4, mlp_in.20 add).
   * 66 of 902 L20-31 `=` writers are sub-only; op flags exist at every layer L0-L19 (2-8 per
     layer) and at L22, L26, L28-31.
+
+## Mechanism clustering + group arrangements (2026-09-23, started)
+
+Antoine: cluster components into mechanisms (same representation shifted over several layers;
+ten comps one per residue of x mod 10; residues split across adjacent layers; generally an
+elementary task distributed over comps). Think about validity conditions. Mid-turn addition:
+"at each layer, how are the representations of the same group arranged relative to each other,
+and how do the matrices transform this arrangement".
+
+Frame. Group representation G = (position p, op o, quantity q in {a, b, res}, modulus tau | 100).
+Arrangement of G at residual point t = the tau centred class means mu_t(v) of the RAW residual
+(additive frame: writes add exactly; norms only rescale what readers see). Fourier: mu_t <-> Z_t(k),
+k multiples of 100/tau. Writer c (rank 1, U_c) contributes C_c = m_c (x) U_c, m_c(v) = class means
+of its gated write coefficient w = inner*[CI>0.01] over q mod tau. Sum over a sublayer's writers
+~ actual step of the arrangement (faithfulness check).
+
+Arrangement descriptors: code share (between-class var / stream var), spectrum per k, circularity
+per k (singular values of [Re Z, Im Z]), shift-equivariance (circulant fraction of the class-mean
+Gram), effective dim (participation ratio), ordered vs equidistant (corr of distance with cyclic
+distance). Transitions t->t': per k, <Z,Z'> -> amplify / erase / phase rotation (= residue shift)
+/ new direction (moved); new frequencies (power at k absent before = nonlinearity).
+
+A set S is ONE mechanism on G only if:
+ 1. same variable, read side: each member's gated write m_c is a function of q mod tau
+    (R^2 of w on q mod tau high; tau the coarsest period explaining it) — same p, same op scope.
+ 2. same target, write side: members write into the same arrangement: their joint write C_S is
+    a clean arrangement of G (purity of the joint write = between-class / total, per prompt).
+ 3. a binding reason, one of
+    P  partition: supports (residues where |m_c| is large) near-disjoint, same block or adjacent
+       layers, joint write resolves more classes than any member (nearest-centroid), every
+       member needed (leave-one-out loses its classes);
+    A  accumulation / successive shift: contributions coherent (Frobenius cos of C_c > 0,
+       same residue pattern, overlapping directions) — may span layers; kappa = B(S)/sum B(c)
+       > 1 = constructive;
+    M  move: a later member erases (cos < 0 with) what earlier members wrote while writing the
+       same pattern elsewhere.
+ 4. common consumers: the downstream readers of the members read the JOINT arrangement
+    (reader's projection of C_S is a clean function of q mod tau with contributions from
+    several members) — otherwise "same variable computed twice", not one mechanism.
+Pitfalls: nested periods (a%2 inside a%10: CRT pairs are linked, not merged); ON != write
+(use w, not CI); non-causal CI at early positions (gates can see op/b); large members can carry
+the purity of a set alone (leave-one-out); null = random same-size sets from the same
+(p, o, layer window).
+Data: mech/class_means.npy (job 12475).
+- GOTCHA: jobs submitted within ~1 min of editing a module sometimes ran the OLD file (NFS
+  attribute cache on the compute node): arrangements jobs 12491/12504 missed cos_prev / res_int.
+  Check outputs for the new columns; resubmit.
+- Findings that shaped the method:
+  * same-variable writers' contributions are near-orthogonal (|cos| q99 0.03-0.07, random-U
+    0.02-0.03; same-pattern pairs median |cos U| 0.02-0.06) -> direction-based "same
+    representation" grouping impossible; kappa ~ 1 for 94 % of groups.
+  * reader-share based joint consumption J was ill-conditioned (null q99 = 1.0) and relay R tiny
+    -> dropped as merge criteria, kept joint_consumers as a reported check (48 % pass).
+  * random-writer-set nulls on accuracy/groups are meaningless at deterministic positions (acc 1.0)
+    and at late `=` (every writer carries res) -> replaced by the support-overlap tiling null.
+  * final rule: code = block (MLP layer / head) of same-variable writers (+ adjacent-layer
+    tiling); mechanism = codes with CKA >= 0.7 (avg linkage); 8043 writers -> 1156 codes -> 682
+    mechanisms; 14 % of >=3-member codes tile better than random.
+  * arrangements: operand mod-10 simplex from the embedding, shape kept (CKA >= 0.97/step), MLP
+    steps move 10-50 % into new directions, attention ~0; cos with embed arrangement 0.25 at L15,
+    0.07 at L31. res mod 10 simplex from L21; res mod 100 dim 5 -> 30.
+  * res_int (res class means minus E[E[x|a]+E[x|b]|res]): sub has a period-100 interaction
+    circle (share 0.13-0.16) at `=` from L7, before the copy heads — unexplained.
+- Report: report_mechanisms.md (template mech_report_template.md, generator mech_report.py),
+  appendices mech_appendix/M<p>_<pos>_<op>.md; link added to report_auto_interp summary item 6.

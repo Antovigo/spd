@@ -80,6 +80,13 @@ cannot do. The descriptions below report what the components do *given* the CI g
 5. **Operator** ([§5](#5-what-the-operation-token-does)): a one-bit op flag is relayed at `=`
    from L0 to L19; on subtraction, sub-only components of the L15 MLP mirror b's code (b → −b);
    after that, the same result machinery produces a−b instead of a+b.
+6. **Mechanisms and arrangements** ([report_mechanisms.md](report_mechanisms.md)): the components
+   are grouped into 682 mechanisms (codes of one variable in one block, plus the same shape
+   written again at other layers), with the conditions and checks behind each grouping, and the
+   layer-by-layer geometry of the residue groups. The operand codes keep a simplex-like shape
+   while drifting to new directions at every MLP; writers of the same variable write in
+   near-orthogonal directions; the units digits of a and b are written by residue tilings at
+   L0 and again at L11-L14.
 
 ---
 
