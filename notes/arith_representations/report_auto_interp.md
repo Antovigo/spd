@@ -12,10 +12,12 @@ every component on every prompt/position, its inner activation `x·V`) and the o
 activations and weights. The claims are what the components *appear* to do; section 7 lists
 what each claim would need to be validated.
 
-Figures live with the run: `/mnt/nw/home/a.vigouroux/out/pod-backup/p-ba5a0c05/analysis/arith_repr/autointerp/figs/`
-(written as `figs/…` below). Code: `param_decomp/arith_repr/autointerp/`.
+Figures: [`figures_auto_interp/`](figures_auto_interp/) (copies of the ones written by
+`python -m param_decomp.arith_repr.autointerp.figures` to
+`/mnt/nw/home/a.vigouroux/out/pod-backup/p-ba5a0c05/analysis/arith_repr/autointerp/figs/`, next to
+the data they are drawn from). Code: `param_decomp/arith_repr/autointerp/`.
 
-![schematic](/mnt/nw/home/a.vigouroux/out/pod-backup/p-ba5a0c05/analysis/arith_repr/autointerp/figs/schematic.png)
+![schematic](figures_auto_interp/schematic.png)
 
 ## 0. How a component is described
 
@@ -45,7 +47,7 @@ lies in it (median 79 % of an o component's `V` energy is in one head).
 
 ## 1. How the operands are stored and built (positions `a` and `b`)
 
-![pos1 onsets](/mnt/nw/home/a.vigouroux/out/pod-backup/p-ba5a0c05/analysis/arith_repr/autointerp/figs/pos1_onsets.png)
+![pos1 onsets](figures_auto_interp/pos1_onsets.png)
 
 **The components at the operand token are value-bin detectors.** Of the 2,565 components whose
 main position is `a`, every one is on for a fixed set of values of `a` (the on-rate profile is
@@ -65,7 +67,7 @@ construction, a component along every period for which there are residue detecto
 what the residual-stream sweep saw as the `a:lin`, `a:5`, `a:10`, `a:50` codes.
 
 **Construction** (code attribution at the `a` token, addition prompts, period-10 code shown in
-`figs/code_attrib.png`, rows `@a`):
+[`code_attrib.png`](figures_auto_interp/code_attrib.png), rows `@a`):
 
 | read point | who writes the a code (share of the Fourier code) |
 |---|---|
@@ -82,7 +84,7 @@ L15H13 reads it. **Attention writes nothing measurable into the operand codes at
 token**: the codes are made locally by MLPs from the token embedding, and refreshed at L11-15
 right before being copied.
 
-Other things stored at the `b` token (`figs/grid_examples_pos3.png`): copies of `a`
+Other things stored at the `b` token ([`grid_examples_pos3.png`](figures_auto_interp/grid_examples_pos3.png)): copies of `a`
 (L1H24 attends `b`→`a` 0.54/0.72, L5H22 0.41; their o components are tuned to `a`), op flags
 (L0H10, L0H1 attend `b`→op 0.91/0.78), and **comparators of a and b**: `a == b` detectors
 (L2 q c53, L6 down c236, L18 down c141 — a thin diagonal, on both operations), "a ≈ b" and
@@ -91,7 +93,7 @@ Other things stored at the `b` token (`figs/grid_examples_pos3.png`): copies of 
 
 ## 2. How information moves between positions
 
-![attention heads](/mnt/nw/home/a.vigouroux/out/pod-backup/p-ba5a0c05/analysis/arith_repr/autointerp/figs/attention_heads.png)
+![attention heads](figures_auto_interp/attention_heads.png)
 
 Ranking heads by the activity of their alive o components at `=`, two heads do the
 operand transport and a handful carry the operator:
@@ -117,9 +119,9 @@ writes at `=` (section 3), and the attention writes into them are ≤ 0.02.
 
 ## 3. How the result is computed from the operands (at `=`, layers 15-24)
 
-![result switch](/mnt/nw/home/a.vigouroux/out/pod-backup/p-ba5a0c05/analysis/arith_repr/autointerp/figs/result_switch.png)
+![result switch](figures_auto_interp/result_switch.png)
 
-![curated grids](/mnt/nw/home/a.vigouroux/out/pod-backup/p-ba5a0c05/analysis/arith_repr/autointerp/figs/curated_grids.png)
+![curated grids](figures_auto_interp/curated_grids.png)
 
 The DFT of the `=` writes over the (a, b) torus (left, addition) shows three regimes:
 
@@ -137,10 +139,10 @@ The DFT of the `=` writes over the (a, b) torus (left, addition) shows three reg
    result (res R² 0.54 at L19-20, 0.86-0.91 from L21, additive share 0.07). Periods 50 and 100
    come first (L19), periods 10/20/5/2 by L20-21, then the mod-100 share keeps rising to L27.
 
-![digit plane](/mnt/nw/home/a.vigouroux/out/pod-backup/p-ba5a0c05/analysis/arith_repr/autointerp/figs/digit_plane.png)
+![digit plane](figures_auto_interp/digit_plane.png)
 
 The L17-L18 components that write the first result code, read on the units digits of a and b
-(addition; `figs/digit_plane.png`):
+(addition; [`digit_plane.png`](figures_auto_interp/digit_plane.png)):
 
 - **Parity by an XOR of ANDs.** L17 down c67 is on iff *a odd AND b odd*, L17 down c22 iff *a odd
   AND b even*; L18 down c4 is on iff *a + b is even* (all even/even cells, 0.5-0.8 of odd/odd
@@ -173,11 +175,11 @@ diagonal bands of width ~10-30; no component was found that is a clean "carry" d
 
 ## 4. How the result becomes the output token (at `=`, layers 20-31)
 
-![output families](/mnt/nw/home/a.vigouroux/out/pod-backup/p-ba5a0c05/analysis/arith_repr/autointerp/figs/output_families.png)
+![output families](figures_auto_interp/output_families.png)
 
 The late components at `=` are **result-window detectors**. On-set labels at L25-31
 (addition): res mod 100 (667 components), res (525), res//10 (115), res mod 10 (96). Examples
-(`figs/curated_grids.png`, `figs/grid_examples_L28-31.png`): L30 gate c399 on for a+b in
+([`curated_grids.png`](figures_auto_interp/curated_grids.png), [`grid_examples_L28-31.png`](figures_auto_interp/grid_examples_L28-31.png)): L30 gate c399 on for a+b in
 101..109 *and* 2..9 (res mod 100 in 1..9); L29 up c549 for res mod 100 in 20..28 (the tens
 digit 2); L29 gate c140 for res mod 100 in 80s; L28 up c218 for res mod 100 around 18..22; L22
 down c6 for a+b = 100 exactly; thin single lines (one value mod 100) at L28-31.
@@ -218,7 +220,7 @@ reverse) — keeps an "add"/"sub" flag in the residual. These flags are the top 
 
 **(b) Subtraction mirrors b's code at `=` (b → −b), in the L15 MLP.**
 
-![op mirror](/mnt/nw/home/a.vigouroux/out/pod-backup/p-ba5a0c05/analysis/arith_repr/autointerp/figs/op_mirror.png)
+![op mirror](figures_auto_interp/op_mirror.png)
 
 Take the class means of the `=` residual over b's 100 values, per operation, and their Fourier
 coefficient `z_op(k)` (a vector in R^4096, complex). If subtraction carried the same code,
@@ -237,7 +239,7 @@ the copied b code — as is on addition, mirrored on subtraction.
 **(c) After the mirror, the same machinery computes a − b.** Because the b code at `=` is
 mirrored on subtraction, a component that thresholds `f(a) + g(b)` into an a+b region on
 addition thresholds `f(a) + g(−b)` into the *a−b* region on subtraction. This is what the grids
-show (`figs/curated_grids.png`, `figs/grid_examples_L19-22.png`): the same L19-L30 components
+show ([`curated_grids.png`](figures_auto_interp/curated_grids.png), [`grid_examples_L19-22.png`](figures_auto_interp/grid_examples_L19-22.png)): the same L19-L30 components
 draw anti-diagonal stripes (a+b) on addition and diagonal stripes (a−b) on subtraction (L19 gate
 c0: a+b mod 50 → a−b; L21 up c13: res mod 10 in {5, 6, 7} on both; L22 down c6: a+b = 100 → a−b
 ≈ const; L30 gate c399: res mod 100 in 1..9 on both). On subtraction the writes move from the
