@@ -110,3 +110,20 @@ parity, k=5 -> mod 20, k=4 -> mod 25.
   L16-18 a+b writers 40/40 in phase. PITFALL: `Reads.energy` was a plain property recomputed over
   all 11.6k comps per access -> a per-comp loop hung for 12 min; now a cached_property.
 - Report written: report_auto_interp_vectors.md (figures copied to figures_auto_interp_vectors/).
+
+### 2026-09-23 night — settling the b mirror (Antoine: "can we settle it from the components + neurons? swiglu?")
+- The P/D (copy vs L15-MLP write) framing was wrong: D mixes the op-even and op-odd writes.
+  Split b's code at `=` into E = (add+sub)/2 and O = (add-sub)/2 in reader space: a mirror <=>
+  E on one axis (cos), O on one orthogonal axis (sin). L16 readers: E one-axis 0.68-0.94, O
+  0.96-0.99, |cos(e,w)| <= 0.18, phase(O)-phase(E) = ±72..93 deg, reflect 0.83-0.97.
+- Reflection centre c (b -> c - b) = 0 mod period at every harmonic (L16-19 readers).
+- O is 81-103 % the L15 MLP's write; E mostly the L15H13 copy, which the readers already see
+  near one axis; the MLP's even write cancels 56-160 % of its off-axis rest.
+- mirror_neurons.py (job 12628; first try 12623 died on bfloat16 -> import ml_dtypes): all L15
+  neurons. W_down @ act_b reproduces the stream step (cos 1.000). 2-3 neurons per harmonic carry
+  85-95 % of the odd write: k2 n12769 (down c35), n6456 (c19); k10 n9205 (c21), n9057 (c72),
+  n13193 (c67); k20 n7446 (c16), n11305 (c64). Two SwiGLU modes: A = gate is an op switch
+  (gate c72 / c9), up reads b; B = up is a signed op read (up c117, c34: u ~ -2 add / +1 sub),
+  gate reads b near the silu knee. Every odd neuron reads b at a quarter period (sin phase) ->
+  centre 0.
+- Earlier "c21 add-gated vs c72 sub-gated" was mislabelled (c21 is mode B, both ops, opposite sign).

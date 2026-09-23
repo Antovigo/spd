@@ -58,10 +58,14 @@ Code: `param_decomp/arith_repr/vectors/`. Data and full-size figures:
 5. **Operation.** The op token reaches `=` through L0H23 / L1H6 / L2H2. There it is a large
    flag direction: 45-70 % of |x|, re-written layer by layer by one-bit add-only / sub-only
    MLP components whose U lies along the flag. The flag gates the L15 MLP:
-   - add-gated components write `+code(b)`;
-   - sub-gated components write the same residue with the opposite sign;
-   - from L16 on, the readers see `b` **mirrored** (`b → −b`) on subtraction, while `a` is
-     unchanged;
+   - for each harmonic, 2-3 neurons (7 in total) write a new "sine axis" of b, reading b at
+     the quarter-period phase, with a sign set by the op;
+   - the op reaches these neurons either through the gate (one neuron switched on by add,
+     another by sub) or through up (a signed op read multiplying silu(gate(b))): SwiGLU's
+     gate × up product is what multiplies b's code by ±1;
+   - flipping only the sine axis while the cosine axis stays gives exactly `b → −b`
+     (reflection centre 0 at every harmonic), so from L16 on the readers see `b` **mirrored**
+     on subtraction while `a` is unchanged;
    - the same L16-L18 "adder" units then compute `a + (−b)`.
 
 ## Method (one paragraph per tool)
@@ -333,28 +337,94 @@ to the logit of token n. Here `G(k)` is the unembedding's own Fourier plane.
     (same/reflect at mlp_in.15: k10 0.99 / 0.53, k20 0.98 / 0.53).
   - From mlp_in.16 on they see it **reflected**: k2 0.15 / 0.78, k10 0.18 / 0.80, k20
     0.10 / 0.95. `a` stays the same on both ops (figure below).
-  - At the vector level, the L15 MLP writes a `b` code whose sign flips with the op.
-  - For example, L15 down c21 (add-gated, `b mod 10 = 7`) has a U that decodes to 7 in the
-    add frame.
-  - L15 down c72 (sub-gated, same residue 7) has a U that decodes to 2, the antipode.
-  - The same holds for c16 / c64 at `b mod 5` (U decodes to 1.3 vs 3.8).
-  - Seen by the L16 readers, the L15-MLP write `D` has opposite sign on add and sub (Re cos
-    −0.72 to −0.89 at k2 / k10 / k20). The copied code `P` is the same on both ops.
+  - The reflection is exactly `b → −b`. Fitting `R_sub = λ_k · conj(R_add)` over the
+    L16-L19 readers puts the reflection centre `c` (`b → c − b`) at 0 mod the period for
+    every harmonic: within 1.6 for k = 1, 2, 3, 4; −0.3 for k10; 0.0 for k20; −0.7 for k5.
 - **Effect on the adder.** Because the readers see `b → −b`, the same fixed L16-L18 units
   multiply `a` by `−b` and write `a − b` into the result planes. The result codes are shared
   across ops (top principal cosine 0.9-0.97 in the earlier sweep). The op never needs its own
-  adder; it only decides the sign of b's second code.
+  adder; it only decides the sign of b's sine axis (next subsection).
 
 ![mirror](figures_auto_interp_vectors/mirror_readers.png)
-![mirror D](figures_auto_interp_vectors/mirror_quadrature.png)
+
+### How the L15 MLP builds the mirror
+
+Split b's code at `=`, as the L16 gate/up readers see it, into an op-even part
+`E = (F_add + F_sub)/2` and an op-odd part `O = (F_add − F_sub)/2` (per harmonic k).
+
+**Geometric rule.** `F_sub` is the mirror image of `F_add` exactly when two things hold:
+
+- E lies on one axis `e` and carries `cos(2πkb/100)`;
+- O lies on one axis `w ⟂ e` and carries `sin(2πkb/100)`.
+
+Then add = `e·cos + w·sin` and sub = `e·cos − w·sin`: the same circle (or ellipse) traversed
+backwards, `b → −b`. The ratio |O| / |E| does not matter.
+
+The readers see exactly this:
+
+| L16 readers | k = 1 | k = 2 | k = 3 | k = 10 | k = 20 |
+|---|---|---|---|---|---|
+| share of E on one axis | 0.94 | 0.68 | 0.72 | 0.87 | 0.92 |
+| share of O on one axis | 0.96 | 0.98 | 0.97 | 0.97 | 0.99 |
+| \|cos(e, w)\| | 0.00 | 0.13 | 0.18 | 0.06 | 0.05 |
+| phase(O) − phase(E) | −90° | +79° | −72° | −80° | −93° |
+| reflect / same (P + L15 MLP only) | 0.93 / 0.60 | 0.84 / 0.12 | 0.83 / 0.26 | 0.83 / 0.05 | 0.97 / 0.09 |
+
+(L17 and L18 readers give the same picture.)
+
+- **Where the two parts come from.**
+  - The odd part is written by the L15 MLP: 81-103 % of O at mlp_in.16, against ≤ 5 % from
+    L16's attention.
+  - The even part is mostly the L15H13 copy (40-75 % of E). In the readers' view the copy
+    already sits close to one axis (0.6-0.96).
+  - The MLP's op-even write removes most of what is left off that axis: it cancels 56-160 % of
+    the copy's off-axis part (k20 over-cancels).
+- **Why my first attempt looked harmonic-dependent.** Comparing the MLP write `D` with the
+  copy `P` mixes the two parts: D contains both the odd write and the even cancellation. Split
+  into E and O, the geometry is the same at every harmonic.
+
+![mirror mechanism](figures_auto_interp_vectors/mirror_mechanism.png)
+
+**Which neurons, and how SwiGLU does it.** The MLP output is exactly `W_down · act_b`
+(cosine 1.000 with the measured stream change). Splitting the odd write over all 14,336
+neurons of L15 gives two findings:
+
+- 2-3 neurons per harmonic carry 85-95 % of it (7 neurons in total).
+- `act = silu(g) · u` makes b × (±1) in one of two ways:
+  - **A, the op on the gate.** The gate is an op switch fed by gate components c72 / c9. Up
+    reads b's code. Two neurons, one opened by add and one by sub, have opposite-sign writes.
+  - **B, the op on up.** Up is a signed op read: up components c117 and c34 give u ≈ −2 on
+    add and +1 on sub. The gate reads b's code near its silu knee. `act = silu(g(b)) · u(op)`
+    is b's code times the op sign, in a single neuron.
+
+| harmonic | neuron | unit (down comp) | op enters via | b read by (peak, T/4 = sine phase) | share of odd write |
+|---|---|---|---|---|---|
+| k2 (mod 50) | 12769 | c35 | up: u −2.11 add / +0.75 sub (up c117, c34) | gate c35, c19 (13.7; T/4 = 12.5) | 0.45 |
+| k2 | 6456 | c19 | up: u +2.07 / −0.65 | gate c35 (37.7; 3T/4 = 37.5) | 0.40 |
+| k10 (mod 10) | 9205 | c21 | up: u −1.89 / +1.05 | gate c21 (2.3; T/4 = 2.5) | 0.66 |
+| k10 | 9057 | c72 | gate: g −1.42 / +1.49, sub-on (gate c72, c9) | up c72, c67 (7.0; 3T/4 = 7.5) | 0.16 |
+| k10 | 13193 | c67 | gate: g +1.01 / −0.21, add-on | up (2.1; T/4 = 2.5) | 0.06 |
+| k20 (mod 5) | 7446 | c16 | gate: g +2.73 / +0.34, add-on | up c16, c64 (1.3; T/4 = 1.25) | 0.55 |
+| k20 | 11305 | c64 | gate: g −1.78 / +1.69, sub-on | up c64, c16 (1.3) | 0.37 |
+
+Mode shares of the odd write: k2 B 0.94; k10 B 0.75 / A 0.25; k20 A 0.96.
+
+- **Why the centre is 0.** Every odd neuron's b read peaks at a quarter period (T/4 or 3T/4),
+  i.e. it reads `sin(2πkb/100)`. So the V vectors of gate c35 / c21 and up c16 / c64 / c72
+  select exactly the component of b that must change sign under `b → −b`, and nothing else.
+- **What does the switching.** The components behind the whole mechanism are two op switches
+  on the gate side (c72 sub-on, c9 add-on) and a signed op read on the up side (c117, c34).
+  Each unit is identified by one index across gate/up/down, from the neuron-aligned init.
+- **Correction to the earlier version.** The "add-gated c21 vs sub-gated c72" example was
+  mislabelled. c21 (mode B) is active on both ops with opposite signs; c72 (mode A) is the
+  sub-on partner of c67.
 
 ## What the vectors do not settle (for the validation pass)
 
-- **How exactly `P ± D` becomes a mirror.** The angle between `D` and the copied code `P`
-  depends on the harmonic (~90° at k2, ~140° at k20, ~170° at k10). The reflection is clean at
-  the readers, but I have not reduced it to one geometric rule. Patching the sub-gated L15
-  components (c72, c64, c90, c10) into add prompts should turn a+b into a−b if this story is
-  right.
+- **The mirror is read off, not tested.** Settled geometrically in section 5; the causal test
+  is to flip the op input of the 7 mirror neurons (n12769, 6456, 9205, 9057, 13193, 7446,
+  11305), or of the op components c72 / c9 / c117 / c34, on addition prompts. If this story
+  is right, a+b should turn into a−b in the result code.
 - **The line analysis only sees additive and line structure.** Conjunctive "window" units
   (blobs in the grids) are captured through their Fourier lines only. Token-identity (lookup)
   variance, which is 25-40 % at every position, is not interpreted.
@@ -364,7 +434,7 @@ to the logit of token n. Here `G(k)` is the unembedding's own Fourier plane.
   captured.
 - **Suggested first ablations:**
   - the L16-L18 result units (L16 c10, L18 c4 / c12 / c23);
-  - the L15 op-gated mirror units;
+  - the L15 mirror units (down c35, c19, c21, c72, c67, c16, c64);
   - the routing pairs (L15 q c138 × k c48, L16 q c136 × k c5);
   - the hundreds units (L27 c6, L22 c29).
 
@@ -376,6 +446,7 @@ to the logit of token n. Here `G(k)` is the unembedding's own Fourier plane.
   - `transfer.py`;
   - `qk.py`;
   - `mlp_units.py` + `mlp_analysis.py`;
+  - `mirror_neurons.py` + `mirror.py` (the b-mirror of section 5);
   - `output.py`;
   - `figures.py`;
   - `common.py` / `load.py`.
@@ -383,5 +454,6 @@ to the logit of token n. Here `G(k)` is the unembedding's own Fourier plane.
   - `frames_{re,im}.npy` (65 points × 4 positions × 2 ops × 4 lines × 50 k × 4096, fp16);
   - `read_spec.npz`, `write_spec.npz`, `storage.npz`, `transfer.npz`, `qk.npz`, `output.npz`;
   - `mlp/L*.npz`, `mlp_units.parquet`;
+  - `mirror/L14-16_neurons.npz` (all 14,336 neurons at `=`);
   - `figs/`.
 - sbatch files: `~/pd_scratch/dual_obj_jax/arith_repr/vectors/`.

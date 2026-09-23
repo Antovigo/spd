@@ -663,11 +663,10 @@ def schematic() -> None:
     save(fig, "schematic")
 
 
-def mirror_quadrature() -> None:
-    """How the L15 MLP mirrors b on sub, as seen by each L16 gate/up reader: P = what the reader got
-    from the stream before the L15 MLP (the L15H13 copy; same on both ops), D = what the L15 MLP
-    added. Each reader is drawn in its own frame (P rotated to +1): D_add and D_sub land on opposite
-    sides of the imaginary axis, i.e. P + D and P − D are mirror images."""
+def mirror_mechanism() -> None:
+    """b's code at '=' as the L16 gate/up readers see it (copied code + the L15 MLP's write), drawn on
+    the two axes the analysis finds: e = axis of the op-even part, w = axis of the op-odd part.
+    Add and sub trace the same ellipse in opposite directions: b -> -b."""
     from param_decomp.arith_repr.vectors.common import RESID, load_uv
     from param_decomp.arith_repr.vectors.storage import load_frame
 
@@ -676,44 +675,47 @@ def mirror_quadrature() -> None:
     fim = np.load(OUT / "frames_im.npy", mmap_mode="r")
     st = dict(np.load(OUT / "frames_stats.npz"))
     ln2 = np.load(RESID / "norms.npz")["ln2"]
-    Fpre = load_frame(fre, fim, st, 31)[3][:, 1]  # before L15 MLP, '=', b line: (2, 50, d)
-    Fpost = load_frame(fre, fim, st, 33)[3][:, 1]  # mlp_in.16 raw point
+    F32 = load_frame(fre, fim, st, 32)[3][:, 1]  # after the L15 MLP: (2 op, 50, d)
     cols = np.flatnonzero((comps["layer"] == 16) & np.isin(comps["kind"], ("gate", "up")))
     V, _ = load_uv(comps, cols)
     Vm = np.stack(V) * ln2[16][None]
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
-    bins = np.linspace(0, 180, 19)
-    cols_k = {10: "#2a78d6", 20: "#eb6834", 2: "#1baf7a", 1: "#4a3aa7"}
-    for k, col in cols_k.items():
-        P = Vm @ Fpre[:, k - 1].T  # (n, 2)
-        D = Vm @ (Fpost[:, k - 1] - Fpre[:, k - 1]).T
-        w = np.abs(D[:, 0]) * np.abs(D[:, 1])
-        flip = np.degrees(np.abs(np.angle(D[:, 1] / D[:, 0])))
-        quad = np.degrees(np.abs(np.angle(D[:, 0] / P[:, 0])))
-        for ax, x in zip(axes, (flip, quad), strict=False):
-            h, _ = np.histogram(x, bins=bins, weights=w)
-            ax.step(
-                bins[:-1],
-                h / h.sum(),
-                where="post",
-                color=col,
-                lw=2,
-                label=f"k = {k} (mod {period(k)})",
-            )
-    for ax, t in zip(
-        axes,
-        (
-            "angle between the L15-MLP write on sub and on add\n(180° = same code, opposite sign)",
-            "angle between the L15-MLP write (add) and the copied b code\n(0° = reinforces, 180° = cancels, 90° = quadrature)",
-        ),
-        strict=False,
-    ):
+
+    def axis(z: np.ndarray) -> np.ndarray:
+        _, _, vt = np.linalg.svd(np.stack([np.real(z), np.imag(z)]), full_matrices=False)
+        return vt[0]
+
+    fig, axes = plt.subplots(1, 3, figsize=(14, 4.8))
+    for ax, k in zip(axes, (2, 10, 20), strict=True):
+        Fa, Fs = Vm @ F32[0, k - 1], Vm @ F32[1, k - 1]
+        e, w = axis((Fa + Fs) / 2), axis((Fa - Fs) / 2)
+        if (e @ ((Fa + Fs) / 2)).real < 0:
+            e = -e
+        T = int(period(k))
+        bs = np.arange(T) if T <= 10 else np.arange(0, T, 5)
+        bb = np.linspace(0, T, 200)
+        for F, col, lab in ((Fa, "#1baf7a", "add"), (Fs, "#eda100", "sub")):
+            ce, cw = e @ F, w @ F
+            xe = 2 * (ce * np.exp(2j * np.pi * k * bb / 100)).real
+            xw = 2 * (cw * np.exp(2j * np.pi * k * bb / 100)).real
+            ax.plot(xe, xw, color=col, lw=2, label=lab)
+            j = 20
+            ax.annotate("", xy=(xe[j + 3], xw[j + 3]), xytext=(xe[j], xw[j]),
+                        arrowprops=dict(arrowstyle="-|>", color=col, lw=2))  # fmt: skip
+            for b in bs:
+                pe = 2 * (ce * np.exp(2j * np.pi * k * b / 100)).real
+                pw = 2 * (cw * np.exp(2j * np.pi * k * b / 100)).real
+                ax.scatter([pe], [pw], s=14, color=col, zorder=3)
+                ax.text(
+                    pe * 1.1, pw * 1.1, str(b), fontsize=6.5, color=col, ha="center", va="center"
+                )
         style(ax)
-        ax.set_xlabel("degrees", fontsize=8)
-        ax.set_ylabel("share of reader weight", fontsize=8)
-        ax.set_title(t, fontsize=9, color=INK2)
-        ax.set_xticks(range(0, 181, 30))
-    axes[0].legend(fontsize=7, frameon=False, loc="upper left")
-    fig.suptitle("As seen by the L16 gate/up readers (weights |D_add||D_sub|): the L15 MLP's b write flips "
-                 "sign with the op; its angle to the copied code depends on the harmonic", fontsize=9.5, y=1.04)  # fmt: skip
-    save(fig, "mirror_quadrature")
+        ax.axhline(0, color=GRAY, lw=0.8)
+        ax.axvline(0, color=GRAY, lw=0.8)
+        ax.set_aspect("equal")
+        ax.set_xlabel("e: op-even axis", fontsize=8)
+        ax.set_ylabel("w: op-odd axis (written by the L15 MLP)", fontsize=8)
+        ax.set_title(f"k = {k}: b mod {T}", fontsize=9, color=INK2)
+    axes[0].legend(fontsize=7, frameon=False)
+    fig.suptitle("b's code at '=' seen by the L16 readers: the op flips the sign of the sine axis only "
+                 "→ the same circle traversed backwards, b → −b", fontsize=10)  # fmt: skip
+    save(fig, "mirror_mechanism")
