@@ -1,6 +1,6 @@
 """One read point's full analysis (plan sections 3-4).
 
-    python -m param_decomp.arith_repr.scripts.analyse --resid <harvest dir> --v <V_alive.npz>
+    python -m param_decomp.arith_repr.scripts.analyse --resid <raw residual dir> --v <V_alive.npz>
         --out <dir> --keys attn_in.18 mlp_in.18 [--n_null 3] [--folds 5] [--seed 0]
 
 Per key writes `<out>/<key>.json` (every scalar and small array) and `<out>/<key>.npz`
@@ -12,7 +12,6 @@ import time
 from pathlib import Path
 from typing import Any, cast
 
-import ml_dtypes
 import numpy as np
 
 from param_decomp.arith_repr.fit import HypothesisFit, fit_hypotheses, orthonormal_union
@@ -22,6 +21,7 @@ from param_decomp.arith_repr.hypotheses import (
     ValueFolds,
     pooled_quantities,
 )
+from param_decomp.arith_repr.resid import load_read_input
 from param_decomp.arith_repr.separability import (
     cluster_geometry,
     principal_angles,
@@ -62,8 +62,8 @@ def load_labels(meta: dict[str, Any]) -> Labels:
 
 
 def load_position(resid_dir: Path, key: str, position: int) -> np.ndarray:
-    mm = np.load(resid_dir / f"{key}.npy", mmap_mode="r")
-    return np.asarray(mm[:, position, :]).view(ml_dtypes.bfloat16).astype(np.float32)
+    """The read point's post-norm input at `position`, recovered from the raw stream."""
+    return load_read_input(resid_dir, key, position)
 
 
 def fit_record(f: HypothesisFit) -> dict[str, Any]:

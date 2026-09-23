@@ -2,7 +2,7 @@
 coordinates) of every kept hypothesis at every position and operation set, and the read point's
 alive reads. One lazily loaded file per read point.
 
-    python -m param_decomp.arith_repr.scripts.export_geometry --resid <harvest dir>
+    python -m param_decomp.arith_repr.scripts.export_geometry --resid <raw residual dir>
         --analysis <dir> --out <app dir>/geom --keys attn_in.18 mlp_in.18
 
 Writes `<out>/<key>.js` = `window.registerArithGeom("<key>", {...})` with float16 arrays as

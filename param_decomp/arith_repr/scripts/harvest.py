@@ -1,12 +1,14 @@
-"""Post-norm residuals of the frozen target at every read point and position of the
-arithmetic pool, on one GPU.
+"""RAW residual stream of the frozen target at every block boundary and position of the
+arithmetic pool, on one GPU. A property of the model, not of any decomposition: the run dir is
+only used to name the target.
 
     python -m param_decomp.arith_repr.scripts.harvest --run_dir <run> --data_root <root>
         --out_dir <dir> [--batch 250]
 
 Loads ONLY the frozen target (no components, no CI fn). Writes `pool.json` (prompt labels,
-positions) and, per read point, `attn_in.<l>.npy` / `mlp_in.<l>.npy` of shape
-`(n_prompts, T, 4096)` in bfloat16-as-uint16 (`view(bfloat16)` on read with ml_dtypes)."""
+positions), `norms.npz` (the RMSNorm weights needed to recover what each projection reads, see
+`param_decomp.arith_repr.resid`) and `resid.<l>.npy` (l = 0..n_layer) / `post_attn.<l>.npy`
+(l < n_layer) of shape `(n_prompts, T, 4096)` in bfloat16-as-uint16."""
 
 import argparse
 import json
@@ -29,7 +31,8 @@ from param_decomp.core.sharding import hsdp_mesh
 from param_decomp.experiments.lm.deliverable import load_deliverable
 from param_decomp.experiments.lm.load_run import build_target
 from param_decomp.experiments.lm.resolved import TargetConfig
-from param_decomp.targets.transformer_taps import attention_input_tap_key, mlp_input_tap_key
+from param_decomp.targets.glu_transformer import GLUDecomposedModel
+from param_decomp.targets.transformer_taps import post_attention_tap_key, resid_tap_key
 
 
 def main() -> None:
@@ -69,8 +72,17 @@ def main() -> None:
         )
     )
     keys = frozenset(
-        [attention_input_tap_key(layer) for layer in range(n_layer)]
-        + [mlp_input_tap_key(layer) for layer in range(n_layer)]
+        [resid_tap_key(boundary) for boundary in range(n_layer + 1)]
+        + [post_attention_tap_key(layer) for layer in range(n_layer)]
+    )
+    model = placed.model
+    assert isinstance(model, GLUDecomposedModel), type(model)
+    np.savez(
+        args.out_dir / "norms.npz",
+        ln1=np.stack([np.asarray(model.frozen_block(i).ln1, np.float32) for i in range(n_layer)]),
+        ln2=np.stack([np.asarray(model.frozen_block(i).ln2, np.float32) for i in range(n_layer)]),
+        final=np.asarray(model.norm, np.float32),
+        eps=np.float32(model.eps),
     )
 
     @eqx.filter_jit
@@ -111,7 +123,7 @@ def main() -> None:
     meta["d_model"] = int(next(iter(memmaps.values())).shape[-1])
     meta["keys"] = sorted(memmaps)
     (args.out_dir / "pool.json").write_text(json.dumps(meta))
-    logger.info(f"done: {len(memmaps)} read points x {n} prompts x {seq_len} positions")
+    logger.info(f"done: {len(memmaps)} arrays x {n} prompts x {seq_len} positions")
 
 
 if __name__ == "__main__":

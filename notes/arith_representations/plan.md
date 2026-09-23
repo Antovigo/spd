@@ -135,11 +135,13 @@ representation of `a` regardless of operation.
 
 1. **Extract** the alive read vectors `V_c` (q, k, v, gate, up; 32 layers) from the orbax
    checkpoint on CPU -> `V_alive.npz` (`scripts/extract_v.py`).
-2. **Harvest** the frozen model's post-norm residuals at every read point and position for
-   the 15,050 prompts on one L40 (`scripts/harvest.py`): bf16, one file per read point.
-   Only the frozen target is loaded (no components, no CI function). Being a property of the
-   model, not of the decomposition, they are stored at
-   `~/out/activations/addsub1-100_llama31-8b/resid_postnorm/` (see its README).
+2. **Harvest** the frozen model's RAW residual stream at every block boundary (entering each
+   block and after each attention add) and position for the 20,000 prompts on one L40
+   (`scripts/harvest.py`): bf16, one file per boundary, plus the RMSNorm weights. Only the
+   frozen target is loaded (no components, no CI function). Being a property of the model,
+   not of the decomposition, it is stored at
+   `~/out/pod-backup/original-resid/addsub1-100_llama31-8b/` (see its README). The post-norm
+   input of each read point is recovered at load time (`param_decomp/arith_repr/resid.py`).
 3. **Analyse** on CPU (`scripts/analyse.py`): bases, hypothesis fits, held-out tests,
    separability, clusters -> one JSON per read point.
 4. **Applet** (`app.html`): presence map (read point x position x hypothesis) and per-cluster

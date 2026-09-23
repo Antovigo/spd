@@ -3,7 +3,7 @@
 Companion to [`plan.md`](plan.md), which fixes the method before any data was read. Decomposition
 `p-ba5a0c05` step 40000, read basis = alive set of `addsub-05-filter-last-pos-ceiling` (6,022
 residual-reading components: q/k/v/gate/up over 32 layers), prompts `a+b=` (10,000) and `a-b=`
-with `a >= b` (5,050). Everything decomposition-specific lives in the run dir, `<run_dir>/analysis/arith_repr/` (`/mnt/nw/home/a.vigouroux/out/pod-backup/p-ba5a0c05/analysis/arith_repr`: `V_alive.npz`, `analysis/`, `figures/`, `app/`, `synth_app/`). The harvested residuals are a property of the frozen model, not of the decomposition, and live in `/mnt/nw/home/a.vigouroux/out/activations/addsub1-100_llama31-8b/resid_postnorm/` (README there; `<run_dir>/analysis/arith_repr/resid` is a symlink to it); code
+with `a >= b` (5,050). Everything decomposition-specific lives in the run dir, `<run_dir>/analysis/arith_repr/` (`/mnt/nw/home/a.vigouroux/out/pod-backup/p-ba5a0c05/analysis/arith_repr`: `V_alive.npz`, `analysis/`, `figures/`, `app/`, `synth_app/`). The residual stream of the frozen model (raw, every block boundary; a property of the model, not of the decomposition) lives in `/mnt/nw/home/a.vigouroux/out/pod-backup/original-resid/addsub1-100_llama31-8b/` (README there); the analysis recovers each read point's post-norm input from it with the model's RMSNorm weights (`param_decomp/arith_repr/resid.py`); code
 `param_decomp/arith_repr/`; branch `experiment/arith_representations`. Applet:
 `<run_dir>/analysis/arith_repr/app/index.html` (open over `file://`; presence map + per-cluster centroid
 clouds); its synthetic-test twin is `<run_dir>/analysis/arith_repr/synth_app/index.html`.
