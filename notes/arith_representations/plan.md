@@ -137,7 +137,9 @@ representation of `a` regardless of operation.
    checkpoint on CPU -> `V_alive.npz` (`scripts/extract_v.py`).
 2. **Harvest** the frozen model's post-norm residuals at every read point and position for
    the 15,050 prompts on one L40 (`scripts/harvest.py`): bf16, one file per read point.
-   Only the frozen target is loaded (no components, no CI function).
+   Only the frozen target is loaded (no components, no CI function). Being a property of the
+   model, not of the decomposition, they are stored at
+   `~/out/activations/addsub1-100_llama31-8b/resid_postnorm/` (see its README).
 3. **Analyse** on CPU (`scripts/analyse.py`): bases, hypothesis fits, held-out tests,
    separability, clusters -> one JSON per read point.
 4. **Applet** (`app.html`): presence map (read point x position x hypothesis) and per-cluster
