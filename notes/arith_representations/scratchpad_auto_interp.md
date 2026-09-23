@@ -124,3 +124,39 @@ L40 node unless `JAX_PLATFORMS=cpu` (12410 did, OOM warnings, then fell back). F
   prompt-selection ramp; now dla is centred over tokens 0..200 per writer (pos4_tables.py). The
   all-writers sum still has a "smaller numbers up" tilt not tied to the answer.
 - Report: report_auto_interp.md; figures in <run>/analysis/arith_repr/autointerp/figs/.
+
+### Detailed report (2026-09-23 late)
+
+Antoine asked for a much more detailed report: complete component lists per claim, which
+periods/values each component handles, and the reason for each claim; heavy use of collapsibles.
+
+- Report is now GENERATED: `param_decomp/arith_repr/autointerp/report_template.md` (narrative,
+  `{{fragment}}` placeholders) + `report_md.py` (fragments: component tables, evidence tables)
+  -> `report_auto_interp.md` + `auto_interp_appendix/` (A1 a-token, A3 b-token, B heads,
+  C1-C5 `=` by layer, S1/S3/S4/S5 complete lists behind the section claims). Edit the template,
+  never the generated file. Main file ~430 kB, every appendix < 430 kB.
+- New products: `onsets_all.parquet` (onset_tables.py; on-set label + fully spelled value set
+  per comp x position x op, label-consistent: the listed classes are those of the label's
+  period, `[coarser: ...]` when a coarser period explains >= 0.8 of the profile) and
+  `comp_codes.npz` (comp_codes.py, job 12454; every writer's share of every Fourier code of a, b,
+  res at the first read point after it).
+- CI FUNCTION IS NOT CAUSAL (chunkwise_transformer over the whole prompt): the gate of a
+  component at `a` can depend on op/b. 268 of the main-position-`a` comps have op-dependent
+  on-sets, mostly v/k comps (e.g. L18 kv7 v comps on only for sub: the kv head L18H30 reads on
+  sub). Inner activations are causal (checked: zero within-a spread at pos 1).
+- New findings while building the lists:
+  * the mod-10 code of a at mlp_in.1 = ten L0 down comps, one per units digit (c145:0, c36:1,
+    c81:2, c52:3, c62:4, c45:5, c55:6, c44:7, c50:8, c38:9), which also write mod 2; + c162 (a%5=0)
+    for mod 5; tens sets c6/c23/c22 for mod 50/100.
+  * 419 components have the SAME value set at the `a` token (over a) and at the `b` token (over b):
+    operand encoding is position-agnostic (e.g. L13 down c13 a%10=5 / b%10=5, L12 down c9, L4 down
+    c135 even).
+  * L15H13 / L16H21 on subtraction: copy weaker when a < b (attention 0.52 vs 0.74 on b; L16H21
+    splits a 0.41 / b 0.32), o on-rate 0.16 vs 0.25 -> tens(a,b) labels on sub.
+  * parity: L18 gate c299 (a+b even) and gate c4 (even AND even) feed L18 down c4.
+  * first result code shares at mlp_in.19 (power-weighted): mod 50 L18 MLP 0.98, mod 20 0.86,
+    mod 2 L18 0.61 + L17 0.30, mod 10 L18 0.56 + L17 0.44, mod 100 L16 0.36 / L18 0.33 / L17 0.24;
+    mod 25 and mod 4 only 0.33 / 0.60 explained (weak codes).
+  * largest attention share of a result code: +0.17 (L20 attention, mod 4, mlp_in.20 add).
+  * 66 of 902 L20-31 `=` writers are sub-only; op flags exist at every layer L0-L19 (2-8 per
+    layer) and at L22, L26, L28-31.

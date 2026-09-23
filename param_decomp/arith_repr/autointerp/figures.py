@@ -234,8 +234,9 @@ def fig_op_phase(ctx: Ctx) -> None:
 def fig_output(ctx: Ctx) -> None:
     z = np.load(ctx.ai / "delta_profiles.npz")
     writers, deltas = z["writers"], z["deltas"]
-    lab = pd.read_parquet(ctx.ai / "onset_r2_pos4.parquet").reindex(writers)
-    fam = np.asarray(lab["lab_add"].fillna("-").values)
+    ons = pd.read_parquet(ctx.ai / "onsets_all.parquet")
+    ons = ons[(ons.pos == 4) & (ons.op == "add")].set_index("col")
+    fam = np.asarray(ons["label"].reindex(writers).fillna("-").values)
     P = z["add"] - z["add_base"][:, None]
     fig, axes = plt.subplots(2, 3, figsize=(17, 7.5))
     sel_d = (deltas >= -120) & (deltas <= 120)

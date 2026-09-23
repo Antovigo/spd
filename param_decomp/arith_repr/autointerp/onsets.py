@@ -54,3 +54,41 @@ def fmt(d: dict[str, Any], name: str) -> str:
     if d["tau"] == 0:
         return f"{name} in {rs}" + ("" if d["arc"] else " (irregular)")
     return f"{name} mod {d['tau']} in {rs}" + (" (arc)" if d["arc"] else "")
+
+
+def ranges(xs: list[int]) -> str:
+    """`[1, 2, 3, 7, 9, 10]` -> `1..3, 7, 9..10` (every element kept)."""
+    if not xs:
+        return "{}"
+    xs = sorted(xs)
+    parts, start, prev = [], xs[0], xs[0]
+    for x in [*xs[1:], None]:
+        if x is not None and x == prev + 1:
+            prev = x
+            continue
+        parts.append(f"{start}" if start == prev else f"{start}..{prev}")
+        if x is not None:
+            start = prev = x
+    return ", ".join(parts)
+
+
+def describe_at(values: np.ndarray, rate: np.ndarray, name: str, tau: int) -> str:
+    """The on-set along `name` at a GIVEN period (`tau = 0`: the values themselves): the classes
+    whose mean on-rate is > 0.5, every one listed, then the coarsest period that already explains
+    the profile (R^2 >= 0.8) when it is coarser than `tau`."""
+    cls = values % tau if tau else values
+    keys = np.unique(cls)
+    means = np.array([rate[cls == k].mean() for k in keys])
+    on = keys[means > 0.5].tolist()
+    head = f"{name} mod {tau}" if tau else name
+    txt = (
+        f"{head} in {{{ranges(on)}}}"
+        if on
+        else f"{head}: no class above 0.5 (max {means.max():.2f})"
+    )
+    d = describe(values, rate)
+    span = int(values.max() - values.min())
+    redundant = d.get("tau", -1) == 100 and span < 100  # a, b: mod 100 is the value itself
+    if d.get("tau", -1) > 0 and (tau == 0 or d["tau"] < tau) and not redundant:
+        txt += f" [coarser: {name} mod {d['tau']} in {{{ranges(d['R'])}}}, R2 {d['r2']:.2f}]"
+    return txt
