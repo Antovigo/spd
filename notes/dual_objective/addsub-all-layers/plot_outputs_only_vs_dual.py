@@ -5,10 +5,10 @@ by wall time on the SAME hardware. One figure per stream:
     python plot_outputs_only_vs_dual.py     # writes plots/outputs_only_vs_dual/
                                             #   outputs_only_vs_dual_{target,nontarget}.png
 
-Four output-head metrics per stream: CI-masked KL (`ce_kl/kl_ci_masked`, the arm
+Three output-head metrics per stream: CI-masked KL (`ce_kl/kl_ci_masked`, the arm
 CIMaskedReconLoss emits in a single-role run), the fresh-PGD adversarial recon eval
-(`loss/PGDReconLoss`), the output head's imp-min loss (`loss/ImportanceMinimalityLoss`) and
-the alive count (`l0/0.0_total`). The TARGET stream is the addsub prompt pool; the
+(`loss/PGDReconLoss`) and the alive count (`l0/0.0_total`). The imp-min loss was dropped
+(Antoine, 2026-09-23); L0 carries the sparsity story here. The TARGET stream is the addsub prompt pool; the
 NON-TARGET stream is fineweb, the same keys under `nontarget_data/`. They get separate
 figures because the two streams tell different stories and share no scale.
 
@@ -52,7 +52,6 @@ STREAMS = [
         [
             ("ce_kl/kl_ci_masked", "CI-masked KL", True),
             (PGD, "Adversarial recon (fresh PGD)", True),
-            ("loss/ImportanceMinimalityLoss", "Imp-min loss (output head)", False),
             ("l0/0.0_total", "Alive components (L0, output head)", False),
         ],
     ),
@@ -63,12 +62,10 @@ STREAMS = [
         [
             ("ce_kl/kl_ci_masked", "CI-masked KL", True),
             (PGD, "Adversarial recon (fresh PGD)", True),
-            ("loss/ImportanceMinimalityLoss", "Imp-min loss (output head)", False),
             ("l0/0.0_total", "Alive components (L0, output head)", False),
         ],
     ),
 ]
-TRAIN_METRICS = {"loss/ImportanceMinimalityLoss"}
 
 
 def load(path: Path) -> dict[int, dict[str, Any]]:
@@ -137,9 +134,9 @@ def render(
     oo_last: int,
     out: Path,
 ) -> None:
-    fig, axes = plt.subplots(len(metrics), 2, figsize=(11, 12), sharey="row")
+    fig, axes = plt.subplots(len(metrics), 2, figsize=(11, 9), sharey="row")
     for row, (metric, title, logy) in enumerate(metrics):
-        key = f"{'train' if metric in TRAIN_METRICS else 'eval'}/{prefix}{metric}"
+        key = f"eval/{prefix}{metric}"
         sparse = metric == PGD
         for col in range(2):
             ax = axes[row, col]
