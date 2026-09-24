@@ -236,6 +236,11 @@ class TargetedObjective:
             "a non-target hidden pass needs the target-stream hidden pass, whose `points` it "
             "measures at (SPEC T12)"
         )
+        assert self.nontarget.recon or self.nontarget_hidden is not None, (
+            "the non-target stream has no output recon terms and no hidden pass: it would "
+            "contribute importance-minimality alone. An EMPTY non-target output list is the "
+            "hidden-only objective's spelling and requires `nontarget_hidden`"
+        )
 
     @property
     def hidden_points(self) -> tuple[str, ...]:

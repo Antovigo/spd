@@ -1484,6 +1484,23 @@ class _PassAux(NamedTuple):
     breakdowns: tuple[ReconstructionLoss, ...]
 
 
+def _term_shapes_ci(term: AnyReconLossTerm) -> bool:
+    """Whether this term's masks actually depend on CI — see `_PassPlan.shapes_ci`.
+
+    `ConstantSources(value)` is `mask = ci + (1-ci)*value`, whose derivative in CI is
+    `1 - value`: ZERO only at `value == 1.0` (the unmasked arm). `CIMaskedReconLoss` and its
+    subset twin carry `ConstantSources(0.0)`, i.e. `mask = ci` exactly — as CI-dependent as a
+    stochastic term, so a pass built from those alone must keep its penalties. The VALUE
+    decides it, never the type."""
+    match term.sources:
+        case ConstantSources(value=value):
+            return value != 1.0
+        case UnmaskedNoDeltaSources():
+            return False
+        case _:
+            return True
+
+
 @dataclass(frozen=True)
 class _PassPlan:
     """One of the up-to-four tPD passes, as static description (SPEC T1/T12).
@@ -1511,6 +1528,27 @@ class _PassPlan:
     pass and on a pure hidden pass."""
     adversary_keys: tuple[str, ...]
     """The persistent bundles this pass's terms carry."""
+    shapes_ci: bool
+    """Whether any of this pass's recon terms actually READS the CI — false only when every
+    term is mask-free, i.e. `ConstantSources(1.0)` (whose `ci + (1-ci)*1.0` has an
+    exactly-zero cotangent) or `UnmaskedNoDeltaSources`. NOT every `ConstantSources`:
+    `CIMaskedReconLoss` carries `ConstantSources(0.0)`, which is `mask = ci` and fully
+    CI-dependent — `_term_shapes_ci` reads the VALUE, not the type. A pass that does not
+    read CI carries NO
+    importance-minimality and NO frequency penalty: both are penalties ON CI, and a pass with
+    no CI-dependent reconstruction has no business shaping the head it would push down.
+
+    This is what keeps the hidden-only objective honest. That run keeps a target-OUTPUT pass
+    for the mask-free faithfulness anchor, and the CI fn's trunk is SHARED between the heads
+    (S37) — so an importance-minimality gradient on the untrained output head would flow
+    through its readout into the trunk and from there into the hidden head's predictions,
+    smuggling a second CI objective into a run that claims to have one. With the penalties
+    dropped the output head receives exactly zero cotangent, never moves off its init, and
+    (at `zero_init_readout`, W = 0) contributes exactly zero trunk gradient.
+
+    Derived, not authored, and byte-inert for every existing config: a pass has always
+    carried at least one CI-dependent term, so this is true everywhere it was implicitly
+    true before."""
 
     @property
     def metric_prefix(self) -> str:
@@ -1613,6 +1651,7 @@ def make_targeted_train_step[PreparedT](
         nonlocal key_offset
         grid: ReconGrid[MaskSourceStrategy] = ReconGrid.of(terms, key_offset=key_offset)
         index_persistent_terms(terms, into=persistent_term_by_key)
+        shapes_ci = any(_term_shapes_ci(term) for term in terms)
         plans.append(
             _PassPlan(
                 label=label,
@@ -1624,19 +1663,28 @@ def make_targeted_train_step[PreparedT](
                 normalization=normalization,
                 output_coeff=output_coeff,
                 adversary_keys=tuple(grid.persistent_by_key),
+                shapes_ci=shapes_ci,
             )
         )
         key_offset += len(terms)
 
     add_pass("target", "output", True, objective.target.recon, imp.coeff, ())
-    add_pass(
-        "nontarget",
-        "output",
-        False,
-        cast("tuple[AnyReconLossTerm, ...]", objective.nontarget.recon),
-        objective.nontarget.impmin_coeff,
-        (),
-    )
+    # SKIPPED when the broad stream authors no output recon terms — the hidden-only objective
+    # (`nontarget.recon: []` next to `nontarget.hidden`). Skipping is the point: a pass built
+    # with zeroed coefficients would still run its masked forward and still ascend its
+    # adversary, so the only way to buy back the compute is not to build it. The target-OUTPUT
+    # pass above is NEVER skipped — it carries the mask-free faithfulness anchor
+    # (`UnmaskedReconLoss`) and owns `shared_step_metrics`' unprefixed keys — so `passes[0]`
+    # stays the target-output pass and no metric key moves.
+    if objective.nontarget.recon:
+        add_pass(
+            "nontarget",
+            "output",
+            False,
+            cast("tuple[AnyReconLossTerm, ...]", objective.nontarget.recon),
+            objective.nontarget.impmin_coeff,
+            (),
+        )
     if objective.hidden is not None:
         add_pass(
             "hidden",
@@ -1933,8 +1981,14 @@ def make_targeted_train_step[PreparedT](
             prepared, ci_target, ci_nontarget, persistent_sources = trainable
             ci = bundle_for(plan, ci_target, ci_nontarget)
             term_coeffs = pass_term_coeffs[plan.label]
-            imp_activity, imp_freq = imp_min_terms(ci.upper, imp.cfg, gamma)
-            base = pass_impmin_coeff[plan.label] * imp_activity + freq_coeff * imp_freq
+            if plan.shapes_ci:
+                imp_activity, imp_freq = imp_min_terms(ci.upper, imp.cfg, gamma)
+                base = pass_impmin_coeff[plan.label] * imp_activity + freq_coeff * imp_freq
+            else:
+                # A mask-free pass takes no penalty on CI at all — see `_PassPlan.shapes_ci`.
+                # Reported as zeros so the pass still has a row in the metrics.
+                imp_activity = imp_freq = jnp.zeros((), jnp.float32)
+                base = jnp.zeros((), jnp.float32)
 
             if plan.on_target_stream:
                 draw_loss = main_draw_loss(

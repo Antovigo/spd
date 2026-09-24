@@ -898,7 +898,16 @@ class NontargetConfig(BaseConfig):
     batch_size: PositiveInt
     impmin_coeff: NonNegativeFloat | ScheduleConfig
     recon: list[Annotated[NontargetOutputReconLossMetricConfig, Discriminator("type")]] = Field(
-        ..., min_length=1
+        ...,
+        min_length=0,
+        description=(
+            "The broad stream's OUTPUT-role recon terms. EMPTY is legal only when `hidden` "
+            "is authored: that is the hidden-only objective, where the broad stream is judged "
+            "at the hidden points alone and NO non-target output pass is built — so it costs "
+            "no masked forward, unlike a zeroed coefficient. Without `hidden` an empty list "
+            "would leave the stream with importance-minimality and nothing to reconstruct, "
+            "which is a bug, not an objective."
+        ),
     )
     hidden: NontargetHiddenConfig | None = Field(
         default=None,
@@ -914,6 +923,11 @@ class NontargetConfig(BaseConfig):
         """Per-entry facts the shared recon classes can spell but the non-target pass
         refuses — caught at parse (seat authoring, submit validation), not at objective
         build on the GPUs."""
+        assert self.recon or self.hidden is not None, (
+            "nontarget.recon is empty and nontarget.hidden is unset: the broad stream would "
+            "carry importance-minimality and nothing to reconstruct. Author `hidden` (the "
+            "hidden-only objective) or give this pass a recon term."
+        )
         seen: set[str] = set()
         for cfg in self.recon:
             assert cfg.coeff is not None, f"nontarget.recon {cfg.type!r} must set `coeff`"

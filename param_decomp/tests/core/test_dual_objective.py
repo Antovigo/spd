@@ -17,10 +17,12 @@ import numpy as np
 import optax
 import pytest
 from jaxtyping import Array
+from pydantic import ValidationError
 
 from param_decomp.core.ci_fn import LayerwiseMLPCIArch, LayerwiseMLPCIFn, build_ci_fn
 from param_decomp.core.components import SiteC, init_component_stacks
 from param_decomp.core.configs import (
+    CIMaskedReconLossConfig,
     HiddenActsNormalization,
     HiddenPassConfig,
     ImportanceMinimalityLossConfig,
@@ -30,6 +32,7 @@ from param_decomp.core.configs import (
     PerPositionHiddenActsNormalization,
     StochasticReconLossConfig,
     TargetedLossMetricConfig,
+    UnmaskedReconLossConfig,
 )
 from param_decomp.core.model import PlacedModel
 from param_decomp.core.objective import build_targeted_objective
@@ -102,6 +105,9 @@ def _setup(
     *,
     dual: bool,
     sequential: bool,
+    hidden_only: bool = False,
+    mask_free_target_output: bool = False,
+    ci_masked_target_output: bool = False,
     nonlinearity_coeff: float | None = None,
     normalization: HiddenActsNormalization | None = None,
     output_coeff: float | None = None,
@@ -136,7 +142,17 @@ def _setup(
     )
     if dual:
         hidden, nontarget = _hidden(normalization, output_coeff)
+        if hidden_only:
+            # The hidden-only objective: the broad stream authors NO output recon terms, so
+            # the step must not build a non-target output pass at all.
+            nontarget = NontargetConfig(
+                batch_size=nontarget.batch_size,
+                impmin_coeff=nontarget.impmin_coeff,
+                recon=[],
+                hidden=nontarget.hidden,
+            )
     else:
+        assert not hidden_only, "hidden-only needs the hidden pass"
         hidden, nontarget = (
             None,
             NontargetConfig(
@@ -144,6 +160,12 @@ def _setup(
             ),
         )
     loss_metrics = _loss_metrics()
+    if mask_free_target_output:
+        # The production hidden-only shape: the target OUTPUT pass keeps importance-minimality
+        # and the mask-free faithfulness anchor, and no CI-masked term at all.
+        loss_metrics = (loss_metrics[0], UnmaskedReconLossConfig(coeff=0.5))
+    if ci_masked_target_output:
+        loss_metrics = (loss_metrics[0], CIMaskedReconLossConfig(coeff=1.0))
     if nonlinearity_coeff is not None:
         loss_metrics = (*loss_metrics, _nonlinearity_cfg(nonlinearity_coeff))
     objective = build_targeted_objective(loss_metrics, nontarget, model.site_names, hidden=hidden)
@@ -394,6 +416,114 @@ def test_nontarget_hidden_requires_the_target_hidden_pass():
     )
     with pytest.raises(AssertionError, match="nontarget.hidden needs pd.hidden"):
         build_targeted_objective(_loss_metrics(), nontarget, ("linear1", "linear2"))
+
+
+@pytest.mark.parametrize("sequential", [False, True])
+def test_hidden_only_objective_builds_no_nontarget_output_pass(sequential: bool):
+    """The hidden-only arm: `nontarget.recon: []` next to `nontarget.hidden` means the broad
+    stream is judged at the hidden points ALONE. The pass must be absent, not zeroed — a
+    pass built with a zero coefficient would still run its masked forward — so the proof is
+    that its whole metric namespace is missing while the hidden one is present."""
+    cfg, state, step = _setup(dual=True, sequential=sequential, hidden_only=True)
+    target_batch, broad = _batches(cfg)
+    _, metrics = step(_model_of(), state, target_batch, broad, jax.random.PRNGKey(7))
+
+    assert "nontarget_data/hidden_ci/loss/total" in metrics
+    assert not [
+        k
+        for k in metrics
+        if k.startswith("nontarget_data/") and not k.startswith("nontarget_data/hidden_ci/")
+    ], sorted(k for k in metrics if k.startswith("nontarget_data/"))
+    # The target-OUTPUT pass is never skipped: it carries the mask-free anchor and owns the
+    # unprefixed keys, so `passes[0]` stays put and no other metric key moves.
+    assert "loss/StochasticReconLoss" in metrics and "total" in metrics
+    assert "hidden_ci/loss/total" in metrics
+
+
+@pytest.mark.parametrize("sequential", [False, True])
+def test_hidden_only_target_output_pass_may_be_mask_free(sequential: bool):
+    """The production hidden-only shape end to end: the target OUTPUT pass holds
+    importance-minimality plus `UnmaskedReconLoss` and NOTHING CI-masked (so it carries no
+    adversary to ascend), there is no non-target output pass, and both hidden passes run.
+    The step must still trace, and the only masked forwards must be the hidden ones."""
+    cfg, state, step = _setup(
+        dual=True, sequential=sequential, hidden_only=True, mask_free_target_output=True
+    )
+    target_batch, broad = _batches(cfg)
+    _, metrics = step(_model_of(), state, target_batch, broad, jax.random.PRNGKey(7))
+
+    assert "loss/UnmaskedReconLoss" in metrics
+    assert "hidden_ci/loss/total" in metrics
+    assert "nontarget_data/hidden_ci/loss/total" in metrics
+    assert not [
+        k
+        for k in metrics
+        if k.startswith("nontarget_data/") and not k.startswith("nontarget_data/hidden_ci/")
+    ]
+    # The mask-free pass takes NO penalty on CI: importance-minimality and the frequency
+    # term are penalties on the head it would otherwise push down, and the trunk is SHARED
+    # (S37), so that gradient would reach the hidden head through the trunk and smuggle a
+    # second CI objective into a run that claims to have one.
+    assert float(metrics["imp"]) == 0.0
+    assert float(metrics["freq"]) == 0.0
+
+
+@pytest.mark.parametrize("sequential", [False, True])
+def test_hidden_only_leaves_the_output_head_exactly_where_it_started(sequential: bool):
+    """The claim `shapes_ci` exists to make true: with the target-output pass mask-free, the
+    OUTPUT readout receives an exactly-zero cotangent — `ConstantSources` is
+    `ci + (1-ci)*1.0`, whose derivative in `ci` is exactly zero — so it never moves, and at
+    `zero_init_readout` (W = 0) it therefore contributes exactly zero trunk gradient. The
+    hidden head and the shared trunk must still move: the hidden passes are the objective."""
+    cfg, state, step = _setup(
+        dual=True, sequential=sequential, hidden_only=True, mask_free_target_output=True
+    )
+    target_batch, broad = _batches(cfg)
+    before = state.decomposition.ci_fn
+    assert isinstance(before, LayerwiseMLPCIFn)
+    # The OUTPUT head is the stack's final layer; `hidden_head` is the second one (S37).
+    before_output = {s: np.asarray(m.weights[-1]) for s, m in before.site_mlps.items()}
+    before_hidden = {
+        s: np.asarray(m.hidden_head[0])
+        for s, m in before.site_mlps.items()
+        if m.hidden_head is not None
+    }
+    before_trunk = {s: np.asarray(m.weights[0]) for s, m in before.site_mlps.items()}
+
+    new_state, _ = step(_model_of(), state, target_batch, broad, jax.random.PRNGKey(7))
+    after = new_state.decomposition.ci_fn
+    assert isinstance(after, LayerwiseMLPCIFn)
+    for site in ("linear1", "linear2"):
+        np.testing.assert_array_equal(
+            before_output[site],
+            np.asarray(after.site_mlps[site].weights[-1]),
+            err_msg=f"the output head at {site} moved — something is still shaping it",
+        )
+        head_after = after.site_mlps[site].hidden_head
+        assert head_after is not None
+        assert not np.allclose(before_hidden[site], np.asarray(head_after[0]))
+        assert not np.allclose(before_trunk[site], np.asarray(after.site_mlps[site].weights[0]))
+
+
+@pytest.mark.parametrize("sequential", [False, True])
+def test_a_ci_masked_only_pass_keeps_its_minimality(sequential: bool):
+    """`CIMaskedReconLoss` carries `ConstantSources(0.0)` — `mask = ci + (1-ci)*0.0`, i.e.
+    `mask = ci` — so it is as CI-dependent as a stochastic term even though its source type
+    is the same one the unmasked arm uses. A pass built from those ALONE must keep its
+    importance-minimality and frequency penalties: classifying by TYPE rather than by VALUE
+    would silently disarm an existing objective."""
+    cfg, state, step = _setup(dual=True, sequential=sequential, ci_masked_target_output=True)
+    target_batch, broad = _batches(cfg)
+    _, metrics = step(_model_of(), state, target_batch, broad, jax.random.PRNGKey(7))
+    assert float(metrics["imp"]) > 0.0
+    assert "loss/CIMaskedReconLoss" in metrics
+
+
+def test_empty_nontarget_recon_needs_a_hidden_pass() -> None:
+    """An empty output list with no hidden pass would leave the broad stream carrying
+    importance-minimality and nothing to reconstruct — refused at parse."""
+    with pytest.raises(ValidationError, match="nontarget.recon is empty"):
+        NontargetConfig(batch_size=32, impmin_coeff=6e-3, recon=[])
 
 
 def test_the_nonlinearity_prior_is_scored_once_whatever_the_pass_count() -> None:
