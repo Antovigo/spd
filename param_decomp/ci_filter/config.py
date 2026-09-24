@@ -57,7 +57,10 @@ CIInit = Annotated[InitFromRun | InitFromCIFilter, Discriminator("kind")]
 # ----------------------------------- objective -----------------------------------
 
 
-Operation = Literal["add", "sub"]
+Operation = Literal["add", "sub", "mul"]
+"""The arithmetic the pool spells. `mul` writes `×` (one Llama-3.1 token, as `+` and `-`
+are), so a `mul` prompt tokenizes to the same five positions an `add` one does and the
+position axis stays comparable across pools."""
 
 
 class ArithmeticPoolConfig(BaseConfig):

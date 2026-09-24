@@ -10,7 +10,9 @@ import numpy as np
 from param_decomp.ci_filter.config import ArithmeticPoolConfig, Operation
 from param_decomp.experiments.lm.arithmetic_eval import ArithmeticGrid
 
-SYMBOLS: dict[Operation, str] = {"add": "+", "sub": "-"}
+SYMBOLS: dict[Operation, str] = {"add": "+", "sub": "-", "mul": "×"}
+"""`×` (U+00D7 MULTIPLICATION SIGN), matching `multiplication_1-100.txt` and the
+`ABGridDataset` probe's `mul` — NOT the ASCII `*`, which tokenizes differently."""
 
 
 class Tokenizer(Protocol):

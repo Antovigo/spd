@@ -7,7 +7,10 @@ stage: `smoke` (objective 1 on a 1..30 pool, 30 steps, evals every 10 steps, the
 (last-position cross-entropy of the TRUE answer, init from --init-id).
 Hardware knobs come from the environment: MICRO (prompts per microbatch; unset = the whole
 1024-prompt batch in one forward), EVAL_BATCH (default 1000), GRID_CHUNK (default 1000).
-Every filter runs under the ceiling and prune constraints (see `CIFilterConfig`). The run is referenced by id, so it resolves to `$DATA_ROOT/runs/p-ba5a0c05`."""
+Every filter runs under the ceiling and prune constraints (see `CIFilterConfig`). The run is
+referenced by id, so it resolves to `$DATA_ROOT/runs/<that id>`. TASK=addsub (default) or
+TASK=mult selects the seat, i.e. which run and which prompt pool; RUN_ID and STEP override the
+seat's run and checkpoint."""
 
 import argparse
 import os
@@ -25,10 +28,21 @@ def main() -> None:
     ap.add_argument("--init-id", default=None)
     args = ap.parse_args()
 
+    # TASK picks WHICH decomposition is filtered: the seats differ only in `run.id` and
+    # `pool.operations`, so they are separate template files rather than a flag here.
+    task = os.environ.get("TASK", "addsub")
+    assert task in ("addsub", "mult"), f"TASK must be addsub or mult, got {task!r}"
     template = {
         "obj2": "last_position_integer_kl.yaml",
         "obj3": "last_position_answer_ce.yaml",
     }.get(args.stage, "last_position_kl.yaml")
+    if task == "mult":
+        assert args.stage in ("smoke", "obj1"), (
+            f"no mult seat for {args.stage!r}: only objective 1 (last-position KL) is authored "
+            "for multiplication. The answer-supervised seats need their own template with "
+            "`include_minus: false` — a product is never negative."
+        )
+        template = "last_position_kl_mult.yaml"
     raw = CIFilterConfig.from_file(TEMPLATES / template).model_dump(mode="json")
     micro = os.environ.get("MICRO")
     raw["microbatch_size"] = int(micro) if micro else None
@@ -45,6 +59,13 @@ def main() -> None:
             raw["init"] = {"kind": "ci_filter", "id": args.init_id}
         case _:
             raise AssertionError(f"unknown stage {args.stage!r}")  # argparse choices guard this
+    # RUN_ID / STEP come from run_pipeline.sh, which exports whatever it preflighted — so the
+    # generated config names the SAME checkpoint the caller checked exists. The template's own
+    # `run.id` / `step` are the standalone default for a hand-run make_config.py.
+    if run_id := os.environ.get("RUN_ID"):
+        raw["run"] = {"kind": "id", "id": run_id}
+    if step := os.environ.get("STEP"):
+        raw["step"] = int(step)
     config = CIFilterConfig.model_validate(raw)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     config.to_file(args.out)

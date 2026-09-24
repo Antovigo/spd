@@ -34,7 +34,9 @@ from param_decomp.core.ci_fn import PlacedCIFn
 from param_decomp.core.model import MaterializedMasking, PlacedModel
 from param_decomp.core.precision import COMPUTE_DT
 
-VALUE_OF = {"add": lambda a, b: a + b, "sub": lambda a, b: a - b}
+VALUE_OF = {"add": lambda a, b: a + b, "sub": lambda a, b: a - b, "mul": lambda a, b: a * b}
+"""Every `Operation` needs an entry: `answer_targets` runs for EVERY objective, not only
+the answer-supervised ones, so a missing operation is a KeyError at startup."""
 
 
 @dataclass(frozen=True)

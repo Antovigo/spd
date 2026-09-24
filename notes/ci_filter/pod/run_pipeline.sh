@@ -2,6 +2,8 @@
 # CI filter pipeline on ONE GPU pod: smoke -> objective 1 -> objective 2, detached.
 #     source /workspace/spd/notes/dual_objective/addsub-all-layers/env.sh
 #     ./run_pipeline.sh [--no-smoke] [--only obj1|obj2|obj3] [--init-id cf-xxxxxxxx]
+# TASK=mult filters the MULTIPLICATION decomposition (p-3c1a0c06) instead of addsub;
+# only objective 1 has a mult seat. RUN_ID and STEP override the task's defaults.
 # Stages run in order and stop at the first failure; `--only obj1` keeps the smoke (skip it with
 # --no-smoke), `--only obj2` never runs it. The smoke writes to the fixed id
 # `cf-smoke` and is deleted when it passes. Objective 2 starts from objective 1's CI fn: from
@@ -25,11 +27,31 @@ while [ $# -gt 0 ]; do
   esac; shift
 done
 
-RUN_ID=p-ba5a0c05
-OBJ1_ID="${OBJ1_ID:-addsub-05-filter-last-pos}"
-OBJ2_ID="${OBJ2_ID:-addsub-05-filter-integers}"
-OBJ3_ID="${OBJ3_ID:-addsub-05-filter-answer-ce}"
-STEP=40000
+# TASK selects the decomposition: `addsub` (default, p-ba5a0c05) or `mult` (p-3c1a0c06).
+# It must agree with the seat make_config.py picks, so it is exported, not just read here.
+export TASK="${TASK:-addsub}"
+case "$TASK" in
+  addsub) DEFAULT_RUN_ID=p-ba5a0c05; PREFIX=addsub-05 ;;
+  mult)   DEFAULT_RUN_ID=p-3c1a0c06; PREFIX=mult-06 ;;
+  *) echo "TASK must be addsub or mult, got '$TASK'"; exit 2 ;;
+esac
+# EXPORTED, both of them: make_config.py writes them into the generated config, so the
+# checkpoint this script preflights is always the one the job actually loads. Without the
+# export the overrides would move the checks and the output dir while the job silently ran
+# the template's hard-coded run and step.
+export RUN_ID="${RUN_ID:-$DEFAULT_RUN_ID}"
+export STEP="${STEP:-40000}"
+OBJ1_ID="${OBJ1_ID:-$PREFIX-filter-last-pos}"
+OBJ2_ID="${OBJ2_ID:-$PREFIX-filter-integers}"
+OBJ3_ID="${OBJ3_ID:-$PREFIX-filter-answer-ce}"
+# Only objective 1 has a multiplication seat, and make_config.py refuses the others. Default
+# to it rather than letting the bare invocation spend ~3 GPU-hours on obj1 and THEN die in
+# obj2's config generation. An explicit `--only` still wins (and still fails loudly if it
+# names a stage mult has no seat for).
+if [ "$TASK" = mult ] && [ -z "$ONLY" ]; then
+  ONLY=obj1
+  echo "TASK=mult: only objective 1 is authored for multiplication; running --only obj1"
+fi
 OUT_ROOT="$DATA_ROOT/runs/$RUN_ID/analysis/ci_filter/step_$STEP"
 CONFIGS="$DATA_ROOT/ci_filter/configs"
 mkdir -p "$CONFIGS"

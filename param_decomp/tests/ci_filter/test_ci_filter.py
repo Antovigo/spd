@@ -35,6 +35,7 @@ from param_decomp.ci_filter.config import (
     LastPositionIntegerKL,
     MergedPPGDRecon,
     PGDEvalConfig,
+    RunIdRef,
 )
 from param_decomp.ci_filter.grid import collect_operation, write_applet, write_operation
 from param_decomp.ci_filter.nontarget import (
@@ -91,7 +92,9 @@ CONFIGS = Path(__file__).parents[2] / "ci_filter" / "configs"
 
 
 class FakeTokenizer:
-    """64-token vocab: 0 BOS, 5 '+', 6 '-', 7 '=', 10+n the integer n (n <= 20), 40 '00'."""
+    """64-token vocab: 0 BOS, 5 '+', 6 '-', 7 '=', 8 '×', 10+n the integer n (n <= 20),
+    40 '00'. `×` is ONE token here as it is in Llama-3.1, which is what lets a `mul` prompt
+    share the `add` prompt's five positions."""
 
     def encode(self, text: str, /, *, add_special_tokens: bool) -> list[int]:
         out = [0] if add_special_tokens else []
@@ -103,7 +106,7 @@ class FakeTokenizer:
             if number:
                 out.append(10 + int(number))
                 number = ""
-            out.append({"+": 5, "-": 6, "=": 7}[ch])
+            out.append({"+": 5, "-": 6, "=": 7, "×": 8}[ch])
         if number:
             out.append(10 + int(number))
         return out
@@ -112,7 +115,7 @@ class FakeTokenizer:
         (i,) = token_ids
         if 10 <= i <= 30:
             return str(i - 10)
-        return {0: "<s>", 5: "+", 6: "-", 7: "=", 40: "00"}.get(i, f"<{i}>")
+        return {0: "<s>", 5: "+", 6: "-", 7: "=", 8: "×", 40: "00"}.get(i, f"<{i}>")
 
     def __len__(self) -> int:
         return 64
@@ -177,6 +180,23 @@ def test_pool_blocks_labels_and_answer_tokens() -> None:
     assert 6 not in answer_token_ids(tok, include_minus=False).tolist()
 
 
+def test_multiplication_pool_shares_the_addition_pool_geometry() -> None:
+    """`mul` (the seat behind the mult-06 filter): `×` is one token, so the prompts land on
+    the same five positions `add` uses and the position axis stays comparable across pools.
+    `answer_targets` must also resolve, which is what needs `VALUE_OF["mul"]` — it runs for
+    EVERY objective, not only the answer-supervised ones."""
+    tok = FakeTokenizer()
+    pool = build_pool(
+        ArithmeticPoolConfig(operations=("mul",), a_range=(2, 4), b_range=(2, 4)), tok
+    )
+    assert pool.tokens.shape == (9, 5)
+    assert [(b.operation, b.start, b.stop) for b in pool.blocks] == [("mul", 0, 9)]
+    assert pool.tokens[1].tolist() == tok.encode("2×3=", add_special_tokens=True)
+    assert pool.position_labels == ("<BOS>", "a", "op", "b", "=")
+    targets = answer_targets(pool, tok, answer_token_ids(tok, include_minus=False))
+    assert targets.values.tolist() == [a * b for a in (2, 3, 4) for b in (2, 3, 4)]
+
+
 def test_capped_ci_value_and_gradient() -> None:
     """`min(x, cap)`; at or under the cap the gradient passes, over it only a lowering one."""
     x = jnp.array([0.2, 0.5, 0.9, 0.9])
@@ -201,15 +221,23 @@ def test_batch_indexing() -> None:
 
 @pytest.mark.parametrize(
     "name",
-    ["last_position_kl.yaml", "last_position_integer_kl.yaml", "last_position_answer_ce.yaml"],
+    [
+        "last_position_kl.yaml",
+        "last_position_kl_mult.yaml",
+        "last_position_integer_kl.yaml",
+        "last_position_answer_ce.yaml",
+    ],
 )
 def test_template_configs_parse(name: str, tmp_path: Path) -> None:
     config = CIFilterConfig.from_file(CONFIGS / name)
     assert config.n_microbatches == 1
     config.to_file(tmp_path / name)
     assert CIFilterConfig.from_file(tmp_path / name) == config
-    if name != "last_position_kl.yaml":
+    if not name.startswith("last_position_kl"):
         assert isinstance(config.init, InitFromCIFilter)
+    if name == "last_position_kl_mult.yaml":
+        assert config.pool.operations == ("mul",)
+        assert isinstance(config.run, RunIdRef) and config.run.id == "p-3c1a0c06"
 
 
 # ------------------------------------ placed run ------------------------------------
