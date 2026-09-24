@@ -142,3 +142,9 @@ parity, k=5 -> mod 20, k=4 -> mod 25.
   mostly P.
 - Pitfall: stale .pyc on NFS made a figure rerun silently use old code once; delete __pycache__
   (or check inspect.getsource) when a re-rendered figure looks unchanged.
+- Components-only rerun (job 12739; mlp_periods <L> comp / comp_mean; periods_compare.py): g, u
+  rebuilt from alive gate/up comps (inner x U), W_down -> sum_d U_d V_d^T. Dominant mechanism
+  agrees on 0.95 of the write power, cos 0.85, power 0.66 of the model. All creation cells are
+  reproduced (cos 0.88-0.99). Misses: L30-31 (L31 cos 0.15-0.45) and the sub L14-17 pass-through
+  of the comparator code. Adding each neuron's constant does not help (cos 0.84): the gap is
+  missing content, not the silu operating point.

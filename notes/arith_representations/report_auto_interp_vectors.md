@@ -335,6 +335,39 @@ harmonic.
 
 ![period tree](figures_auto_interp_vectors/period_tree.png)
 
+**Does it hold with components only?** The bookkeeping above runs on the model's own neurons
+(measured gate/up pre-activations, the model's `W_down`); components only named the units. I
+reran it with the MLP rebuilt purely from the alive components, with no CI gating:
+
+- each neuron's `g = Σ_c U_c[n] h_c` over the alive gate components, and `u` likewise over the
+  alive up components;
+- `W_down` replaced by `Σ_d U_d V_dᵀ` over the alive down components.
+
+A second variant also restores each neuron's missing constant (`periods_compare.py`):
+
+| | components only | + neuron constants |
+|---|---|---|
+| dominant mechanism agrees with the model (share of write power) | 0.95 | 0.96 |
+| cosine of the result write with the model's (power-weighted) | 0.85 | 0.84 |
+| size of the write relative to the model's | 0.66 | 0.55 |
+
+- **Every creation step is reproduced**: same mechanism, cosine 0.88-0.99, mostly the same top
+  neurons:
+  - mod 100 L16: X, cos 0.94;
+  - mod 50 L18: X, 0.99;
+  - mod 10 L17-18: X, 0.94-0.95;
+  - mod 5 L18: X, 0.95;
+  - mod 20 L18-19: X, 0.88-0.90 (sub);
+  - parity L17-18: Sx, 0.89-0.95;
+  - mod 25 L22-29: M, 0.89-0.94;
+  - mod 4 L22: M, 0.91.
+- **What the components miss:**
+  - L30 (cos 0.6-0.8) and above all **L31** (cos 0.15-0.45, 10 % of the power);
+  - on subtraction, the pass-through of the early `a−b` comparator code at L14-L17 (cos
+    0.4-0.75 at mod 50 / 25).
+- Restoring the constants does not help. The gap is missing content, not silu's operating
+  point.
+
 **Subtraction** uses the **same units at the same layers**:
 
 - mod 5: L16 c127 / c94 / c76, then L18 c80 / c26 / c24 / c142;
@@ -533,7 +566,8 @@ Mode shares of the odd write: k2 B 0.94; k10 B 0.75 / A 0.25; k20 A 0.96.
   - `qk.py`;
   - `mlp_units.py` + `mlp_analysis.py`;
   - `mirror_neurons.py` + `mirror.py` (the b-mirror of section 5);
-  - `mlp_periods.py` + `periods_summary.py` (section 3.1);
+  - `mlp_periods.py` + `periods_summary.py` + `periods_compare.py` (section 3.1; the
+    component-only rebuild is `mlp_periods <layer> comp|comp_mean`);
   - `output.py`;
   - `figures.py`;
   - `common.py` / `load.py`.
