@@ -46,6 +46,12 @@ Code: `param_decomp/arith_repr/vectors/`. Data and full-size figures:
    - U writes it into a result circle, in phase for 40 / 40 of the (unit, harmonic) pairs.
    - From L19 on, the MLPs receive the result code (40-80 % of their input) and re-write and
      refine it.
+   - Period by period (exact bookkeeping over all neurons, section 3.1):
+     - mod 100, 5, 10, 50 and 20 are made at L16-L19 from a-code × b-code across gate and up;
+     - parity is made inside silu(gate) by a single neuron (L18 unit c4);
+     - mod 25 and mod 4 never come from the operands: later MLPs make them by multiplying result
+       codes (mod 50 × mod 50 → mod 25; mod 5 × mod 20 → mod 4);
+     - from L21 every period is also re-derived that way.
 4. **Output.** Every result-code harmonic is phase-aligned with the unembedding's own Fourier
    plane of the number tokens:
    - each plane votes for the tokens `n ≡ res (mod 100/k)`, and the votes add up only at
@@ -262,6 +268,86 @@ The newly created part is no longer an a×b product; it mixes result harmonics (
 2 and 3). This matches the earlier finding that the long periods fan out from Fourier circles
 into higher-dimensional codes from L26.
 
+### 3.1 Period by period: which MLP makes which period, and how
+
+**Exact bookkeeping.** On the full grid the neuron output `act = silu(g)·u` has, as its 2-D DFT,
+the circular convolution of the DFTs of `s = silu(g)` and `u`. So every neuron's coefficient on
+the result line (`(k, k)` for a+b, `(k, −k)` for a−b) splits exactly into:
+
+| term | what it is |
+|---|---|
+| **X** | `s(k,0)·u(0,±k) + s(0,±k)·u(k,0)`: an a-code times a b-code at the same harmonic, one from the gate and one from up |
+| **M** | `Σ_p s(res p)·u(res k−p)`: two result codes multiplied (harmonic mixing) |
+| **P** | `s̄·u(res k)`, and the part of `ū·s(res k)` that is linear in the gate: a result code the MLP already receives, passed through |
+| **Sx / M (inside silu)** | the rest of `ū·s(res k)`, from a quadratic fit of silu. Its a×b part is **Sx**; its result × result part is counted in M |
+| **O** | everything else |
+
+The layer's result write `T(k) = W_down · act(res k)` is summed over all 14,336 neurons (exact).
+Each term is credited by its projection on `T(k)`; the shares add to 1.
+
+![period map](figures_auto_interp_vectors/period_map.png)
+
+Each dot is one MLP (x) and one result period (y). Area is the size of the write (share of the
+stream variance at `=`); colour is the dominant term. Code:
+`param_decomp/arith_repr/vectors/mlp_periods.py` (bookkeeping) and `periods_summary.py`
+(table, neurons, partners).
+
+**Addition, period by period.** Units are named by their down component. Gate, up and down share
+an index from the neuron-aligned init. Shares are of the layer's write at the period's main
+harmonic.
+
+| period | made at | how | main units (share of the write) | what the unit reads |
+|---|---|---|---|---|
+| mod 100 (k1) | L16 (X 0.82); L17-18 (X ≈ 0.4, the rest passed through) | gate × up | L16 c10 0.39, c29 0.23, c43 0.14, c106 0.12; L18 c23 0.81 | c23: gate reads a @53, b @54; up reads a @50, b @51 (all k1) |
+| mod 5 (k20) | L16 (X 0.95), L18 (X 0.61) | gate × up | L16 c76 0.25, c94 0.24, c4 0.15, c127 0.14; L18 c26 0.44, c24 0.27, c80 0.18 | c26: gate a @3.5, b @3.3; up a @1.5, b @1.5 |
+| mod 10 (k10) | L17 (X 0.91), L18 (X 0.75) | gate × up | L17 c52 0.25, c39 0.19, c49 0.17, c86 0.16; L18 c32 0.37, c88 0.16, c65 0.15, c62 0.14 | c52: gate a @2.4, b @2.4; up (c118) a @3.0, b @2.8 |
+| mod 50 (k2) | L18 (X 0.97; the largest creating write of the network, 3.9 % of the variance) | gate × up | c12 0.27, c21 0.17, c22 0.14, c27 0.14 | c12: gate reads a @2.5; up reads b @21.6 |
+| mod 20 (k5) | L18 (X 0.98), L19 (X 0.88) | gate × up | L18 c18 0.54, c16 0.24, c59 0.18; L19 c6 0.97 (one neuron) | c6: gate a @19.1, b @19.4; up a @19.5, b @19.7 |
+| mod 2 (k50) | L17 (Sx 0.52), L18 (Sx 0.93) | inside silu(gate) | L17 c22 1.0; L18 c4 1.0 (neuron 1712 alone) | gate (c299) reads a's and b's parity; up is ~constant |
+| mod 25 (k4) | never from the operands; from L19, growing to L30 (M 0.60-0.93) | result × result | L22 c5 0.29, c6 0.23, c28 0.13, c27 0.12 | partners: k2 + k2 0.51 (mod 50 squared), −k1 + k5, k3 + k1 |
+| mod 4 (k25) | L22-L30 (M 0.61-0.98) | result × result | L22 c17 0.88 (neuron 9758) | k20 + k5 0.60, k30 − k5 0.31 (mod 5 × mod 20) |
+
+- **The adder unit (X).** Almost every creating unit reads **both** operands in **both** of
+  its inputs, at the same harmonic:
+  - gate ≈ `α cos k(a−φ) + β cos k(b−φ′)`, and up likewise;
+  - the product's cross terms `cos k(a−φ)·cos k(b−φ′)` are `½[cos k(a+b−φ−φ′) + cos k(a−b−φ+φ′)]`;
+  - the phases add (median error 0.04 period).
+  - Silu's own curvature adds a little (Sx mostly < 0.1). The exceptions are parity and L16
+    mod 10 (Sx 0.37 next to X 0.39).
+- **Parity (Sx).** One neuron's gate reads `(−1)^a` and `(−1)^b` together. Silu's curvature
+  squares their sum, which makes `(−1)^(a+b)`: an XOR computed inside the gate
+  nonlinearity. Up only scales it.
+- **Built from components.** Neurons read by alive down components carry 97-100 % of every
+  creating write (82-97 % for the mixing ones). The inputs come from the unit's own gate/up
+  components (same index) plus a few shared read directions (e.g. gate c88, c18, c299).
+- **Later layers re-derive the periods from each other (M, L21-L30).**
+  - mod 5 ← k10 + k10 (0.62 at L21: the units-digit code squared);
+  - mod 10 ← k20 − k10 (0.80 at L21);
+  - mod 100 ← k2 − k1, k3 − k2 (0.69 / 0.20 at L22);
+  - mod 50 ← k1 + k1, k5 − k3 (L23);
+  - mod 20 ← k3 + k2, k10 − k5 (L24).
+  - From L22 roughly half of each late MLP's result write is this re-synthesis; the rest
+    passes the code through. This fits the fan-out of the long periods into higher-dimensional
+    codes from L26 (report_representations.md).
+- **L20, mod 20.** The one write dominated by "other" (O 0.60). Two neurons (units c3, c6)
+  mostly pass the mod-20 code through. They also build it from the `a−b` code times `b` or `a`
+  codes, e.g. `(a−b)·k5 × b·k10 → (a+b)·k5` (= (a−b) + 2b), which is not a line term.
+
+![period tree](figures_auto_interp_vectors/period_tree.png)
+
+**Subtraction** uses the **same units at the same layers**:
+
+- mod 5: L16 c127 / c94 / c76, then L18 c80 / c26 / c24 / c142;
+- mod 10: L17 c39 / c86 / c49 / c34, then L18 c32 / c62 / c88;
+- mod 50: L18 c12 / c21 / c27 / c22;
+- mod 20: L18 c18 / c16 / c59, then L19 c6;
+- parity: L18 c4.
+
+The mirrored b turns each a×b product into `a − b`. The difference is at the long periods: an
+`a−b` code of period 100, 50 and 25 is already present at `=` before L16 (the early comparator).
+So on sub these periods are mostly passed through (P) rather than created. mod 25 and mod 4 again
+come only from mixing (L22-L29).
+
 ## 4. How the result representation becomes the output token
 
 The unembedding rows of the number tokens 0..199 (final-norm weight folded in) are themselves
@@ -447,6 +533,7 @@ Mode shares of the odd write: k2 B 0.94; k10 B 0.75 / A 0.25; k20 A 0.96.
   - `qk.py`;
   - `mlp_units.py` + `mlp_analysis.py`;
   - `mirror_neurons.py` + `mirror.py` (the b-mirror of section 5);
+  - `mlp_periods.py` + `periods_summary.py` (section 3.1);
   - `output.py`;
   - `figures.py`;
   - `common.py` / `load.py`.
@@ -455,5 +542,6 @@ Mode shares of the odd write: k2 B 0.94; k10 B 0.75 / A 0.25; k20 A 0.96.
   - `read_spec.npz`, `write_spec.npz`, `storage.npz`, `transfer.npz`, `qk.npz`, `output.npz`;
   - `mlp/L*.npz`, `mlp_units.parquet`;
   - `mirror/L14-16_neurons.npz` (all 14,336 neurons at `=`);
+  - `periods/L14-31.npz`, `periods/summary.npz`;
   - `figs/`.
 - sbatch files: `~/pd_scratch/dual_obj_jax/arith_repr/vectors/`.

@@ -127,3 +127,18 @@ parity, k=5 -> mod 20, k=4 -> mod 25.
   gate reads b near the silu knee. Every odd neuron reads b at a quarter period (sin phase) ->
   centre 0.
 - Earlier "c21 add-gated vs c72 sub-gated" was mislabelled (c21 is mode B, both ops, opposite sign).
+
+### 2026-09-24 — per-period MLP mechanism (Antoine: "how do MLPs compute the result at each period?")
+- mlp_periods.py (job 12645, array L14-31, all 14,336 neurons at `=`): exact split of every
+  neuron's result-line coefficient via the grid convolution theorem (act = s*u): X (a x b gate x
+  up), M (result x result), P (pass-through), Sx / S_m (inside silu via a quadratic fit), O rest.
+  Credited by projection on the layer's result write W_down act(res k). Checks: shares sum to 1.
+- Map (add): mod 100 L16 X; mod 5 L16+L18 X; mod 10 L17-18 X; mod 50 L18 X (3.9 % of variance,
+  the biggest); mod 20 L18-19 X; parity L17-18 Sx (single neurons: L17 c22, L18 c4 = n1712);
+  mod 25 only via M from L19 (k2+k2); mod 4 only via M from L22 (k20+k5, unit c17 n9758).
+  L21-30: roughly half of each write is M (re-derivation of every period), half P. L20 mod 20: O
+  0.60 = pass + (a-b) x b cross terms (units c3, c6).
+- Sub: same units, same layers; mod 100/50/25 a-b codes already present from the comparator ->
+  mostly P.
+- Pitfall: stale .pyc on NFS made a figure rerun silently use old code once; delete __pycache__
+  (or check inspect.getsource) when a re-rendered figure looks unchanged.

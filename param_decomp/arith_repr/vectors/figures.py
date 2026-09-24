@@ -719,3 +719,84 @@ def mirror_mechanism() -> None:
     fig.suptitle("b's code at '=' seen by the L16 readers: the op flips the sign of the sine axis only "
                  "→ the same circle traversed backwards, b → −b", fontsize=10)  # fmt: skip
     save(fig, "mirror_mechanism")
+
+
+MECH_COLORS = {"X": "#2a78d6", "Sx": "#eb6834", "M": "#1baf7a", "P": "#b9b8b3", "O": "#eda100"}
+MECH_LABELS = {
+    "X": "a-code × b-code across gate and up",
+    "Sx": "a-code × b-code inside silu(gate)",
+    "M": "result × result (harmonic mixing)",
+    "P": "result code passed through",
+    "O": "other (e.g. (a−b)-code × b-code)",
+}
+
+
+def period_map() -> None:
+    """Per MLP at '=' and result period: size = result-code write, colour = dominant mechanism."""
+    z = np.load(OUT / "periods/summary.npz")
+    power, groups = z["power"], z["groups"]
+    fams, layers, names = z["families"], z["layers"], list(z["group_names"])
+    fig, axes = plt.subplots(2, 1, figsize=(12, 7.5), sharex=True)
+    for o, ax in enumerate(axes):
+        for f in range(len(fams)):
+            for j in range(len(layers)):
+                p = power[o, f, j]
+                if p < 2e-4:
+                    continue
+                g = names[int(np.argmax(groups[o, f, j]))]
+                ax.scatter(
+                    layers[j], f, s=6 + 9000 * p, color=MECH_COLORS[g], edgecolor="white", lw=0.8
+                )
+        ax.set_yticks(range(len(fams)), [f"a{'+−'[o]}b mod {T}" for T in fams], fontsize=8)
+        ax.invert_yaxis()
+        style(ax)
+        ax.grid(axis="x", color="#e6e5e0", lw=0.6)
+        ax.set_title(("addition", "subtraction")[o], fontsize=9, color=INK2, loc="left")
+    axes[-1].set_xticks(layers, [str(v) for v in layers], fontsize=8)
+    axes[-1].set_xlabel("MLP layer (position '=')", fontsize=8)
+    for g in names:
+        axes[0].scatter([], [], s=60, color=MECH_COLORS[g], label=MECH_LABELS[g])
+    axes[0].legend(fontsize=7, frameon=False, loc="upper left", bbox_to_anchor=(1.0, 1.0))
+    fig.suptitle("How each MLP writes each period of the result (area = size of the write; colour = "
+                 "dominant term of the exact gate × up bookkeeping)", fontsize=10)  # fmt: skip
+    save(fig, "period_map")
+
+
+def period_tree() -> None:
+    """Which period is made from which: a×b at L16-L18, then result × result from L19."""
+    from matplotlib.patches import FancyArrowPatch
+
+    fig, ax = plt.subplots(figsize=(12, 5.2))
+    ax.axis("off")
+    ax.set_xlim(0, 12)
+    ax.set_ylim(0, 6)
+    y0, y1 = 4.5, 1.5
+    direct = {"mod 50": (1.2, "L18"), "mod 5": (3.4, "L16, L18"), "mod 20": (5.4, "L18-L19"),
+              "mod 2": (7.2, "L17-L18, inside silu"), "mod 10": (9.0, "L17-L18"),
+              "mod 100": (10.8, "L16-L18")}  # fmt: skip
+    derived = {
+        "mod 25": (1.2, "L19-L30: k2 + k2"),
+        "mod 4": (4.4, "L22-L30: k20 + k5"),
+        "re-derived": (9.9, "L21-L30: mod 5 (k10+k10), mod 10 (k20−k10),\n"
+                            "mod 100 (k2−k1), mod 50 (k1+k1), mod 20 (k3+k2)"),
+    }  # fmt: skip
+    ax.text(0.2, 5.55, "created from a-code × b-code at the same harmonic (gate × up; parity inside silu)",
+            fontsize=9, color=INK2)  # fmt: skip
+    ax.text(0.2, 0.45, "created or re-derived later from result × result (harmonic mixing inside one neuron)",
+            fontsize=9, color=INK2)  # fmt: skip
+    for name, (x, lay) in direct.items():
+        ax.text(x, y0, f"a+b {name}\n{lay}", ha="center", va="center", fontsize=8.5,
+                bbox=dict(boxstyle="round,pad=0.4", fc="#d4e4f7", ec="white"))  # fmt: skip
+    for name, (x, lay) in derived.items():
+        title = "a+b " + name if name != "re-derived" else "every other period"
+        ax.text(x, y1, f"{title}\n{lay}", ha="center", va="center", fontsize=8.5,
+                bbox=dict(boxstyle="round,pad=0.4", fc="#c8eedd", ec="white"))  # fmt: skip
+    edges = [("mod 50", "mod 25"), ("mod 5", "mod 4"), ("mod 20", "mod 4"), ("mod 10", "re-derived"),
+             ("mod 100", "re-derived")]  # fmt: skip
+    for a, b in edges:
+        xa, xb = direct[a][0], derived[b][0]
+        ax.add_patch(FancyArrowPatch((xa, y0 - 0.45), (xb, y1 + 0.5), arrowstyle="-|>",
+                                     mutation_scale=12, color=INK2, lw=1.2))  # fmt: skip
+    fig.suptitle("Where each period of the result comes from (addition; subtraction uses the same units)",
+                 fontsize=10)  # fmt: skip
+    save(fig, "period_tree")
