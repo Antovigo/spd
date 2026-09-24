@@ -27,6 +27,8 @@ FIGS = (
     "mech_drift",
     "mech_map",
     "mech_checks",
+    "mech_mlp_linear",
+    "mech_mlp_patch",
 )
 POINTS = [0, 2, 8, 24, 30, 32, 34, 36, 38, 40, 50, 64]
 
@@ -480,6 +482,100 @@ def frag_highlights(rep: R) -> dict[str, str]:
     return f
 
 
+def frag_mlp_linear(run: Path) -> dict[str, str]:
+    """Per-layer split of each MLP's write (mlp_linearity), switching-gate structure, and the
+    linearised forwards (mlp_patch)."""
+    mech = run / AI / "mech"
+    d = pd.read_parquet(mech / "mlp_lin.parquet")
+    fl = pd.read_parquet(mech / "mlp_flips.parquet")
+    pt = pd.read_parquet(mech / "mlp_patch.parquet")
+    f = {}
+    for key, (p, o, v) in {
+        "mlp_lin_a": ("a", "both", "a%10"),
+        "mlp_lin_a100": ("a", "both", "a%100"),
+        "mlp_lin_b": ("b", "add", "b%10"),
+        "mlp_lin_bp": ("b", "add", "prompt"),
+        "mlp_lin_res": ("=", "add", "res%10"),
+    }.items():
+        x = cast(pd.DataFrame, d[(d.pos == p) & (d.op == o) & (d["var"] == v)])
+        x = x.sort_values("layer")
+        fx = fl[(fl.pos == p) & (fl.op == o)].set_index("layer") if p in ("a", "b") else None
+        rows = []
+        for _, r in x.iterrows():
+            row = [
+                f"L{r.layer}",
+                f2(r.E / r.E_in),
+                f2(r.r2_lin),
+                f2(r.r2_noflip),
+                f2(r.share_up),
+                f2(r.share_gate),
+                f2(r.share_silu),
+                f2(r.share_prod),
+                "" if v == "prompt" else int(r.n90_silu),
+            ]
+            if fx is not None:
+                q = p + "%10"
+                row += [int(fx.loc[r.layer, "n_cross"]), f2(fx.loc[r.layer, f"eta_w_{q}"])]
+            rows.append(row)
+        head = [
+            "layer",
+            "write / stream",
+            "R² one linear map",
+            "R² no switching",
+            "up",
+            "gate read",
+            "silu bend",
+            "gate × up",
+            "neurons for 90 % of the bend",
+        ]
+        if fx is not None:
+            head += ["gates crossing 0", "switch between mod-10 classes (weighted)"]
+        f[key] = md_table(head, rows)
+    rows = []
+    x = cast(pd.DataFrame, pt[pt.op == "both"])
+    cleans = []
+    for n in sorted(x.n.unique(), reverse=True):
+        c = pt[(pt.kind == "clean") & (pt.run == x[(x.kind == "clean") & (x.n == n)].run.iloc[0])]
+        acc = dict(zip(c.op, c.acc, strict=True))
+        cleans.append(
+            f"{n} prompts: {acc['both']:.3f} (add {acc['add']:.3f} / sub {acc['sub']:.3f})"
+        )
+    for _, r in cast(pd.DataFrame, x[x.kind != "clean"]).iterrows():
+        add = pt[(pt.run == r.run) & (pt.variant == r.variant) & (pt.op == "add")].iloc[0]
+        sub = pt[(pt.run == r.run) & (pt.variant == r.variant) & (pt.op == "sub")].iloc[0]
+        rows.append(
+            [
+                {"lin": "one linear map", "sl": "no switching", "mean": "write removed"}[r.kind],
+                f"`{r.positions}`",
+                "all" if r.layers == "all" else f"L{r.layers}",
+                f"{r.kl:.3f}",
+                f"{r.agree:.3f}",
+                f"{r.acc:.3f}",
+                f"{add.acc:.3f} / {sub.acc:.3f}",
+                r.n,
+            ]
+        )
+    f["mlp_patch_table"] = (
+        "Clean accuracy (float32 forward), per sample: "
+        + "; ".join(cleans)
+        + ".\n\n"
+        + md_table(
+            [
+                "replacement",
+                "positions",
+                "MLPs",
+                "KL (nats)",
+                "same top token",
+                "accuracy",
+                "accuracy add / sub",
+                "prompts",
+            ],
+            rows,
+        )
+    )
+    return f
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--run", type=Path, required=True)
@@ -487,17 +583,21 @@ def main() -> None:
     args = parser.parse_args()
     rep = R(args.run)
     cc = rep.c[rep.c.n_members > 2]
-    frags = {
-        "counts": frag_counts(rep),
-        "pairs": frag_pairs(rep),
-        "checks": frag_checks(rep),
-        "arrangements": frag_arrangements(rep),
-        "orthogonality": frag_orthogonality(args.run),
-        "n_writers": str(int(rep.m.n_members.sum())),
-        "n_codes": str(len(rep.c)),
-        "n_mechs": str(len(rep.m)),
-        "tiling_share": f"{(cc.overlap_p <= 0.05).mean():.0%} ({int((cc.overlap_p <= 0.05).sum())} of {len(cc)})",
-    } | frag_highlights(rep)
+    frags = (
+        {
+            "counts": frag_counts(rep),
+            "pairs": frag_pairs(rep),
+            "checks": frag_checks(rep),
+            "arrangements": frag_arrangements(rep),
+            "orthogonality": frag_orthogonality(args.run),
+            "n_writers": str(int(rep.m.n_members.sum())),
+            "n_codes": str(len(rep.c)),
+            "n_mechs": str(len(rep.m)),
+            "tiling_share": f"{(cc.overlap_p <= 0.05).mean():.0%} ({int((cc.overlap_p <= 0.05).sum())} of {len(cc)})",
+        }
+        | frag_highlights(rep)
+        | frag_mlp_linear(args.run)
+    )
     app = args.notes / "mech_appendix"
     app.mkdir(exist_ok=True)
     for p in (1, 2, 3, 4):

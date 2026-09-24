@@ -3,7 +3,8 @@
 Decomposition `addsub-all-layers-4xh100-05` (run p-ba5a0c05, step 40000), filter
 `addsub-05-filter-last-pos-ceiling`, prompts `a op b =` with a, b in 1..100. This report continues
 [report_auto_interp.md](report_auto_interp.md). Like that report, it only describes activations
-of the unmodified model; nothing here has been tested by intervention.
+of the unmodified model. The one exception is §2.4, which runs the model with its MLPs replaced by
+linear versions.
 
 It answers two questions.
 
@@ -50,6 +51,15 @@ criteria can work (§1).
   but it gradually moves to new residual directions. Attention steps leave it almost in place.
   Each MLP step moves 10–50 % of it into new directions. Compared with the embedding, the
   mod-10 arrangement at `a` has cos 0.25 after the L15 MLP and 0.07 after L31 (§2).
+* **The MLPs that move the operand code are mostly linear, and their gates need not switch.**
+  On the model's own neurons, one fixed linear map reproduces 82–93 % of each MLP's write to
+  the a mod 10 arrangement at L1–L11 (median 0.88 at L15–L31). The rest is gate × up products,
+  not gates switching. Many gates do cross zero across the values of a, mostly inside a
+  units-digit class, but only near their knee. With silu taken as a line in all 32 MLPs at `a`,
+  the answer moves by KL 0.019 (removing their write: 1.23). The exceptions are L0, where the
+  product dominates, and L12–L14, where a few units-digit detector neurons switch between
+  classes (KL 0.010). Chaining the linear maps is not enough: linearising all 32 MLPs at `a`
+  costs KL 0.47, most of it set off by L0 (§2.4).
 * **Writers of the same variable write in almost orthogonal directions.** Take two writers of
   the same variable at the same position. The cosine between their contributions (write
   pattern times U direction) has a median of 0.000–0.002 and a 99th percentile of 0.03–0.07,
@@ -276,8 +286,12 @@ written again at many layers: `a%100`, `a//10` and `a%50` at `a`, `b%100` and `t
   0.1–0.2 (§3.1). Only L0's MLP adds code strength (share of stream variance
   0.15 → 0.18). Later layers mostly re-write it: the code share stays at 0.16–0.26 up to L31.
   An MLP can reproduce a shape in new directions because the arrangement is (nearly) full rank
-  (9 independent class means), so a linear map can send it anywhere. The gating then lets each
-  component respond to only a few residues, which is how "detectors" re-write a one-hot code.
+  (9 independent class means), so a linear map can send it anywhere. For the same reason,
+  "same shape" says nothing about whether the MLP *is* a linear map: any function of the class
+  is some linear map of a full-rank arrangement. §2.4 tests that directly. Short answer: most
+  of each MLP's write is one linear map, but not all of it. The rest comes from gate × up
+  products, not from gates switching. At the neuron level, gate switching matters only at
+  L12–L14, where units-digit detector neurons turn on for exactly one units digit.
 
 <details><summary>Arrangement tables (every group, both ops, selected points)</summary>
 
@@ -323,6 +337,155 @@ there by attention.
   spreads over k = 1, 2, 10 and many more, and the dimension grows from 5 to 30 at the output.
   Within the period-100 group the arrangement becomes more and more one-hot-like: separate
   directions per result value, which is what an unembedding over number tokens needs.
+
+### 2.4 Is an MLP a linear map on the operand codes? Do its gates switch?
+
+§2.1 says the MLPs re-write the operand arrangement in its own shape. Two readings of that
+would make the operand pathway simple:
+
+1. each MLP acts on the operand as one fixed linear map;
+2. the SwiGLU gates never switch on or off across the operand's values in a way that
+   matters.
+
+Both are tested here on the frozen model's own neurons (no components). Each MLP is fed the
+recorded residual at `a`, `b` and `=`. The population is every prompt of the pool: at `a`,
+that is the 100 distinct prefixes.
+
+**Exact split of each MLP's write.** Take one neuron, with gate pre-activation g, up u,
+s = silu(g) and output h = s·u. Over the population, fit silu with its least-squares line on
+the neuron's own range of g: s ≈ α + βg, with residual r. Then, exactly,
+
+    h − mean(h) =  mean(s)·δu          up        linear: the up read through a frozen gate
+                 + mean(u)·β·δg        gate read linear: the gate's read, silu taken as a line
+                 + mean(u)·r           silu bend the gate switching on/off (0 if it never crosses its knee)
+                 + δs·δu − mean        gate × up the product of two reads (quadratic in the input)
+
+Here δ is the deviation from the population mean. `up` + `gate read` is one affine map of the
+MLP's (normed) input, the same for every prompt: this is the MLP "as a linear map". Map each
+term through W_down and take its class means. That splits the MLP's write to any arrangement
+(§1.1) into four parts. Each part is credited by its projection on the whole write, so the
+four shares sum to 1. The R² of a subset is how much of the write that subset reproduces.
+
+![MLP linearity](figures_auto_interp/mech_mlp_linear.png)
+
+* **Most of the operand write is one linear map, except at L0 and L12–L14.** At `a`, one
+  linear map reproduces 82–93 % of each MLP's write to the a mod 10 arrangement at L1–L11, and
+  69–98 % at L15–L31 (median 0.88). For the full value (a mod 100) it is 62–97 % outside L0 and
+  L12–L14; for b mod 10 at `b` it is 54–98 %. The linear part is shared about evenly between
+  the up read and the gate read. The gates move a lot, but mean(u) ≠ 0, so a moving gate acts
+  like a second linear read.
+* **The rest is mostly the gate × up product, not switching.** Outside L12–L14, the silu bend
+  is at most 6 % of the write, and usually 0–3 %. The product carries up to 28 % at `a`. It
+  carries 13–51 % of the per-prompt write at `b` (variable "prompt" in the tables), where the
+  stream also carries a and op.
+* **L0 is not linear.** At L0 the product carries 71 % of the a mod 10 write (57 % of a mod
+  100), and one linear map reproduces only 35 %. L0 is also the only MLP that writes more code
+  than the stream already holds (write / stream energy 2.4). Every later MLP is at 0.07–0.48,
+  and L31 at 0.74.
+* **L12–L14 switch, but between classes.** Here a handful of neurons carry the silu bend: 4
+  neurons hold 90 % of it at L12 and L13, 46 at L14. Its share of the a mod 10 write is 0.21,
+  0.38 and 0.10. These are units-digit detectors. Each gate is on for exactly the ten values
+  with one units digit and off for all others. For example, at L13 n1653 is on for
+  a ∈ {7, 17, …, 97}, n10984 for {3, 13, …, 93}, n9765 for {5, …, 95} and n8597 for
+  {8, …, 98}; at L12 n6778, n5408 and n4839 do the same for 9, 0 and 1.
+* **Elsewhere many gates cross zero, mostly inside a class, and it does not matter.** Across
+  the 100 values of a, 6,000–13,000 of the 14,336 gates cross zero (2–98 % of the values have
+  g > 0). Outside L11–L14, typically 10–30 % of the variance of those on/off patterns lies
+  between mod-10 classes (up to 38 % at L27; weighted by each neuron's silu bend). Between
+  tens-digit classes it is 30–55 %. So most switching happens inside a units-digit class,
+  tracking the tens digit or magnitude. These crossings happen near the knee, where silu is
+  almost a line, so they add little to the write. At L12–L13 the between-class share is
+  0.69–0.79. At `b` it is lower still, 0.03–0.16 outside L12–L14, because the gates there also
+  follow a and op.
+* **Contrast: the result at `=`.** At L16–L18, one linear map reproduces only 8–15 % of the
+  res mod 10 write. The product carries 50–90 % there: this is the a × b multiplication of the
+  vector report. From L19 on the result's re-writes are 50–95 % linear.
+
+**Causal test: the model with MLPs replaced by their linear versions.** For each MLP at a
+position, three replacements, all fitted on the same population and each reproducing the
+MLP's mean output on it exactly:
+
+* `one linear map`: h = mean(h) + up + gate read (nothing switches, nothing multiplies);
+* `no switching`: silu replaced by each neuron's line, h = (α + βg)·u + c (the gate × up
+  product is kept);
+* `write removed`: h = mean(h), for scale.
+
+The model is run in float32 from the embedding on a random half-add, half-sub sample of the
+pool, with the replacement at every layer in a range. The table reports the KL of the next-token
+distribution at `=` to the clean model's, and the accuracy of the answer's first token. Clean
+accuracy is 0.95 on add. On sub it is 0.27–0.29, because a negative answer has to start with
+"-". KL is the main measure. Bars at the left edge of the figure are below 1e-4.
+
+![MLP patch](figures_auto_interp/mech_mlp_patch.png)
+
+* **The gates never need to switch.** Taking silu as a line in all 32 MLPs at `a` costs KL
+  0.019 (add accuracy 0.95 → 0.93), against 1.23 for removing their write. Of that, 0.010
+  comes from L12–L14 alone (the units-digit detectors); L0–L11 and L15–L31 cost 0.001 each.
+  At `b` it is 0.045 in total (0.016 from L12–L14, 0.022 from L0–L7). So switching inside a
+  class is causally negligible. The one causally visible switch is between classes, and
+  small.
+* **But the operand pathway is not a chain of linear maps.** One linear map in all 32 MLPs at
+  `a` costs KL 0.47 (add accuracy 0.95 → 0.39). That recovers only 62 % of the gap to removing
+  their write (1.23). At `b` it is 0.37, and at both positions together 0.89 (add accuracy
+  0.11).
+  * L0 is the largest single contributor: linearising only L0 at `a` costs 0.057, against
+    0.006 for L1–L7 and 0.073 for L1–L31.
+  * The effects compound. L0 and L1–L31, each linearised alone, cost 0.057 and 0.073, but
+    together 0.47, and L0–L7 together 0.147. Each linear map is fitted on the clean inputs.
+    Once an earlier MLP has been linearised, the later ones see different inputs, and there
+    the dropped product terms matter.
+  * At `b` the maps are fitted over both ops, so the op-gated mirror of b (L15, vector
+    report) is part of what a linear map cannot do. Linearising b's L1–L7 changes the top
+    token on 22 % of prompts but *raises* accuracy (add 0.94 → 0.99, sub 0.29 → 0.45). This is
+    not explained here.
+* **At `=` the MLPs are not linear at all.** One linear map in all 32 MLPs at `=` costs KL 1.16,
+  almost as much as removing their write (1.53). No switching costs 0.12.
+
+So, for the operand codes, each MLP's write is mostly one linear map of its input, and its
+gates never have to switch. What a linear map misses is the gate × up product. It is small in
+most single MLPs, but decisive in L0 and once the MLPs are chained. At the neuron level,
+detector-like switching (a gate on for one residue class and off for the rest) matters only
+at L12–L14. There, units-digit neurons switch between classes, never inside one.
+
+<details><summary>Per-layer split: a mod 10 at `a`</summary>
+
+{{mlp_lin_a}}
+
+</details>
+
+<details><summary>Per-layer split: a mod 100 (every value) at `a`</summary>
+
+{{mlp_lin_a100}}
+
+</details>
+
+<details><summary>Per-layer split: b mod 10 at `b` (add)</summary>
+
+{{mlp_lin_b}}
+
+</details>
+
+<details><summary>Per-layer split: every prompt at `b` (add)</summary>
+
+{{mlp_lin_bp}}
+
+</details>
+
+<details><summary>Per-layer split: res mod 10 at `=` (add)</summary>
+
+{{mlp_lin_res}}
+
+</details>
+
+<details><summary>Every linearised forward</summary>
+
+{{mlp_patch_table}}
+
+</details>
+
+Code: `param_decomp/arith_repr/autointerp/mlp_linearity.py` (split, one job per layer),
+`mlp_patch.py` (forwards), `mlp_lin_report.py` (switching structure, tables, figures). Data in
+`<run>/analysis/arith_repr/autointerp/mech/mlp_lin/`, `mlp_patch/`, `mlp_*.parquet`.
 
 ## 3. The mechanisms
 

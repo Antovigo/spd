@@ -3,7 +3,8 @@
 Decomposition `addsub-all-layers-4xh100-05` (run p-ba5a0c05, step 40000), filter
 `addsub-05-filter-last-pos-ceiling`, prompts `a op b =` with a, b in 1..100. This report continues
 [report_auto_interp.md](report_auto_interp.md). Like that report, it only describes activations
-of the unmodified model; nothing here has been tested by intervention.
+of the unmodified model. The one exception is §2.4, which runs the model with its MLPs replaced by
+linear versions.
 
 It answers two questions.
 
@@ -50,6 +51,15 @@ criteria can work (§1).
   but it gradually moves to new residual directions. Attention steps leave it almost in place.
   Each MLP step moves 10–50 % of it into new directions. Compared with the embedding, the
   mod-10 arrangement at `a` has cos 0.25 after the L15 MLP and 0.07 after L31 (§2).
+* **The MLPs that move the operand code are mostly linear, and their gates need not switch.**
+  On the model's own neurons, one fixed linear map reproduces 82–93 % of each MLP's write to
+  the a mod 10 arrangement at L1–L11 (median 0.88 at L15–L31). The rest is gate × up products,
+  not gates switching. Many gates do cross zero across the values of a, mostly inside a
+  units-digit class, but only near their knee. With silu taken as a line in all 32 MLPs at `a`,
+  the answer moves by KL 0.019 (removing their write: 1.23). The exceptions are L0, where the
+  product dominates, and L12–L14, where a few units-digit detector neurons switch between
+  classes (KL 0.010). Chaining the linear maps is not enough: linearising all 32 MLPs at `a`
+  costs KL 0.47, most of it set off by L0 (§2.4).
 * **Writers of the same variable write in almost orthogonal directions.** Take two writers of
   the same variable at the same position. The cosine between their contributions (write
   pattern times U direction) has a median of 0.000–0.002 and a 99th percentile of 0.03–0.07,
@@ -317,8 +327,12 @@ written again at many layers: `a%100`, `a//10` and `a%50` at `a`, `b%100` and `t
   0.1–0.2 (§3.1). Only L0's MLP adds code strength (share of stream variance
   0.15 → 0.18). Later layers mostly re-write it: the code share stays at 0.16–0.26 up to L31.
   An MLP can reproduce a shape in new directions because the arrangement is (nearly) full rank
-  (9 independent class means), so a linear map can send it anywhere. The gating then lets each
-  component respond to only a few residues, which is how "detectors" re-write a one-hot code.
+  (9 independent class means), so a linear map can send it anywhere. For the same reason,
+  "same shape" says nothing about whether the MLP *is* a linear map: any function of the class
+  is some linear map of a full-rank arrangement. §2.4 tests that directly. Short answer: most
+  of each MLP's write is one linear map, but not all of it. The rest comes from gate × up
+  products, not from gates switching. At the neuron level, gate switching matters only at
+  L12–L14, where units-digit detector neurons turn on for exactly one units digit.
 
 <details><summary>Arrangement tables (every group, both ops, selected points)</summary>
 
@@ -667,6 +681,377 @@ there by attention.
   spreads over k = 1, 2, 10 and many more, and the dimension grows from 5 to 30 at the output.
   Within the period-100 group the arrangement becomes more and more one-hot-like: separate
   directions per result value, which is what an unembedding over number tokens needs.
+
+### 2.4 Is an MLP a linear map on the operand codes? Do its gates switch?
+
+§2.1 says the MLPs re-write the operand arrangement in its own shape. Two readings of that
+would make the operand pathway simple:
+
+1. each MLP acts on the operand as one fixed linear map;
+2. the SwiGLU gates never switch on or off across the operand's values in a way that
+   matters.
+
+Both are tested here on the frozen model's own neurons (no components). Each MLP is fed the
+recorded residual at `a`, `b` and `=`. The population is every prompt of the pool: at `a`,
+that is the 100 distinct prefixes.
+
+**Exact split of each MLP's write.** Take one neuron, with gate pre-activation g, up u,
+s = silu(g) and output h = s·u. Over the population, fit silu with its least-squares line on
+the neuron's own range of g: s ≈ α + βg, with residual r. Then, exactly,
+
+    h − mean(h) =  mean(s)·δu          up        linear: the up read through a frozen gate
+                 + mean(u)·β·δg        gate read linear: the gate's read, silu taken as a line
+                 + mean(u)·r           silu bend the gate switching on/off (0 if it never crosses its knee)
+                 + δs·δu − mean        gate × up the product of two reads (quadratic in the input)
+
+Here δ is the deviation from the population mean. `up` + `gate read` is one affine map of the
+MLP's (normed) input, the same for every prompt: this is the MLP "as a linear map". Map each
+term through W_down and take its class means. That splits the MLP's write to any arrangement
+(§1.1) into four parts. Each part is credited by its projection on the whole write, so the
+four shares sum to 1. The R² of a subset is how much of the write that subset reproduces.
+
+![MLP linearity](figures_auto_interp/mech_mlp_linear.png)
+
+* **Most of the operand write is one linear map, except at L0 and L12–L14.** At `a`, one
+  linear map reproduces 82–93 % of each MLP's write to the a mod 10 arrangement at L1–L11, and
+  69–98 % at L15–L31 (median 0.88). For the full value (a mod 100) it is 62–97 % outside L0 and
+  L12–L14; for b mod 10 at `b` it is 54–98 %. The linear part is shared about evenly between
+  the up read and the gate read. The gates move a lot, but mean(u) ≠ 0, so a moving gate acts
+  like a second linear read.
+* **The rest is mostly the gate × up product, not switching.** Outside L12–L14, the silu bend
+  is at most 6 % of the write, and usually 0–3 %. The product carries up to 28 % at `a`. It
+  carries 13–51 % of the per-prompt write at `b` (variable "prompt" in the tables), where the
+  stream also carries a and op.
+* **L0 is not linear.** At L0 the product carries 71 % of the a mod 10 write (57 % of a mod
+  100), and one linear map reproduces only 35 %. L0 is also the only MLP that writes more code
+  than the stream already holds (write / stream energy 2.4). Every later MLP is at 0.07–0.48,
+  and L31 at 0.74.
+* **L12–L14 switch, but between classes.** Here a handful of neurons carry the silu bend: 4
+  neurons hold 90 % of it at L12 and L13, 46 at L14. Its share of the a mod 10 write is 0.21,
+  0.38 and 0.10. These are units-digit detectors. Each gate is on for exactly the ten values
+  with one units digit and off for all others. For example, at L13 n1653 is on for
+  a ∈ {7, 17, …, 97}, n10984 for {3, 13, …, 93}, n9765 for {5, …, 95} and n8597 for
+  {8, …, 98}; at L12 n6778, n5408 and n4839 do the same for 9, 0 and 1.
+* **Elsewhere many gates cross zero, mostly inside a class, and it does not matter.** Across
+  the 100 values of a, 6,000–13,000 of the 14,336 gates cross zero (2–98 % of the values have
+  g > 0). Outside L11–L14, typically 10–30 % of the variance of those on/off patterns lies
+  between mod-10 classes (up to 38 % at L27; weighted by each neuron's silu bend). Between
+  tens-digit classes it is 30–55 %. So most switching happens inside a units-digit class,
+  tracking the tens digit or magnitude. These crossings happen near the knee, where silu is
+  almost a line, so they add little to the write. At L12–L13 the between-class share is
+  0.69–0.79. At `b` it is lower still, 0.03–0.16 outside L12–L14, because the gates there also
+  follow a and op.
+* **Contrast: the result at `=`.** At L16–L18, one linear map reproduces only 8–15 % of the
+  res mod 10 write. The product carries 50–90 % there: this is the a × b multiplication of the
+  vector report. From L19 on the result's re-writes are 50–95 % linear.
+
+**Causal test: the model with MLPs replaced by their linear versions.** For each MLP at a
+position, three replacements, all fitted on the same population and each reproducing the
+MLP's mean output on it exactly:
+
+* `one linear map`: h = mean(h) + up + gate read (nothing switches, nothing multiplies);
+* `no switching`: silu replaced by each neuron's line, h = (α + βg)·u + c (the gate × up
+  product is kept);
+* `write removed`: h = mean(h), for scale.
+
+The model is run in float32 from the embedding on a random half-add, half-sub sample of the
+pool, with the replacement at every layer in a range. The table reports the KL of the next-token
+distribution at `=` to the clean model's, and the accuracy of the answer's first token. Clean
+accuracy is 0.95 on add. On sub it is 0.27–0.29, because a negative answer has to start with
+"-". KL is the main measure. Bars at the left edge of the figure are below 1e-4.
+
+![MLP patch](figures_auto_interp/mech_mlp_patch.png)
+
+* **The gates never need to switch.** Taking silu as a line in all 32 MLPs at `a` costs KL
+  0.019 (add accuracy 0.95 → 0.93), against 1.23 for removing their write. Of that, 0.010
+  comes from L12–L14 alone (the units-digit detectors); L0–L11 and L15–L31 cost 0.001 each.
+  At `b` it is 0.045 in total (0.016 from L12–L14, 0.022 from L0–L7). So switching inside a
+  class is causally negligible. The one causally visible switch is between classes, and
+  small.
+* **But the operand pathway is not a chain of linear maps.** One linear map in all 32 MLPs at
+  `a` costs KL 0.47 (add accuracy 0.95 → 0.39). That recovers only 62 % of the gap to removing
+  their write (1.23). At `b` it is 0.37, and at both positions together 0.89 (add accuracy
+  0.11).
+  * L0 is the largest single contributor: linearising only L0 at `a` costs 0.057, against
+    0.006 for L1–L7 and 0.073 for L1–L31.
+  * The effects compound. L0 and L1–L31, each linearised alone, cost 0.057 and 0.073, but
+    together 0.47, and L0–L7 together 0.147. Each linear map is fitted on the clean inputs.
+    Once an earlier MLP has been linearised, the later ones see different inputs, and there
+    the dropped product terms matter.
+  * At `b` the maps are fitted over both ops, so the op-gated mirror of b (L15, vector
+    report) is part of what a linear map cannot do. Linearising b's L1–L7 changes the top
+    token on 22 % of prompts but *raises* accuracy (add 0.94 → 0.99, sub 0.29 → 0.45). This is
+    not explained here.
+* **At `=` the MLPs are not linear at all.** One linear map in all 32 MLPs at `=` costs KL 1.16,
+  almost as much as removing their write (1.53). No switching costs 0.12.
+
+So, for the operand codes, each MLP's write is mostly one linear map of its input, and its
+gates never have to switch. What a linear map misses is the gate × up product. It is small in
+most single MLPs, but decisive in L0 and once the MLPs are chained. At the neuron level,
+detector-like switching (a gate on for one residue class and off for the rest) matters only
+at L12–L14. There, units-digit neurons switch between classes, never inside one.
+
+<details><summary>Per-layer split: a mod 10 at `a`</summary>
+
+| layer | write / stream | R² one linear map | R² no switching | up | gate read | silu bend | gate × up | neurons for 90 % of the bend | gates crossing 0 | switch between mod-10 classes (weighted) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| L0 | 2.39 | 0.35 | 1.00 | 0.15 | 0.15 | 0.00 | 0.71 | 5009 | 13028 | 0.12 |
+| L1 | 0.24 | 0.83 | 1.00 | 0.45 | 0.36 | 0.00 | 0.19 | 5518 | 12235 | 0.14 |
+| L2 | 0.41 | 0.82 | 1.00 | 0.43 | 0.35 | 0.00 | 0.22 | 6205 | 11728 | 0.11 |
+| L3 | 0.48 | 0.83 | 0.99 | 0.35 | 0.47 | 0.01 | 0.17 | 5813 | 11337 | 0.13 |
+| L4 | 0.29 | 0.87 | 0.99 | 0.46 | 0.42 | 0.00 | 0.12 | 5786 | 8928 | 0.10 |
+| L5 | 0.21 | 0.88 | 0.99 | 0.53 | 0.37 | 0.00 | 0.10 | 6030 | 8736 | 0.08 |
+| L6 | 0.22 | 0.88 | 0.99 | 0.54 | 0.37 | 0.00 | 0.09 | 5930 | 7880 | 0.09 |
+| L7 | 0.21 | 0.90 | 0.99 | 0.49 | 0.44 | 0.00 | 0.07 | 5749 | 7551 | 0.10 |
+| L8 | 0.11 | 0.91 | 0.99 | 0.53 | 0.43 | 0.00 | 0.04 | 5961 | 6510 | 0.12 |
+| L9 | 0.13 | 0.93 | 1.00 | 0.45 | 0.50 | 0.00 | 0.05 | 5564 | 6292 | 0.13 |
+| L10 | 0.10 | 0.93 | 1.00 | 0.51 | 0.45 | -0.00 | 0.04 | 5741 | 6506 | 0.12 |
+| L11 | 0.24 | 0.84 | 0.97 | 0.27 | 0.53 | 0.03 | 0.17 | 1293 | 6302 | 0.27 |
+| L12 | 0.26 | 0.62 | 0.71 | 0.11 | 0.79 | 0.20 | -0.10 | 4 | 6063 | 0.69 |
+| L13 | 0.35 | 0.31 | 0.39 | 0.12 | 0.80 | 0.38 | -0.30 | 4 | 6012 | 0.79 |
+| L14 | 0.26 | 0.46 | 0.82 | 0.32 | 0.62 | 0.10 | -0.04 | 46 | 6162 | 0.46 |
+| L15 | 0.15 | 0.75 | 0.98 | 0.55 | 0.33 | 0.01 | 0.12 | 3808 | 6342 | 0.15 |
+| L16 | 0.20 | 0.80 | 0.97 | 0.36 | 0.54 | 0.02 | 0.08 | 1907 | 6874 | 0.23 |
+| L17 | 0.20 | 0.85 | 0.98 | 0.52 | 0.33 | 0.02 | 0.13 | 3243 | 6389 | 0.20 |
+| L18 | 0.13 | 0.84 | 0.99 | 0.46 | 0.42 | 0.01 | 0.11 | 4535 | 7147 | 0.31 |
+| L19 | 0.13 | 0.85 | 0.98 | 0.49 | 0.48 | 0.02 | 0.01 | 4166 | 7428 | 0.28 |
+| L20 | 0.12 | 0.88 | 0.97 | 0.42 | 0.48 | 0.02 | 0.07 | 3906 | 7811 | 0.22 |
+| L21 | 0.13 | 0.69 | 0.93 | 0.33 | 0.71 | 0.03 | -0.08 | 2855 | 7902 | 0.24 |
+| L22 | 0.08 | 0.85 | 0.99 | 0.46 | 0.41 | 0.01 | 0.12 | 5683 | 8600 | 0.13 |
+| L23 | 0.07 | 0.80 | 0.98 | 0.45 | 0.53 | 0.01 | 0.00 | 5128 | 9210 | 0.14 |
+| L24 | 0.08 | 0.88 | 0.98 | 0.44 | 0.50 | 0.01 | 0.05 | 5583 | 9326 | 0.13 |
+| L25 | 0.10 | 0.90 | 0.99 | 0.28 | 0.60 | 0.01 | 0.11 | 5787 | 9342 | 0.13 |
+| L26 | 0.09 | 0.89 | 0.99 | 0.44 | 0.46 | 0.01 | 0.09 | 5731 | 9003 | 0.13 |
+| L27 | 0.11 | 0.93 | 0.98 | 0.32 | 0.61 | 0.06 | 0.02 | 3247 | 8746 | 0.38 |
+| L28 | 0.10 | 0.91 | 0.99 | 0.45 | 0.47 | 0.02 | 0.07 | 5386 | 8576 | 0.17 |
+| L29 | 0.13 | 0.91 | 0.99 | 0.44 | 0.47 | 0.01 | 0.07 | 5491 | 8141 | 0.15 |
+| L30 | 0.18 | 0.93 | 0.99 | 0.51 | 0.44 | 0.01 | 0.03 | 5338 | 7441 | 0.16 |
+| L31 | 0.74 | 0.98 | 1.00 | 0.53 | 0.47 | 0.00 | 0.00 | 4598 | 7029 | 0.14 |
+
+
+</details>
+
+<details><summary>Per-layer split: a mod 100 (every value) at `a`</summary>
+
+| layer | write / stream | R² one linear map | R² no switching | up | gate read | silu bend | gate × up | neurons for 90 % of the bend | gates crossing 0 | switch between mod-10 classes (weighted) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| L0 | 2.11 | 0.43 | 1.00 | 0.22 | 0.21 | 0.00 | 0.57 | 3984 | 13028 | 0.12 |
+| L1 | 0.31 | 0.75 | 1.00 | 0.42 | 0.33 | 0.00 | 0.25 | 5481 | 12235 | 0.14 |
+| L2 | 0.55 | 0.73 | 1.00 | 0.38 | 0.33 | 0.00 | 0.28 | 5439 | 11728 | 0.11 |
+| L3 | 0.51 | 0.72 | 1.00 | 0.36 | 0.38 | 0.01 | 0.26 | 5455 | 11337 | 0.13 |
+| L4 | 0.36 | 0.79 | 0.98 | 0.43 | 0.39 | 0.01 | 0.17 | 5179 | 8928 | 0.10 |
+| L5 | 0.29 | 0.77 | 0.98 | 0.46 | 0.39 | 0.01 | 0.14 | 4783 | 8736 | 0.08 |
+| L6 | 0.28 | 0.80 | 0.98 | 0.50 | 0.35 | 0.01 | 0.14 | 5306 | 7880 | 0.09 |
+| L7 | 0.26 | 0.82 | 0.99 | 0.48 | 0.39 | 0.01 | 0.12 | 5085 | 7551 | 0.10 |
+| L8 | 0.14 | 0.88 | 0.99 | 0.52 | 0.40 | 0.00 | 0.07 | 5973 | 6510 | 0.12 |
+| L9 | 0.14 | 0.88 | 1.00 | 0.50 | 0.42 | 0.00 | 0.08 | 5749 | 6292 | 0.13 |
+| L10 | 0.13 | 0.87 | 0.99 | 0.48 | 0.43 | 0.00 | 0.09 | 5207 | 6506 | 0.12 |
+| L11 | 0.24 | 0.84 | 0.98 | 0.33 | 0.49 | 0.02 | 0.16 | 1968 | 6302 | 0.27 |
+| L12 | 0.21 | 0.78 | 0.89 | 0.31 | 0.59 | 0.08 | 0.02 | 34 | 6063 | 0.69 |
+| L13 | 0.28 | 0.52 | 0.77 | 0.27 | 0.53 | 0.14 | 0.06 | 14 | 6012 | 0.79 |
+| L14 | 0.28 | 0.58 | 0.90 | 0.31 | 0.49 | 0.05 | 0.15 | 228 | 6162 | 0.46 |
+| L15 | 0.23 | 0.62 | 0.94 | 0.43 | 0.33 | 0.03 | 0.20 | 1239 | 6342 | 0.15 |
+| L16 | 0.30 | 0.70 | 0.97 | 0.43 | 0.31 | 0.02 | 0.24 | 1537 | 6874 | 0.23 |
+| L17 | 0.23 | 0.71 | 0.98 | 0.39 | 0.32 | 0.03 | 0.26 | 2081 | 6389 | 0.20 |
+| L18 | 0.17 | 0.66 | 0.98 | 0.37 | 0.40 | 0.01 | 0.22 | 3986 | 7147 | 0.31 |
+| L19 | 0.16 | 0.78 | 0.98 | 0.49 | 0.37 | 0.02 | 0.12 | 4138 | 7428 | 0.28 |
+| L20 | 0.15 | 0.79 | 0.97 | 0.39 | 0.44 | 0.03 | 0.15 | 3484 | 7811 | 0.22 |
+| L21 | 0.15 | 0.73 | 0.95 | 0.37 | 0.48 | 0.03 | 0.12 | 3082 | 7902 | 0.24 |
+| L22 | 0.10 | 0.81 | 0.98 | 0.45 | 0.39 | 0.01 | 0.15 | 5310 | 8600 | 0.13 |
+| L23 | 0.10 | 0.79 | 0.98 | 0.39 | 0.47 | 0.01 | 0.13 | 5240 | 9210 | 0.14 |
+| L24 | 0.09 | 0.77 | 0.98 | 0.41 | 0.43 | 0.01 | 0.15 | 5382 | 9326 | 0.13 |
+| L25 | 0.11 | 0.80 | 0.98 | 0.39 | 0.44 | 0.01 | 0.16 | 5139 | 9342 | 0.13 |
+| L26 | 0.10 | 0.82 | 0.98 | 0.40 | 0.43 | 0.02 | 0.16 | 5407 | 9003 | 0.13 |
+| L27 | 0.10 | 0.83 | 0.97 | 0.40 | 0.46 | 0.03 | 0.12 | 4661 | 8746 | 0.38 |
+| L28 | 0.11 | 0.83 | 0.98 | 0.44 | 0.42 | 0.02 | 0.12 | 5010 | 8576 | 0.17 |
+| L29 | 0.14 | 0.83 | 0.98 | 0.43 | 0.44 | 0.02 | 0.11 | 4936 | 8141 | 0.15 |
+| L30 | 0.21 | 0.88 | 0.98 | 0.47 | 0.44 | 0.02 | 0.07 | 5222 | 7441 | 0.16 |
+| L31 | 0.76 | 0.97 | 0.99 | 0.53 | 0.45 | 0.01 | 0.01 | 5206 | 7029 | 0.14 |
+
+
+</details>
+
+<details><summary>Per-layer split: b mod 10 at `b` (add)</summary>
+
+| layer | write / stream | R² one linear map | R² no switching | up | gate read | silu bend | gate × up | neurons for 90 % of the bend | gates crossing 0 | switch between mod-10 classes (weighted) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| L0 | 1.22 | 0.47 | 1.00 | 0.17 | 0.18 | 0.00 | 0.65 | 5173 | 12476 | 0.09 |
+| L1 | 0.38 | 0.72 | 1.00 | 0.40 | 0.27 | 0.00 | 0.33 | 5385 | 12659 | 0.06 |
+| L2 | 0.43 | 0.66 | 1.00 | 0.32 | 0.28 | 0.00 | 0.40 | 5535 | 11693 | 0.05 |
+| L3 | 0.54 | 0.72 | 1.00 | 0.35 | 0.33 | 0.00 | 0.32 | 5487 | 11688 | 0.07 |
+| L4 | 0.47 | 0.76 | 0.99 | 0.43 | 0.30 | 0.00 | 0.27 | 5320 | 10698 | 0.05 |
+| L5 | 0.39 | 0.76 | 0.99 | 0.45 | 0.28 | 0.01 | 0.27 | 5490 | 10232 | 0.04 |
+| L6 | 0.36 | 0.75 | 0.99 | 0.47 | 0.27 | 0.01 | 0.26 | 5383 | 9749 | 0.03 |
+| L7 | 0.32 | 0.78 | 0.99 | 0.43 | 0.31 | 0.01 | 0.25 | 5122 | 9658 | 0.04 |
+| L8 | 0.22 | 0.76 | 0.99 | 0.43 | 0.30 | 0.01 | 0.26 | 5203 | 9245 | 0.03 |
+| L9 | 0.23 | 0.80 | 0.99 | 0.42 | 0.36 | 0.01 | 0.20 | 5299 | 8923 | 0.03 |
+| L10 | 0.16 | 0.79 | 0.99 | 0.46 | 0.30 | 0.01 | 0.23 | 5221 | 8865 | 0.03 |
+| L11 | 0.26 | 0.80 | 0.99 | 0.33 | 0.39 | 0.04 | 0.24 | 3257 | 8642 | 0.13 |
+| L12 | 0.34 | 0.75 | 0.84 | 0.17 | 0.63 | 0.14 | 0.06 | 113 | 8553 | 0.47 |
+| L13 | 0.40 | 0.52 | 0.47 | 0.18 | 0.61 | 0.36 | -0.15 | 4 | 8076 | 0.72 |
+| L14 | 0.27 | 0.59 | 0.86 | 0.36 | 0.46 | 0.09 | 0.08 | 796 | 8239 | 0.33 |
+| L15 | 0.17 | 0.76 | 0.98 | 0.57 | 0.24 | 0.01 | 0.18 | 4521 | 7645 | 0.08 |
+| L16 | 0.18 | 0.81 | 0.98 | 0.47 | 0.35 | 0.02 | 0.16 | 4198 | 7616 | 0.12 |
+| L17 | 0.18 | 0.80 | 0.98 | 0.49 | 0.27 | 0.01 | 0.23 | 4927 | 7384 | 0.07 |
+| L18 | 0.12 | 0.79 | 0.99 | 0.48 | 0.32 | 0.02 | 0.19 | 4970 | 7502 | 0.08 |
+| L19 | 0.13 | 0.79 | 0.97 | 0.41 | 0.40 | 0.03 | 0.17 | 4455 | 7748 | 0.11 |
+| L20 | 0.13 | 0.81 | 0.97 | 0.36 | 0.43 | 0.03 | 0.18 | 4116 | 8209 | 0.13 |
+| L21 | 0.14 | 0.75 | 0.95 | 0.30 | 0.62 | 0.04 | 0.04 | 3182 | 7964 | 0.16 |
+| L22 | 0.09 | 0.70 | 0.98 | 0.39 | 0.33 | 0.01 | 0.27 | 5304 | 8623 | 0.05 |
+| L23 | 0.07 | 0.72 | 0.97 | 0.36 | 0.47 | 0.04 | 0.13 | 4575 | 9090 | 0.06 |
+| L24 | 0.07 | 0.75 | 0.98 | 0.38 | 0.38 | 0.02 | 0.22 | 5211 | 9430 | 0.06 |
+| L25 | 0.07 | 0.76 | 0.97 | 0.34 | 0.44 | -0.00 | 0.22 | 4813 | 9382 | 0.09 |
+| L26 | 0.07 | 0.77 | 0.97 | 0.37 | 0.37 | 0.04 | 0.22 | 4697 | 9004 | 0.05 |
+| L27 | 0.08 | 0.80 | 0.97 | 0.35 | 0.43 | 0.06 | 0.16 | 4083 | 8666 | 0.06 |
+| L28 | 0.08 | 0.79 | 0.97 | 0.42 | 0.34 | 0.04 | 0.20 | 4819 | 8706 | 0.05 |
+| L29 | 0.09 | 0.80 | 0.96 | 0.41 | 0.37 | 0.04 | 0.18 | 4476 | 8569 | 0.05 |
+| L30 | 0.15 | 0.85 | 0.96 | 0.49 | 0.37 | 0.05 | 0.09 | 4057 | 7781 | 0.04 |
+| L31 | 0.72 | 0.96 | 0.98 | 0.52 | 0.49 | 0.03 | -0.04 | 2825 | 7422 | 0.04 |
+
+
+</details>
+
+<details><summary>Per-layer split: every prompt at `b` (add)</summary>
+
+| layer | write / stream | R² one linear map | R² no switching | up | gate read | silu bend | gate × up | neurons for 90 % of the bend | gates crossing 0 | switch between mod-10 classes (weighted) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| L0 | 1.07 | 0.51 | 1.00 | 0.23 | 0.23 | 0.00 | 0.55 |  | 12476 | 0.09 |
+| L1 | 0.69 | 0.57 | 1.00 | 0.36 | 0.23 | 0.00 | 0.41 |  | 12659 | 0.06 |
+| L2 | 0.65 | 0.55 | 1.00 | 0.29 | 0.24 | 0.00 | 0.46 |  | 11693 | 0.05 |
+| L3 | 0.73 | 0.60 | 0.99 | 0.31 | 0.26 | 0.00 | 0.42 |  | 11688 | 0.07 |
+| L4 | 0.65 | 0.63 | 0.99 | 0.38 | 0.25 | 0.01 | 0.37 |  | 10698 | 0.05 |
+| L5 | 0.66 | 0.62 | 0.99 | 0.38 | 0.23 | 0.01 | 0.38 |  | 10232 | 0.04 |
+| L6 | 0.55 | 0.65 | 0.99 | 0.40 | 0.24 | 0.01 | 0.34 |  | 9749 | 0.03 |
+| L7 | 0.48 | 0.66 | 0.99 | 0.40 | 0.25 | 0.01 | 0.34 |  | 9658 | 0.04 |
+| L8 | 0.36 | 0.68 | 0.99 | 0.38 | 0.26 | 0.01 | 0.34 |  | 9245 | 0.03 |
+| L9 | 0.34 | 0.70 | 0.99 | 0.41 | 0.27 | 0.02 | 0.30 |  | 8923 | 0.03 |
+| L10 | 0.30 | 0.71 | 0.99 | 0.41 | 0.27 | 0.01 | 0.31 |  | 8865 | 0.03 |
+| L11 | 0.30 | 0.73 | 0.99 | 0.42 | 0.27 | 0.01 | 0.29 |  | 8642 | 0.13 |
+| L12 | 0.34 | 0.75 | 0.97 | 0.39 | 0.34 | 0.03 | 0.24 |  | 8553 | 0.47 |
+| L13 | 0.34 | 0.71 | 0.91 | 0.40 | 0.33 | 0.07 | 0.21 |  | 8076 | 0.72 |
+| L14 | 0.32 | 0.70 | 0.95 | 0.40 | 0.33 | 0.04 | 0.24 |  | 8239 | 0.33 |
+| L15 | 0.28 | 0.72 | 0.98 | 0.48 | 0.25 | 0.02 | 0.25 |  | 7645 | 0.08 |
+| L16 | 0.28 | 0.74 | 0.98 | 0.46 | 0.26 | 0.02 | 0.26 |  | 7616 | 0.12 |
+| L17 | 0.23 | 0.72 | 0.98 | 0.43 | 0.28 | 0.02 | 0.27 |  | 7384 | 0.07 |
+| L18 | 0.20 | 0.73 | 0.98 | 0.40 | 0.31 | 0.02 | 0.27 |  | 7502 | 0.08 |
+| L19 | 0.17 | 0.72 | 0.98 | 0.39 | 0.32 | 0.02 | 0.26 |  | 7748 | 0.11 |
+| L20 | 0.16 | 0.72 | 0.98 | 0.36 | 0.34 | 0.03 | 0.27 |  | 8209 | 0.13 |
+| L21 | 0.15 | 0.70 | 0.96 | 0.35 | 0.37 | 0.03 | 0.25 |  | 7964 | 0.16 |
+| L22 | 0.13 | 0.67 | 0.98 | 0.36 | 0.30 | 0.03 | 0.32 |  | 8623 | 0.05 |
+| L23 | 0.11 | 0.66 | 0.98 | 0.34 | 0.32 | 0.02 | 0.32 |  | 9090 | 0.06 |
+| L24 | 0.11 | 0.64 | 0.97 | 0.34 | 0.30 | 0.03 | 0.34 |  | 9430 | 0.06 |
+| L25 | 0.10 | 0.67 | 0.97 | 0.37 | 0.30 | 0.02 | 0.31 |  | 9382 | 0.09 |
+| L26 | 0.10 | 0.67 | 0.97 | 0.35 | 0.30 | 0.04 | 0.31 |  | 9004 | 0.05 |
+| L27 | 0.10 | 0.68 | 0.96 | 0.37 | 0.29 | 0.04 | 0.30 |  | 8666 | 0.06 |
+| L28 | 0.11 | 0.69 | 0.95 | 0.37 | 0.30 | 0.05 | 0.28 |  | 8706 | 0.05 |
+| L29 | 0.13 | 0.72 | 0.95 | 0.37 | 0.35 | 0.04 | 0.23 |  | 8569 | 0.05 |
+| L30 | 0.21 | 0.81 | 0.95 | 0.44 | 0.37 | 0.06 | 0.13 |  | 7781 | 0.04 |
+| L31 | 1.02 | 0.95 | 0.98 | 0.50 | 0.51 | 0.03 | -0.04 |  | 7422 | 0.04 |
+
+
+</details>
+
+<details><summary>Per-layer split: res mod 10 at `=` (add)</summary>
+
+| layer | write / stream | R² one linear map | R² no switching | up | gate read | silu bend | gate × up | neurons for 90 % of the bend |
+|---|---|---|---|---|---|---|---|---|
+| L0 | 5.95 | 0.43 | 0.99 | 0.20 | 0.23 | 0.01 | 0.56 | 3019 |
+| L1 | 6.26 | 0.15 | 1.00 | 0.07 | 0.10 | 0.03 | 0.80 | 757 |
+| L2 | 1.18 | 0.74 | 0.99 | 0.37 | 0.37 | 0.00 | 0.26 | 5634 |
+| L3 | 1.27 | 0.79 | 0.99 | 0.36 | 0.44 | 0.00 | 0.19 | 5478 |
+| L4 | 1.29 | 0.83 | 0.99 | 0.46 | 0.38 | 0.00 | 0.16 | 5428 |
+| L5 | 0.89 | 0.86 | 0.99 | 0.45 | 0.38 | 0.01 | 0.16 | 5263 |
+| L6 | 0.71 | 0.89 | 0.99 | 0.55 | 0.33 | 0.00 | 0.12 | 5410 |
+| L7 | 0.62 | 0.87 | 1.00 | 0.51 | 0.36 | 0.01 | 0.12 | 5374 |
+| L8 | 0.57 | 0.90 | 0.99 | 0.51 | 0.38 | 0.00 | 0.11 | 5125 |
+| L9 | 0.47 | 0.90 | 0.99 | 0.53 | 0.36 | 0.00 | 0.11 | 5179 |
+| L10 | 0.40 | 0.90 | 0.99 | 0.52 | 0.38 | 0.00 | 0.10 | 5190 |
+| L11 | 0.41 | 0.91 | 1.00 | 0.53 | 0.36 | -0.00 | 0.11 | 5007 |
+| L12 | 0.45 | 0.91 | 1.00 | 0.54 | 0.36 | -0.00 | 0.11 | 5198 |
+| L13 | 0.47 | 0.91 | 0.99 | 0.57 | 0.34 | 0.02 | 0.07 | 3736 |
+| L14 | 0.53 | 0.90 | 0.99 | 0.50 | 0.36 | 0.02 | 0.12 | 3695 |
+| L15 | 0.49 | 0.85 | 0.99 | 0.57 | 0.24 | 0.00 | 0.18 | 4412 |
+| L16 | 3.97 | 0.08 | 0.93 | 0.05 | 0.02 | 0.03 | 0.90 | 24 |
+| L17 | 2.45 | 0.15 | 0.85 | 0.10 | 0.03 | 0.20 | 0.68 | 3 |
+| L18 | 1.73 | 0.12 | 0.60 | 0.04 | 0.08 | 0.38 | 0.50 | 2 |
+| L19 | 0.33 | 0.78 | 1.00 | 0.33 | 0.40 | 0.01 | 0.26 | 4164 |
+| L20 | 0.53 | 0.95 | 1.00 | 0.92 | 0.08 | 0.00 | -0.00 | 5292 |
+| L21 | 0.53 | 0.63 | 0.98 | 0.41 | 0.17 | 0.03 | 0.39 | 174 |
+| L22 | 0.22 | 0.50 | 0.99 | 0.40 | 0.08 | -0.00 | 0.52 | 2872 |
+| L23 | 0.24 | 0.57 | 0.99 | 0.29 | 0.21 | 0.02 | 0.48 | 2797 |
+| L24 | 0.29 | 0.86 | 0.96 | 0.20 | 0.56 | 0.11 | 0.12 | 3 |
+| L25 | 0.18 | 0.77 | 0.98 | 0.26 | 0.66 | 0.06 | 0.02 | 1168 |
+| L26 | 0.09 | 0.75 | 0.99 | 0.55 | 0.20 | 0.00 | 0.24 | 5099 |
+| L27 | 0.11 | 0.60 | 0.99 | 0.40 | 0.21 | 0.01 | 0.37 | 4106 |
+| L28 | 0.21 | 0.69 | 0.97 | 0.33 | 0.43 | 0.05 | 0.19 | 1756 |
+| L29 | 0.18 | 0.60 | 0.97 | 0.36 | 0.36 | 0.04 | 0.24 | 1998 |
+| L30 | 0.25 | 0.54 | 0.97 | 0.37 | 0.30 | 0.03 | 0.30 | 2583 |
+| L31 | 0.69 | 0.91 | 0.99 | 0.51 | 0.45 | 0.01 | 0.03 | 2876 |
+
+
+</details>
+
+<details><summary>Every linearised forward</summary>
+
+Clean accuracy (float32 forward), per sample: 2000 prompts: 0.609 (add 0.952 / sub 0.265); 1000 prompts: 0.615 (add 0.944 / sub 0.286).
+
+| replacement | positions | MLPs | KL (nats) | same top token | accuracy | accuracy add / sub | prompts |
+|---|---|---|---|---|---|---|---|
+| one linear map | `=` | all | 1.162 | 0.312 | 0.005 | 0.003 / 0.007 | 2000 |
+| one linear map | `a,b` | all | 0.889 | 0.355 | 0.065 | 0.114 / 0.015 | 2000 |
+| one linear map | `a` | all | 0.472 | 0.547 | 0.242 | 0.387 / 0.097 | 2000 |
+| one linear map | `b` | all | 0.372 | 0.608 | 0.450 | 0.625 / 0.275 | 2000 |
+| write removed | `=` | all | 1.526 | 0.247 | 0.000 | 0.000 / 0.000 | 2000 |
+| write removed | `a,b` | all | 1.411 | 0.306 | 0.000 | 0.000 / 0.000 | 2000 |
+| write removed | `a` | all | 1.229 | 0.302 | 0.003 | 0.005 / 0.000 | 2000 |
+| write removed | `b` | all | 1.336 | 0.298 | 0.002 | 0.001 / 0.003 | 2000 |
+| no switching | `=` | all | 0.119 | 0.833 | 0.491 | 0.819 / 0.163 | 2000 |
+| no switching | `a,b` | all | 0.070 | 0.884 | 0.577 | 0.897 / 0.257 | 2000 |
+| no switching | `a` | all | 0.019 | 0.951 | 0.592 | 0.928 / 0.255 | 2000 |
+| no switching | `b` | all | 0.045 | 0.915 | 0.602 | 0.940 / 0.264 | 2000 |
+| one linear map | `a` | L0-7 | 0.147 | 0.811 | 0.549 | 0.854 / 0.244 | 1000 |
+| one linear map | `a` | L16-23 | 0.002 | 0.977 | 0.609 | 0.932 / 0.286 | 1000 |
+| one linear map | `a` | L24-31 | 0.001 | 0.981 | 0.618 | 0.944 / 0.292 | 1000 |
+| one linear map | `a` | L8-15 | 0.023 | 0.948 | 0.602 | 0.930 / 0.274 | 1000 |
+| one linear map | `b` | L0-7 | 0.195 | 0.739 | 0.632 | 0.894 / 0.370 | 1000 |
+| one linear map | `b` | L16-23 | 0.003 | 0.975 | 0.617 | 0.946 / 0.288 | 1000 |
+| one linear map | `b` | L24-31 | 0.001 | 0.983 | 0.616 | 0.942 / 0.290 | 1000 |
+| one linear map | `b` | L8-15 | 0.069 | 0.843 | 0.664 | 0.946 / 0.382 | 1000 |
+| write removed | `a` | L0-7 | 1.196 | 0.307 | 0.017 | 0.030 / 0.004 | 1000 |
+| write removed | `a` | L16-23 | 0.006 | 0.967 | 0.608 | 0.928 / 0.288 | 1000 |
+| write removed | `a` | L24-31 | 0.000 | 0.987 | 0.619 | 0.946 / 0.292 | 1000 |
+| write removed | `a` | L8-15 | 0.193 | 0.759 | 0.420 | 0.668 / 0.172 | 1000 |
+| write removed | `b` | L0-7 | 1.246 | 0.272 | 0.016 | 0.030 / 0.002 | 1000 |
+| write removed | `b` | L16-23 | 0.013 | 0.940 | 0.619 | 0.938 / 0.300 | 1000 |
+| write removed | `b` | L24-31 | 0.003 | 0.976 | 0.615 | 0.944 / 0.286 | 1000 |
+| write removed | `b` | L8-15 | 0.625 | 0.443 | 0.135 | 0.178 / 0.092 | 1000 |
+| no switching | `a` | L0-7 | 0.001 | 0.984 | 0.619 | 0.946 / 0.292 | 1000 |
+| no switching | `a` | L16-23 | 0.000 | 0.988 | 0.617 | 0.944 / 0.290 | 1000 |
+| no switching | `a` | L24-31 | 0.000 | 0.998 | 0.615 | 0.944 / 0.286 | 1000 |
+| no switching | `a` | L8-15 | 0.014 | 0.964 | 0.607 | 0.932 / 0.282 | 1000 |
+| no switching | `b` | L0-7 | 0.022 | 0.932 | 0.623 | 0.948 / 0.298 | 1000 |
+| no switching | `b` | L16-23 | 0.001 | 0.988 | 0.615 | 0.942 / 0.288 | 1000 |
+| no switching | `b` | L24-31 | 0.000 | 0.996 | 0.616 | 0.944 / 0.288 | 1000 |
+| no switching | `b` | L8-15 | 0.020 | 0.946 | 0.600 | 0.926 / 0.274 | 1000 |
+| one linear map | `a` | L0 | 0.057 | 0.875 | 0.641 | 0.968 / 0.314 | 1000 |
+| one linear map | `a` | L1-31 | 0.073 | 0.890 | 0.562 | 0.884 / 0.240 | 1000 |
+| one linear map | `a` | L1-7 | 0.006 | 0.965 | 0.619 | 0.952 / 0.286 | 1000 |
+| one linear map | `b` | L0 | 0.039 | 0.885 | 0.631 | 0.954 / 0.308 | 1000 |
+| one linear map | `b` | L1-31 | 0.180 | 0.731 | 0.673 | 0.900 / 0.446 | 1000 |
+| one linear map | `b` | L1-7 | 0.113 | 0.784 | 0.721 | 0.994 / 0.448 | 1000 |
+| write removed | `a` | L0 | 0.150 | 0.802 | 0.577 | 0.870 / 0.284 | 1000 |
+| write removed | `b` | L0 | 0.138 | 0.794 | 0.578 | 0.870 / 0.286 | 1000 |
+| no switching | `a` | L0-11 | 0.001 | 0.985 | 0.620 | 0.948 / 0.292 | 1000 |
+| no switching | `a` | L12-14 | 0.010 | 0.965 | 0.611 | 0.940 / 0.282 | 1000 |
+| no switching | `a` | L15-31 | 0.001 | 0.988 | 0.617 | 0.944 / 0.290 | 1000 |
+| no switching | `b` | L12-14 | 0.016 | 0.952 | 0.600 | 0.924 / 0.276 | 1000 |
+
+
+</details>
+
+Code: `param_decomp/arith_repr/autointerp/mlp_linearity.py` (split, one job per layer),
+`mlp_patch.py` (forwards), `mlp_lin_report.py` (switching structure, tables, figures). Data in
+`<run>/analysis/arith_repr/autointerp/mech/mlp_lin/`, `mlp_patch/`, `mlp_*.parquet`.
 
 ## 3. The mechanisms
 
