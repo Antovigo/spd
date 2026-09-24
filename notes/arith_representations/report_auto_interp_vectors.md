@@ -37,6 +37,15 @@ Code: `param_decomp/arith_repr/vectors/`. Data and full-size figures:
      period;
    - routing is set by one (q, k) component pair per head. The k components read slot features
      ("second operand", "first operand") that MLPs at L6-L14 build at the operand positions.
+   - The routing is content-based. The query feature fires only at `=`, the key feature only in
+     one slot, and RoPE adds nothing position-specific.
+   - The slot features originate in L0 attention: at position b, heads read the op token just
+     before it; position a has nothing but BOS to read.
+   - "Where" and "what" use different directions. OV passes the operand codes 2.4-4.2× more
+     strongly than a random direction and the slot feature not at all (~1×).
+   - a and b share their code directions at their own tokens, but L15H13 and L16H21 write into
+     near-orthogonal output spaces (principal cosine ≤ 0.13). Which head carries an operand
+     decides where it lands at `=`.
 3. **Computing.** The result code is made at `=` by the L16-L18 MLPs:
    - gate and up read `a` and `b` codes at the **same harmonic k**;
    - `silu(gate)·up` contains the cross term `cos k(a) · cos k(b)`, which is a code of
@@ -209,6 +218,98 @@ mean inner):
 On subtraction the a-copy is weaker (L16H21: a 3.6 vs b 2.5). This matches the activation-level
 finding that copies split when `a < b`.
 
+### 2.1 How the heads decide what to copy, and from where
+
+![routing](figures_auto_interp_vectors/routing.png)
+
+**Where: a query feature meets a slot feature.** For each copy head the alive attention logit at
+`=` is dominated by one (q, k) component pair, so the pair's two features are the routing rule:
+
+| head | query feature (fires at) | key feature (fires at) | attention from `=` (add / sub) |
+|---|---|---|---|
+| L0H23 | q c17: op and `=` (18) | k c6: op token only (15.2; 5.1 at `=`) | op 0.32 / 0.43 (rest mostly BOS) |
+| L15H13 | q c138: `=` only (23.4) | k c48: b only (−21.0) | b 0.86 / 0.61 |
+| L16H21 | q c136: `=` only (−22.2) | k c5: a (51.6) > b (22.8) | a 0.91 / 0.62 |
+| L18H30 | q c104: `=` only (29.2) | k c95: a and b (45.5 / 43.5) | b 0.27 / 0.46, rest BOS |
+
+- **No positional part.** The RoPE-rotated product of the pair's U vectors is the same for
+  every source position (L15H13: −0.008 to −0.010 for BOS…`=`). The selection comes entirely
+  from the key feature being non-zero in one slot only.
+- **Query features.**
+  - The copy heads' query features are "I am the answer position" features, built by MLPs at
+    `=` over many layers. The embedding contributes ~0, even though `=` is always the same
+    token; for q c138, L14 MLP +7.3, L12 +2.7, L5 +2.7, ….
+  - L0H23's query (q c17) fires at op and `=`, i.e. on any non-number token.
+- **Key features: slot units.** In the full model (sublayer by sublayer), k c48's input at b is
+  built by MLPs from L4 to L14 (L13 −3.1, L14 −2.7, L9 −2.2, L7 −1.8, L4 −1.3). At component
+  level the writers are binary slot units, each on at exactly one operand position:
+  - L14 down c30: 3.8 at b, 0 elsewhere;
+  - L13 down c14: 2.8 at b;
+  - L9 down c22: −2.7 at b;
+  - L13 down c2 and L9 down c38: on at a only, with the opposite sign.
+  - Every layer from L3 to L15 has one to three such a-only and b-only units: L3 down c0 (a) /
+    c7 (b), L4 c32 / c13, …, L14 c30 (b), L15 c1 / c0.
+- **Root of the slot features.**
+  - The token embeddings of a and b have the same distribution, so the embedding contributes
+    exactly 0 to the difference between the two positions. Only attention can tell them apart.
+  - At L0, position a has nothing but BOS to attend to (0.95 on BOS).
+  - Position b attends the op token right before it: H1 0.92, H10 0.88, H23 0.57; H2 reads a
+    (0.48).
+  - After L0 attention the mean stream at b differs from a by 57 % of |x| (79 % after the L0
+    MLP). The L0-L2 MLPs turn that context into the first slot units; for example L3 gate c0,
+    which opens position a's slot unit, gets its a/b difference mostly from the L0 MLP.
+  - So "second operand" means "the number after the operator", learned from L0's
+    previous-token attention and sharpened by one or two MLP units per layer.
+- **Subtraction routes less cleanly.** Attention to the operand drops (0.86 → 0.61, 0.91 →
+  0.62), and more of it goes to BOS and to the other operand. This matches the weaker copies on
+  sub in the activation-level report.
+
+**What: OV reads the operand codes, not the routing features.** Gain of each head's OV map
+(model weights `W_O[h] W_V[kv(h)]`, norm folded), relative to a random direction:
+
+| head (source) | operand codes (mod 100 / 50 / 20 / 10 / 5 / 2) | lin(q) | slot feature | op flag | bulk of the stream |
+|---|---|---|---|---|---|
+| L15H13 (b) | 2.6 / 3.0 / 2.9 / 3.2 / 3.3 / 3.6× | 2.4× | 0.8× | 1.0× | 1.2× |
+| L16H21 (a) | 3.2 / 4.1 / 4.2 / 4.2 / 4.2 / 3.9× | 2.5× | 1.1× | – | 1.2× |
+
+- The key reads the slot and the value reads the number, in different directions of the same
+  residual. The feature that decides "where" is not passed on to `=`.
+- **The op token's path.** L0H23's OV does not single out the add/sub difference (1.1×). It
+  carries the op token's embedding along with the rest (2.0× on the bulk of the stream). The
+  clean op flag is then formed by the one-op-only o components of L1H6 / L2H2 and the MLP relays
+  (section 5).
+
+### 2.2 How a and b end up apart at `=`
+
+![separation](figures_auto_interp_vectors/operand_separation.png)
+
+- **At the operand tokens:** a's code and b's code share their planes. The top principal cosine
+  of the a-plane at position a and the b-plane at position b is 1.0 at the embedding, 0.55-0.75
+  at L5-L10, and 0.8-0.88 at L12-L17. The shared format is what lets one v component read
+  either.
+- **At `=`:** the same codes are nearly orthogonal (0.2-0.4 at L15-L17, before the adder).
+- **The heads' output spaces are near-orthogonal.** With the model's weights:
+  - the top principal cosines between L15H13's and L16H21's output spaces are 0.12, 0.10, 0.09, …;
+  - the same b code sent through H13 and through H21 lands in planes with cosine 0.03-0.06;
+  - with the alive v / o components alone: 0.06-0.13.
+  - What each head writes is the operand code at `=`: H13's output lies in the b-plane after L15
+    attention (cosine 0.81-0.88), and H21's in the a-plane after L16 attention (0.82-0.94).
+  - So the operand's identity is set by the head that carries it. Routing (QK) picks the slot,
+    and that head's W_O puts the code in its own subspace.
+- **The early copies are also separated.** b reaches `=` at L0 (previous-token attention) and a
+  at L1-L2. After L1-L2 attention their planes at `=` are already at cosine 0.04-0.17.
+- **The adders read the two subspaces.**
+  - The gate/up V vectors of the L16-L18 result units put 8-50 % of their norm into the two
+    heads' 128-d output spaces, against 3 % for a random direction.
+  - Many units split the operands between their two inputs: L16 c10 (gate reads 94 % a, up
+    97 % b), L18 c12 (gate 96 % a, up 97 % b), L18 c21, c22, L16 c106, c76, c94 (gate b, up a).
+  - Others read both operands in both inputs (L18 c23, c26, c24).
+  - (This corrects "almost every creating unit reads both operands in both inputs" in section
+    3.1: about half do, half split.)
+- **Is separation needed?** For a + b it is not: a unit reading `cos a + cos b` in both inputs
+  still makes `cos(a+b)`. It matters for a − b, where only b must be mirrored. The L15 MLP
+  mirror acts on b in H13's subspace, after b has arrived and before a arrives through H21.
+
 ## 3. How the result is computed from the operands
 
 ![mlp creation](figures_auto_interp_vectors/mlp_creation.png)
@@ -307,8 +408,9 @@ harmonic.
 | mod 25 (k4) | never from the operands; from L19, growing to L30 (M 0.60-0.93) | result × result | L22 c5 0.29, c6 0.23, c28 0.13, c27 0.12 | partners: k2 + k2 0.51 (mod 50 squared), −k1 + k5, k3 + k1 |
 | mod 4 (k25) | L22-L30 (M 0.61-0.98) | result × result | L22 c17 0.88 (neuron 9758) | k20 + k5 0.60, k30 − k5 0.31 (mod 5 × mod 20) |
 
-- **The adder unit (X).** Almost every creating unit reads **both** operands in **both** of
-  its inputs, at the same harmonic:
+- **The adder unit (X).** Each creating unit reads a and b at the same harmonic. About half
+  split them (gate reads one operand, up the other); the rest read both in both inputs
+  (section 2.2):
   - gate ≈ `α cos k(a−φ) + β cos k(b−φ′)`, and up likewise;
   - the product's cross terms `cos k(a−φ)·cos k(b−φ′)` are `½[cos k(a+b−φ−φ′) + cos k(a−b−φ+φ′)]`;
   - the phases add (median error 0.04 period).
@@ -566,6 +668,7 @@ Mode shares of the odd write: k2 B 0.94; k10 B 0.75 / A 0.25; k20 A 0.96.
   - `qk.py`;
   - `mlp_units.py` + `mlp_analysis.py`;
   - `mirror_neurons.py` + `mirror.py` (the b-mirror of section 5);
+  - `routing.py` (section 2.1-2.2 numbers) and `figures.py` `routing` / `operand_separation`;
   - `mlp_periods.py` + `periods_summary.py` + `periods_compare.py` (section 3.1; the
     component-only rebuild is `mlp_periods <layer> comp|comp_mean`);
   - `output.py`;

@@ -148,3 +148,16 @@ parity, k=5 -> mod 20, k=4 -> mod 25.
   reproduced (cos 0.88-0.99). Misses: L30-31 (L31 cos 0.15-0.45) and the sub L14-17 pass-through
   of the comparator code. Adding each neuron's constant does not help (cos 0.84): the gap is
   missing content, not the silu operating point.
+
+### 2026-09-24 — routing and operand separation (Antoine's two questions; routing.py)
+- Routing is content-based: RoPE factor of the main (q, k) pairs is flat across source positions;
+  query features fire only at `=` (built by MLPs at `=`, embedding ~0), key features fire in one
+  slot. Slot features: binary a-only / b-only units in every layer L3-L15 (L14 c30, L13 c14, L9
+  c22 at b; L13 c2, L9 c38 at a); root = L0 attention (pos b: H1/H10/H23 read op, H2 reads a;
+  pos a only BOS) -> |mean(b) - mean(a)| = 0.57 |x| after L0 attn; embedding contributes 0.
+- OV gains vs random: operand codes 2.4-4.2x, slot ~1x, op flag 1.0x -> where and what use
+  different directions.
+- Separation: a/b code planes share 0.8-0.88 at their tokens (L12-17) but 0.2-0.4 at `=`; the two
+  copy heads' output spaces are near-orthogonal (0.12..., same input -> 0.03-0.06; comps
+  0.06-0.13). Adders' V put 8-50 % of norm in the two output spaces (random 3 %); about half
+  split a/b between gate and up (L16 c10, L18 c12/c21/c22), the rest read both.

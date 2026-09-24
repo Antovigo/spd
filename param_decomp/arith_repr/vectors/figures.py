@@ -800,3 +800,92 @@ def period_tree() -> None:
     fig.suptitle("Where each period of the result comes from (addition; subtraction uses the same units)",
                  fontsize=10)  # fmt: skip
     save(fig, "period_tree")
+
+
+def routing() -> None:
+    """For the copy heads at '=': query feature, key feature and attention, by source position."""
+    comps = comp_table()
+    hm = np.load(OUT / "qk.npz")["hmean"]
+    ap = np.load(OUT.parent / "autointerp/attn_patterns.npy", mmap_mode="r")
+    rows = [(0, 23, 17, 6, "op token"), (15, 13, 138, 48, "b"), (16, 21, 136, 5, "a"),
+            (18, 30, 104, 95, "a and b")]  # fmt: skip
+    pos = ["BOS", "a", "op", "b", "="]
+    fig, axes = plt.subplots(len(rows), 3, figsize=(12, 2.3 * len(rows)), sharex=True)
+    for i, (L, H, qc, kc, tgt) in enumerate(rows):
+        q = np.flatnonzero((comps["layer"] == L) & (comps["kind"] == "q") & (comps["cidx"] == qc))[
+            0
+        ]
+        k = np.flatnonzero((comps["layer"] == L) & (comps["kind"] == "k") & (comps["cidx"] == kc))[
+            0
+        ]
+        att = [
+            np.asarray(ap[L, o * 10000 : (o + 1) * 10000 : 10, H, 4, :], np.float32).mean(0)
+            for o in (0, 1)
+        ]
+        for j, (vals, title) in enumerate(
+            (
+                ([hm[q, :, 0]], f"query: L{L} q c{qc} (mean inner)"),
+                ([hm[k, :, 0]], f"key: L{L} k c{kc} (mean inner)"),
+                (att, f"L{L}H{H} attention from '=' → {tgt}"),
+            )
+        ):
+            ax = axes[i, j]
+            for o, v in enumerate(vals):
+                ax.bar(np.arange(5) + (0.2 * o - 0.1 if len(vals) > 1 else 0), v, width=0.4 if len(vals) > 1 else 0.6,
+                       color=("#2a78d6", "#eda100")[o] if len(vals) > 1 else INK2,
+                       label=("add", "sub")[o] if len(vals) > 1 else None)  # fmt: skip
+            style(ax)
+            ax.axhline(0, color=GRAY, lw=0.8)
+            ax.set_title(title, fontsize=8, color=INK2)
+            ax.set_xticks(range(5), pos, fontsize=7)
+        if i == 0:
+            axes[i, 2].legend(fontsize=7, frameon=False)
+    fig.suptitle("Routing is content-based: a query feature that fires only at '=' meets a key feature that "
+                 "fires only at one slot (RoPE term flat across positions)", fontsize=10)  # fmt: skip
+    fig.tight_layout()
+    save(fig, "routing")
+
+
+def operand_separation() -> None:
+    """a and b share their code planes at their own tokens, but not at '=': the two copy heads write
+    into near-orthogonal output spaces."""
+    from param_decomp.arith_repr.vectors.storage import load_frame
+
+    fre = np.load(OUT / "frames_re.npy", mmap_mode="r")
+    fim = np.load(OUT / "frames_im.npy", mmap_mode="r")
+    st = dict(np.load(OUT / "frames_stats.npz"))
+
+    def plane(z: np.ndarray) -> np.ndarray:
+        Q, _ = np.linalg.qr(np.stack([np.real(z), np.imag(z)], 1))
+        return Q
+
+    ts = list(range(1, 45))
+    ks = (2, 10, 20)
+    src = np.zeros((len(ts), len(ks)))
+    dst = np.zeros_like(src)
+    for i, t in enumerate(ts):
+        F = load_frame(fre, fim, st, t)
+        for j, k in enumerate(ks):
+            src[i, j] = np.linalg.svd(
+                plane(F[0, 0, 0, k - 1]).T @ plane(F[2, 0, 1, k - 1]), compute_uv=False
+            )[0]
+            dst[i, j] = np.linalg.svd(
+                plane(F[3, 0, 0, k - 1]).T @ plane(F[3, 0, 1, k - 1]), compute_uv=False
+            )[0]
+    fig, ax = plt.subplots(figsize=(11, 3.8))
+    for j, (k, col) in enumerate(zip(ks, ("#1baf7a", "#2a78d6", "#eb6834"), strict=True)):
+        ax.plot(ts, src[:, j], color=col, lw=2, label=f"k={k}: a at pos a vs b at pos b")
+        ax.plot(ts, dst[:, j], color=col, lw=2, ls="--", label=f"k={k}: a vs b at '='")
+    style(ax)
+    ax.set_ylim(0, 1.05)
+    ax.set_xticks(ts[::4], [PT_NAMES[t] for t in ts[::4]], fontsize=7)
+    ax.set_ylabel("top principal cosine of the two code planes", fontsize=8)
+    ax.axvline(31, color=GRAY, lw=1)
+    ax.axvline(33, color=GRAY, lw=1)
+    ax.text(31, 1.0, " L15H13 copies b", fontsize=7, color=INK2)
+    ax.text(33, 0.93, " L16H21 copies a", fontsize=7, color=INK2)
+    ax.legend(fontsize=7, frameon=False, ncol=3, loc="lower right")
+    fig.suptitle(
+        "Same code directions at the operand tokens, different directions at '='", fontsize=10
+    )
+    save(fig, "operand_separation")
