@@ -404,8 +404,9 @@ def logit_votes() -> None:
 
 
 def mlp_creation() -> None:
-    """Per layer at '=': result-line share of what the neurons are handed (linear g, u) vs what
-    they output (act), and how well the a x b product predicts the newly created part."""
+    """Per layer at '=': variance share of the result quantity in what the neurons are handed
+    (linear g, u) vs what they output (act), and how well the a x b product predicts the newly
+    created part."""
     df = pd.read_parquet(OUT / "mlp_units.parquet")
     d = cast(pd.DataFrame, df[df["pos"] == 4])
     layers = np.arange(10, 32)
@@ -436,7 +437,7 @@ def mlp_creation() -> None:
                 ax.text(layer + 0.2, r_ + 0.02, f"{f_:.2f}", fontsize=6.5, ha="center", color=INK2)
         style(ax)
         ax.set_ylim(0, 1.05)
-        ax.set_ylabel(f"share on the {LINE_LABEL[res]} line", fontsize=8)
+        ax.set_ylabel(f"variance share of the {LINE_LABEL[res]} code", fontsize=8)
         ax.set_title(f"{op}: numbers = fit of the a×b product to the newly created {LINE_LABEL[res]} code (where little is handed in)",
                      fontsize=9, color=INK2, loc="left")  # fmt: skip
         ax.legend(fontsize=7, frameon=False, loc="upper left")
