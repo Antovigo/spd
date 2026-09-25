@@ -140,7 +140,7 @@ All activations were recorded on the original model, not on the decomposed one:
 The vectors `U_c` and `V_c` of the alive components are read from `uv_alive.npz`. CI values are
 never used.
 
-### Tool 1: the line coefficient `F(q, k)`
+### Tool 1: the Fourier coefficient `F(q, k)`
 
 **Question.** Take one activation recorded on the grid: the stream vector at one stream point
 and position, or one component's inner activation at one position. Which arithmetic quantity
@@ -151,12 +151,12 @@ The activation is then a function `x(a, b)` on the 100 × 100 grid. Each cell ho
 4,096-vector (the stream) or one number (an inner activation, a neuron's `g`, and so on). The
 mean of `x` over the 10,000 cells is subtracted first.
 
-The four candidate quantities are called **lines**: `q = a`, `q = b`, `q = a + b` (the `sum`
-line) and `q = a − b` (the `diff` line). The candidate periods are **harmonics**: harmonic `k`
+The four candidate **quantities** are `q = a`, `q = b`, `q = a + b` and `q = a − b`. (The code
+(`LINES` in `vectors/common.py`) names them `a`, `b`, `sum` and `diff`.) The candidate periods are **harmonics**: harmonic `k`
 is a cosine or sine wave in `q` that completes `k` cycles while `q` runs over 100 consecutive
 values. Only `k = 1..50` is used.
 
-**Calculation.** For each line `q` and harmonic `k`, compute two averages over the 10,000 cells
+**Calculation.** For each quantity `q` and harmonic `k`, compute two averages over the 10,000 cells
 and pack them into one complex number:
 
 ```
@@ -182,18 +182,18 @@ those 100 class means with the cosine and the sine of harmonic `k`.
    the mean squared deviation of `x` from its grid mean (for vectors, summed over channels), and
    `|F|² = |C|² + |S|²`. At `k = 50` the sine is zero on integers, so the fit is `C cos θ` and the
    fraction is `|F|² / var`. This fraction is what the report calls the **energy** or **share**
-   of a (line, harmonic).
-2. *Lines do not leak into each other.* At a fixed `a`, any wave of harmonic `k` in `b`, in
+   of a (quantity, harmonic).
+2. *Quantities do not leak into each other.* At a fixed `a`, any wave of harmonic `k` in `b`, in
    `a + b` or in `a − b` averages to zero as `b` runs over 1..100. So an activation that depends
-   on `a` alone has `F = 0` on the `b`, `sum` and `diff` lines, and likewise for the other lines.
+   on `a` alone has `F = 0` for `b`, `a + b` and `a − b`, and likewise for the other quantities.
    This is what separates "reads `a`" from "reads `a + b`".
-3. *Harmonics do not leak into each other.* Two different harmonics of the same line are
-   orthogonal over the grid. So the shares of all (line, harmonic) pairs can be compared and
+3. *Harmonics do not leak into each other.* Two different harmonics of the same quantity are
+   orthogonal over the grid. So the shares of all (quantity, harmonic) pairs can be compared and
    added.
 
 One limit follows from the construction. `a + b` runs from 2 to 200, but a wave in `a + b` of
 harmonic `k` only sees `(a + b) mod 100`. The hundreds digit is therefore invisible to the
-line coefficients and is handled with the linear parts (see "Removing the linear parts" below).
+Fourier coefficients and is handled with the linear parts (see "Removing the linear parts" below).
 
 **How to read `F`.**
 
@@ -211,39 +211,39 @@ line coefficients and is handled with the linear parts (see "Removing the linear
   `2 · (C cos θ + S sin θ)` moves on an ellipse in the plane spanned by `C` and `S`. When `C` and
   `S` have equal length and are orthogonal, the ellipse is a circle, and the 100 class means sit
   on it in residue order. The report calls this plane the **code** of that quantity and period
-  (for example, "`a`'s mod-10 circle"). Every (line, harmonic) has its own plane. At `k = 50`,
+  (for example, "`a`'s mod-10 circle"). Every (quantity, harmonic) has its own plane. At `k = 50`,
   `S = 0`, so parity is one direction, not a plane.
 
 **Implementation.** `line_dft` in `vectors/common.py` computes all the `F(q, k)` at once. It first
 takes the two-dimensional discrete Fourier transform of the grid with `np.fft.fft2`, divided by
 10,000. For every pair of integers `(m, n)` in 0..99, that transform gives
 `mean of x · e^{−2πi (m (a−1) + n (b−1)) / 100}`, the correlation of the grid with a wave that
-completes `m` cycles along `a` and `n` cycles along `b`. A line `q = c_a · a + c_b · b` at
+completes `m` cycles along `a` and `n` cycles along `b`. A quantity `q = c_a · a + c_b · b` at
 harmonic `k` is the wave with `(m, n) = (k c_a, k c_b)` taken modulo 100:
 
-| line | `q` | `(c_a, c_b)` | entry `(m, n)` of the 2-D transform |
+| quantity `q` | name in the code | `(c_a, c_b)` | entry `(m, n)` of the 2-D transform |
 |---|---|---|---|
 | `a` | `a` | (1, 0) | `(k, 0)` |
 | `b` | `b` | (0, 1) | `(0, k)` |
-| `sum` | `a + b` | (1, 1) | `(k, k)` |
-| `diff` | `a − b` | (1, −1) | `(k, 100 − k)` |
+| `a + b` | `sum` | (1, 1) | `(k, k)` |
+| `a − b` | `diff` | (1, −1) | `(k, 100 − k)` |
 
 `line_dft` keeps these 4 × 50 entries. It multiplies each one by `e^{−2πi k (c_a + c_b) / 100}`
 to correct for the grid index being `a − 1` and `b − 1` rather than `a` and `b`, so the phase
 refers to the value of `q`. For an input of shape `(100, 100, …)` it returns a complex array of
-shape `(4, 50, …)`. Axis 0 is the line, in the order `a`, `b`, `sum`, `diff`. Axis 1 is the
+shape `(4, 50, …)`. Axis 0 is the quantity, in the order `a`, `b`, `a + b`, `a − b`. Axis 1 is the
 harmonic `k = 1..50`. The remaining axes are those of one cell: `(4096,)` for the stream, none
 for a scalar. Harmonics 51..99 are not kept, because for a real-valued `x` the coefficient at
 `100 − k` is the complex conjugate of the one at `k` and carries no new information.
 
 **Removing the linear parts.** Activations also contain parts that grow steadily with `a` or
 with `b`: magnitude directions, written `lin(a)` and `lin(b)`, which encode "how large" rather than
-"which residue". A straight ramp is not periodic. Its line coefficients are nonzero at every
+"which residue". A straight ramp is not periodic. Its Fourier coefficients are nonzero at every
 harmonic and fall off like `1 / k`, so they would pile up at `k = 1..3` and look like mod-100 or
 mod-50 codes. To prevent this, the slope of `x` against `a − 50.5` is fitted by least squares
-over the grid, and so is the slope against `b − 50.5`. The ramp's own line coefficient times
-the fitted slope is then subtracted from the `a` line, and likewise for `b`. By fact 2, a ramp in
-`a` has no coefficient on the `b`, `sum` or `diff` lines, so those lines need no correction.
+over the grid, and so is the slope against `b − 50.5`. The ramp's own Fourier coefficient times
+the fitted slope is then subtracted from the coefficients of `a`, and likewise for `b`. By fact 2, a ramp in
+`a` has no coefficient for `b`, `a + b` or `a − b`, so those need no correction.
 The stored files keep the ramp in. The loaders `load_frame` (`storage.py`), `load_reads` and
 `load_writes` (`load.py`) subtract it. The share of variance in each ramp is reported
 separately, as `lin`.
@@ -259,14 +259,14 @@ stream point to the next, and do `a` and `b` use the same ones?
 vectors of that operation's 10,000 prompts, reshapes them to `(100, 100, 4096)`, subtracts their
 mean and applies `line_dft`. The results are stored as two float16 arrays, `frames_re.npy` and
 `frames_im.npy`. They hold the real and imaginary parts of one complex array of shape
-`(65, 4, 2, 4, 50, 4096)`, whose axes are stream point, position, operation, line, harmonic and
+`(65, 4, 2, 4, 50, 4096)`, whose axes are stream point, position, operation, quantity, harmonic and
 channel. `frames_stats.npz` stores, for each stream point, position and operation, the mean
 stream vector, the two fitted slopes (a 4,096-vector each), the total variance and the mean RMS
 norm.
 
 `storage.py` reduces the frames to three kinds of numbers, after removing the ramps:
 
-- `energy`: the share of the stream's variance carried by each (line, harmonic), as in Tool 1.
+- `energy`: the share of the stream's variance carried by each (quantity, harmonic), as in Tool 1.
 - `cos_next`: the complex cosine `⟨F_t, F_{t+1}⟩ / (|F_t| |F_{t+1}|)` between the codes at
   consecutive stream points. Here `⟨u, v⟩ = Σ_d u_d · conj(v_d)`. Its magnitude is 1 when the
   two codes lie in the same plane with the same residue order, and its argument is the angle by
@@ -279,7 +279,7 @@ Where the report compares two planes directly, it uses the **principal cosine** 
 in the other. It is 1 when the planes share a direction and 0 when they are orthogonal.
 
 **Why this answers the question.** By Tool 1, `F` at one (stream point, position, operation,
-line, harmonic) is the plane the stream uses for that code, and its energy is how much of the
+quantity, harmonic) is the plane the stream uses for that code, and its energy is how much of the
 stream's variation that code accounts for. Comparing planes across stream points, positions or
 operations answers the "same directions?" questions directly.
 
@@ -290,11 +290,11 @@ operations answers the "same directions?" questions directly.
 **Calculation.** `spectra.py reads` applies Tool 1 to the scalar grid `h_c(a, b)` of every
 alive component, at each of the four positions and both operations. The result `R` in
 `read_spec.npz` is a complex array of shape `(11604, 4, 2, 4, 50)`: component, position,
-operation, line, harmonic. The file also stores the mean, the variance and the two fitted
+operation, quantity, harmonic. The file also stores the mean, the variance and the two fitted
 slopes of each inner activation.
 
 **Why this answers the question.** `h_c` is the number the component multiplies its write
-vector by, so it is exactly what the component responds to. The energy of `R_c` on a (line,
+vector by, so it is exactly what the component responds to. The energy of `R_c` on a (quantity,
 harmonic) is the share of `h_c`'s variation over the grid explained by that wave. `peak_value`
 of `R_c` is the residue where that wave is largest. "Component `c` reads `a mod 10` and prefers
 7" means that the energy of `R_c` is concentrated on (`a`, `k = 10`) and that its peak is at 7.
@@ -307,12 +307,12 @@ of `R_c` is the residue where that wave is largest. "Component `c` reads `a mod 
 **Calculation.** For every residual writer `c`, take the frame `F` at the stream point just after
 its sublayer adds its output: `L<l>.attn` for an o component, `L<l>.mlp` for a down component. Then
 compute the complex number `W_c = U_c · F = Σ_d U_c[d] · F[d]` for every position, operation,
-line and harmonic. `spectra.py writes` stores `W` in `write_spec.npz` as a complex array of shape
+quantity and harmonic. `spectra.py writes` stores `W` in `write_spec.npz` as a complex array of shape
 `(n_writers, 4, 2, 4, 50)`. The file also stores `U_c` dotted with the two fitted slopes, and with
 the difference between the mean stream vectors of addition and subtraction (`opdiff`). It also
 stores the norm of `U_c` (`unorm`).
 
-**Why this answers the question.** The transform is linear, so `U_c · F` is the line coefficient
+**Why this answers the question.** The transform is linear, so `U_c · F` is the Fourier coefficient
 of the scalar grid `U_c · x(a, b)`: the stream projected onto the direction `U_c`. Its peak
 `q*` is the residue whose class-mean stream vector points furthest along `U_c`. So adding `+U_c`
 moves the stream toward residue `q*` on that code's circle. This is what the report means by
@@ -326,7 +326,7 @@ addition from subtraction.
 make that change?
 
 **Calculation.** Each of the 64 sublayers moves the stream from one stream point `t − 1` to the
-next point `t`. For each sublayer, position, operation, line and harmonic, `transfer.py` computes
+next point `t`. For each sublayer, position, operation, quantity and harmonic, `transfer.py` computes
 the change of the code, `dF = F_t − F_{t−1}` (a complex 4,096-vector), and from it:
 
 - `keep = Re⟨dF, F_{t−1}⟩ / |F_{t−1}|²`: the part of the change that lies along the existing
@@ -342,7 +342,7 @@ the change of the code, `dF = F_t − F_{t−1}` (a complex 4,096-vector), and f
 
 **Why this answers the question.** On the original model, a sublayer's write to the stream is
 exactly the sum over all its components of `h_c(a, b) · U_c`, plus the weight delta applied to
-`x`. Because `U_c` is the same vector in every cell, the line coefficient of one component's
+`x`. Because `U_c` is the same vector in every cell, the Fourier coefficient of one component's
 write `h_c · U_c` is exactly `R_c · U_c`. So `R_c U_c` is `c`'s own contribution to the change of
 the code, and `share_c` is the fraction of the observed change `dF` it accounts for. The shares
 of a sublayer's alive writers add up to the fraction explained by the alive components. The
@@ -369,13 +369,13 @@ Tool 1 to four scalar grids: `g`, `up`, `s = silu(g)` and `act = s · up`. The r
 in `<run>/analysis/arith_repr/vectors/mlp/L<l>.npz`.
 
 **Why this answers the question.** `g` and `up` are linear in the normalised stream, so their
-line coefficients can only contain codes the stream already holds. `s` and `act` are
-nonlinear. When two grids are multiplied, the product's coefficient on the `sum` line at harmonic
-`k` includes `s_a(k) · up_b(k) + s_b(k) · up_a(k)`, where `s_a(k)` is `s`'s coefficient on the
-`a` line. This is a code of `a` times a code of `b` at the same harmonic, and it produces a
-code of `a + b`, because `cos α · cos β = ½ [cos(α + β) + cos(α − β)]`. The `diff` line has the
-same terms, with `up_b` replaced by its complex conjugate. The product's sum-line coefficient also
-includes `mean(s) · up_sum(k) + mean(up) · s_sum(k)`, which only passes on a sum code already
+Fourier coefficients can only contain codes the stream already holds. `s` and `act` are
+nonlinear. When two grids are multiplied, the product's coefficient for `a + b` at harmonic
+`k` includes `s_a(k) · up_b(k) + s_b(k) · up_a(k)`, where `s_a(k)` is `s`'s coefficient for the
+quantity `a`. This is a code of `a` times a code of `b` at the same harmonic, and it produces a
+code of `a + b`, because `cos α · cos β = ½ [cos(α + β) + cos(α − β)]`. The coefficient for `a − b` has the
+same terms, with `up_b` replaced by its complex conjugate. The product's `a + b` coefficient also
+includes `mean(s) · up_sum(k) + mean(up) · s_sum(k)`, which only passes on an `a + b` code already
 present in the inputs. Comparing these terms with the measured coefficient of `act` shows whether
 the neuron creates the result code or passes one through. Section 3.1 extends this bookkeeping
 exactly to every neuron of a layer, and defines its terms there.
@@ -615,7 +615,7 @@ finding that copies split when `a < b`.
 
 ![mlp creation](figures_auto_interp_vectors/mlp_creation.png)
 
-Result-line share of what the MLP neurons at `=` are handed (g and up, both linear in the stream)
+Share of the result quantity in what the MLP neurons at `=` are handed (g and up, both linear in the stream)
 versus what they hand to the down components (`silu(g)·up`), per layer:
 
 | layer | result code in g, up | result code in silu(g)·up | share of it newly created | a×b fit (add / sub) |
@@ -633,8 +633,8 @@ versus what they hand to the down components (`silu(g)·up`), per layer:
   - gate = `α cos k(a − φa) + β cos k(b − φb)`, and up likewise;
   - the product `silu(g)·up` contains `cos k(a−φa) · cos k(b−φb)`, which is
     `½ [cos k(a+b−φa−φb) + cos k(a−b−φa+φb)]`.
-- The line-product prediction (`s_a u_b + s_b u_a` plus the cross term inside silu) matches the
-  new result-line coefficient in phase and amplitude: cosine 0.99-1.00 on add.
+- The product prediction (`s_a u_b + s_b u_a` plus the cross term inside silu) matches the
+  new coefficient of the result quantity in phase and amplitude: cosine 0.99-1.00 on add.
 - The phases add: median |peak_out − (peak_a + peak_b)| is 0.04 of a period. Examples:
 
   | unit | a phase | b phase | predicted a+b phase | measured a+b phase |
@@ -665,7 +665,7 @@ versus what they hand to the down components (`silu(g)·up`), per layer:
 The product also makes `a − b` harmonics on add (the second term of the identity). These are
 smaller (diff share 0.04-0.24 per unit) and do not accumulate across units.
 
-**L19-L30** keep re-writing the result: 75-90 % of their inner variance is on the result line.
+**L19-L30** keep re-writing the result: 75-90 % of their inner variance is on the result quantity.
 The newly created part is no longer an a×b product; it mixes result harmonics (e.g. k = 1 → k =
 2 and 3). This matches the earlier finding that the long periods fan out from Fourier circles
 into higher-dimensional codes from L26.
@@ -674,7 +674,7 @@ into higher-dimensional codes from L26.
 
 **Exact bookkeeping.** On the full grid the neuron output `act = silu(g)·u` has, as its 2-D DFT,
 the circular convolution of the DFTs of `s = silu(g)` and `u`. So every neuron's coefficient on
-the result line (`(k, k)` for a+b, `(k, −k)` for a−b) splits exactly into:
+the result quantity (entry `(k, k)` for a+b, `(k, −k)` for a−b) splits exactly into:
 
 | term | what it is |
 |---|---|
@@ -734,7 +734,7 @@ harmonic.
     codes from L26 (report_representations.md).
 - **L20, mod 20.** The one write dominated by "other" (O 0.60). Two neurons (units c3, c6)
   mostly pass the mod-20 code through. They also build it from the `a−b` code times `b` or `a`
-  codes, e.g. `(a−b)·k5 × b·k10 → (a+b)·k5` (= (a−b) + 2b), which is not a line term.
+  codes, e.g. `(a−b)·k5 × b·k10 → (a+b)·k5` (= (a−b) + 2b), which is none of the X / M / P product terms.
 
 ![period tree](figures_auto_interp_vectors/period_tree.png)
 
@@ -823,7 +823,7 @@ to the logit of token n. Here `G(k)` is the unembedding's own Fourier plane.
     anti-correlated with a + b ≥ 100; they switch on for the large sums and their U has the
     matching sign).
 - **Last layer.** The L31 MLP step shrinks the per-family votes (right edge of the left panels)
-  and is only 14 % accounted for by alive `R_c U_c`. It is not captured by this line analysis
+  and is only 14 % accounted for by alive `R_c U_c`. It is not captured by this Fourier analysis
   and is probably a norm / confidence adjustment.
 
 ## 5. The operation token
@@ -947,10 +947,10 @@ Mode shares of the odd write: k2 B 0.94; k10 B 0.75 / A 0.25; k20 A 0.96.
   is to flip the op input of the 7 mirror neurons (n12769, 6456, 9205, 9057, 13193, 7446,
   11305), or of the op components c72 / c9 / c117 / c34, on addition prompts. If this story
   is right, a+b should turn into a−b in the result code.
-- **The line analysis only sees additive and line structure.** Conjunctive "window" units
-  (blobs in the grids) are captured through their Fourier lines only. Token-identity (lookup)
+- **The Fourier analysis only sees structure along the four quantities.** Conjunctive "window" units
+  (blobs in the grids) are captured only through their coefficients for the four quantities. Token-identity (lookup)
   variance, which is 25-40 % at every position, is not interpreted.
-- **Sub includes `a < b`** (where the model says "?\n"). The line codes are exact on the full
+- **Sub includes `a < b`** (where the model says "?\n"). The codes are exact on the full
   grid, but the late sub picture mixes the two regimes.
 - **Last layer.** L31's MLP and the late fan-out of the long periods (L26+) are only partly
   captured.
@@ -976,7 +976,7 @@ Mode shares of the odd write: k2 B 0.94; k10 B 0.75 / A 0.25; k20 A 0.96.
   - `figures.py`;
   - `common.py` / `load.py`.
 - Outputs in `<run>/analysis/arith_repr/vectors/`:
-  - `frames_{re,im}.npy` (65 points × 4 positions × 2 ops × 4 lines × 50 k × 4096, fp16);
+  - `frames_{re,im}.npy` (65 points × 4 positions × 2 ops × 4 quantities × 50 k × 4096, fp16);
   - `read_spec.npz`, `write_spec.npz`, `storage.npz`, `transfer.npz`, `qk.npz`, `output.npz`;
   - `mlp/L*.npz`, `mlp_units.parquet`;
   - `mirror/L14-16_neurons.npz` (all 14,336 neurons at `=`);
