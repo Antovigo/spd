@@ -83,39 +83,340 @@ Code: `param_decomp/arith_repr/vectors/`. Data and full-size figures:
      on subtraction while `a` is unchanged;
    - the same L16-L18 "adder" units then compute `a + (−b)`.
 
-## Method (one paragraph per tool)
+## Method
 
-**Line codes.** Prompts form the full 100 × 100 `(a, b)` grid per op (sub includes `a < b`). For
-any vector-valued activation `x(a, b)` and each quantity `q ∈ {a, b, a+b, a−b}` I take the line
-Fourier coefficient `F(q, k) = mean x · e^{−2πi k q/100}`, `k = 1..50`. This is the
-(k,0) / (0,k) / (k,k) / (k,−k) entry of the 2-D DFT of the grid.
+The rest of the report makes claims such as "this component reads `a mod 10` and prefers units
+digit 7", "the stream holds `a mod 10` as a circle", or "the L17 MLP writes the `a + b` code".
+This section says, for each kind of claim, which question it answers, which arrays it is computed
+from, how it is computed, and why that computation answers the question. Tool 1 is the
+transform every other tool uses; read it first.
 
-- Harmonic `k` has period `100/gcd(k,100)`: k = 10 is the units digit, k = 20 is mod 5, k = 2
-  is mod 50, k = 1 is mod 100, k = 50 is parity.
-- For a code in the raw stream, `F` is a pair of directions (a plane). Where they have equal
-  norm and are orthogonal, the class means lie on a circle in residue order.
-- The linear parts of `a` and `b` are split off first; their 1/k Fourier tail would otherwise
-  fill k = 1-3.
+### Vocabulary
 
-**Reading V.** `R_c(q, k)` is the same DFT of the scalar `h_c`. Its argument gives the residue the
-component prefers: `q* = −arg R · 100/(2πk)`. Its power gives what the component reads.
+- **Site.** One weight matrix of the model that the decomposition splits. There are seven per
+  block: `q_proj`, `k_proj`, `v_proj`, `o_proj` in attention and `gate_proj`, `up_proj`,
+  `down_proj` in the MLP. The report abbreviates them q, k, v, o, gate, up, down.
+- **Component.** The decomposition writes each site's weight matrix as a sum of rank-1 matrices
+  `U_c V_cᵀ` plus a leftover weight delta. Each rank-1 term is one component `c`. `V_c` (the read
+  vector) has the size of the site's input and `U_c` (the write vector) has the size of the
+  site's output.
+- **Site input `x`.** For q, k, v, gate and up, `x` is the residual stream after the block's
+  RMSNorm, including the norm's learned gain (4,096 numbers). For o, `x` is the 32 attention
+  heads' outputs concatenated (32 × 128 = 4,096 numbers). For down, `x` is the vector of the
+  14,336 MLP neuron values `silu(g) · up` (defined under Tool 6).
+- **Inner activation `h_c = x · V_c`.** One number per prompt and token position. The component's
+  contribution to its site's output is `h_c · U_c`. So `V_c` decides what the component responds
+  to, and `U_c` decides what it adds.
+- **Alive components.** The 11,604 components kept by the CI filter
+  `addsub-05-filter-last-pos-ceiling`. Only these are analysed.
+- **Residual writers.** The o and down components. Their site's output is added directly to the
+  residual stream. q, k, v, gate and up components write into the inside of an attention layer
+  or MLP, not into the stream.
+- **Stream point.** A place where the residual stream was recorded. There are 65: after the
+  token embedding (`embed`), and for each block `l = 0..31`, just after its attention output is
+  added (`L<l>.attn`) and just after its MLP output is added (`L<l>.mlp`).
+- **Token position.** Every prompt is the five tokens `<BOS> a op b =`, numbered 0 to 4.
+  Llama-3.1's tokenizer maps each integer from 0 to 999 to a single token, so the five positions
+  line up across all prompts. "Position a" means token position 1, "`=`" means position 4.
 
-**Reading U.** `U_c · F_t(q, k)` projects U on the code of the stream point `t` right after the
-add. Its argument gives the residue U "looks like" in that code.
+### The prompts and the recorded arrays
 
-The component's own contribution to the code is `R_c U_c`. Its alignment with the stream code
-says whether it reinforces the code, erases it, or turns it (`transfer.npz`). For each
-sublayer, the sum over components can be compared with the actual change of the code.
+Every measurement uses the same 20,000 prompts: all 100 × 100 pairs with `a` and `b` in 1..100,
+once with `+` and once with `−`. The subtraction half includes the 4,950 prompts with `a < b`.
+Prompt `i` has `op = i // 10000` (0 for add, 1 for sub), `a = (i mod 10000) // 100 + 1` and
+`b = i mod 100 + 1`. Reshaping the 10,000 values of one operation to `(100, 100)` therefore gives
+a grid whose row index is `a − 1` and whose column index is `b − 1`.
 
-**MLP units.** A down component's V is neuron-sparse (participation ratio ≈ 5.6 neurons), while
-gate/up U are dense. So a down component is a handful of neurons, and the gate/up components are
-shared read directions. For the top 8 neurons of every down component I took the line spectra of
-the gate pre-activation `g`, `up` (both linear reads of the stream), `silu(g)` and
-`act = silu(g)·up`.
+All activations were recorded on the original model, not on the decomposed one:
 
-**Attention.** OV coupling of a v component (source) and an o component (`=`) through head h is
-`U_v[kv(h)] · V_o[h]`. QK: for query head h at `=` and source s,
-`mean h_q · mean h_k · ⟨RoPE₄ U_q[h], RoPE_s U_k[kv(h)]⟩ / √128`.
+- `original/resid.npy`, float16, shape `(65, 20000, 5, 4096)`: the raw residual stream (before
+  any norm) at each stream point, prompt, token position and channel.
+- `original/inner.npy`, float32, shape `(20000, 5, 11604)`: the inner activation `h_c` of every
+  alive component at every prompt and token position. It uses the original model's site input,
+  so it does not depend on whether the CI would switch the component on.
+- `original/mlp_gate.npy` and `original/mlp_up.npy`, float16, shape `(32, 20000, 5, 14336)`: the
+  gate and up pre-activations of every MLP neuron.
+
+The vectors `U_c` and `V_c` of the alive components are read from `uv_alive.npz`. CI values are
+never used.
+
+### Tool 1: the line coefficient `F(q, k)`
+
+**Question.** Take one activation recorded on the grid: the stream vector at one stream point
+and position, or one component's inner activation at one position. Which arithmetic quantity
+does it encode (`a`, `b`, `a + b` or `a − b`), with which period, and how strongly?
+
+**Setup.** Fix one operation, and for the stream also fix one stream point and one position.
+The activation is then a function `x(a, b)` on the 100 × 100 grid. Each cell holds either a
+4,096-vector (the stream) or one number (an inner activation, a neuron's `g`, and so on). The
+mean of `x` over the 10,000 cells is subtracted first.
+
+The four candidate quantities are called **lines**: `q = a`, `q = b`, `q = a + b` (the `sum`
+line) and `q = a − b` (the `diff` line). The candidate periods are **harmonics**: harmonic `k`
+is a cosine or sine wave in `q` that completes `k` cycles while `q` runs over 100 consecutive
+values. Only `k = 1..50` is used.
+
+**Calculation.** For each line `q` and harmonic `k`, compute two averages over the 10,000 cells
+and pack them into one complex number:
+
+```
+C(q, k) = mean over (a, b) of  x(a, b) · cos(2π k q / 100)
+S(q, k) = mean over (a, b) of  x(a, b) · sin(2π k q / 100)
+F(q, k) = C(q, k) − i · S(q, k)          (i is the imaginary unit)
+```
+
+`C` measures how much `x` looks like the cosine wave, and `S` how much it looks like the sine
+wave. Written with Euler's formula, `F(q, k) = mean of x · e^{−2πi k q / 100}`. If each cell
+holds a number, `F` is one complex number. If each cell holds a 4,096-vector, `C` and `S` are
+4,096-vectors and `F` is a complex 4,096-vector.
+
+`F` depends on `x` only through its class means. Group the 10,000 prompts into the 100 classes
+`q mod 100` (100 prompts per class) and average `x` in each class. `F(q, k)` is the correlation of
+those 100 class means with the cosine and the sine of harmonic `k`.
+
+**Why this answers the question.** Three facts do the work.
+
+1. *`F` is a best fit.* For `k < 50`, the wave `x_k(q) = 2 · (C cos θ + S sin θ)`, with
+   `θ = 2π k q / 100`, is the least-squares fit of `x` by a cosine plus a sine of harmonic `k`
+   in `q`. The fraction of `x`'s variance that this wave explains is `2 |F|² / var`. Here `var` is
+   the mean squared deviation of `x` from its grid mean (for vectors, summed over channels), and
+   `|F|² = |C|² + |S|²`. At `k = 50` the sine is zero on integers, so the fit is `C cos θ` and the
+   fraction is `|F|² / var`. This fraction is what the report calls the **energy** or **share**
+   of a (line, harmonic).
+2. *Lines do not leak into each other.* At a fixed `a`, any wave of harmonic `k` in `b`, in
+   `a + b` or in `a − b` averages to zero as `b` runs over 1..100. So an activation that depends
+   on `a` alone has `F = 0` on the `b`, `sum` and `diff` lines, and likewise for the other lines.
+   This is what separates "reads `a`" from "reads `a + b`".
+3. *Harmonics do not leak into each other.* Two different harmonics of the same line are
+   orthogonal over the grid. So the shares of all (line, harmonic) pairs can be compared and
+   added.
+
+One limit follows from the construction. `a + b` runs from 2 to 200, but a wave in `a + b` of
+harmonic `k` only sees `(a + b) mod 100`. The hundreds digit is therefore invisible to the
+line coefficients and is handled with the linear parts (see "Removing the linear parts" below).
+
+**How to read `F`.**
+
+- *Period.* Harmonic `k` repeats every `100 / gcd(k, 100)` integer values of `q`. So `k = 1`
+  is `q mod 100`, `k = 2` is `mod 50`, `k = 4` is `mod 25`, `k = 5` is `mod 20`, `k = 10` is
+  `mod 10` (the units digit), `k = 20` is `mod 5`, `k = 25` is `mod 4`, and `k = 50` is `mod 2`
+  (parity).
+- *Strength.* The energy share from fact 1, between 0 and 1.
+- *Preferred value (scalar `x`).* The fitted wave peaks at `q* = −arg(F) · 100 / (2π k)`, taken
+  modulo `100 / k` (`peak_value` in `vectors/common.py`). It rises `2 |F|` above the grid mean
+  there. For example, a component whose inner activation has its (`a`, `k = 10`) wave peaking
+  at `q* = 7` responds most to prompts whose `a` ends in 7.
+- *Plane and circle (vector `x`).* For the stream, `C` and `S` are two directions in the
+  4,096-dimensional residual space. As `q` runs over its values, the fitted wave
+  `2 · (C cos θ + S sin θ)` moves on an ellipse in the plane spanned by `C` and `S`. When `C` and
+  `S` have equal length and are orthogonal, the ellipse is a circle, and the 100 class means sit
+  on it in residue order. The report calls this plane the **code** of that quantity and period
+  (for example, "`a`'s mod-10 circle"). Every (line, harmonic) has its own plane. At `k = 50`,
+  `S = 0`, so parity is one direction, not a plane.
+
+**Implementation.** `line_dft` in `vectors/common.py` computes all the `F(q, k)` at once. It first
+takes the two-dimensional discrete Fourier transform of the grid with `np.fft.fft2`, divided by
+10,000. For every pair of integers `(m, n)` in 0..99, that transform gives
+`mean of x · e^{−2πi (m (a−1) + n (b−1)) / 100}`, the correlation of the grid with a wave that
+completes `m` cycles along `a` and `n` cycles along `b`. A line `q = c_a · a + c_b · b` at
+harmonic `k` is the wave with `(m, n) = (k c_a, k c_b)` taken modulo 100:
+
+| line | `q` | `(c_a, c_b)` | entry `(m, n)` of the 2-D transform |
+|---|---|---|---|
+| `a` | `a` | (1, 0) | `(k, 0)` |
+| `b` | `b` | (0, 1) | `(0, k)` |
+| `sum` | `a + b` | (1, 1) | `(k, k)` |
+| `diff` | `a − b` | (1, −1) | `(k, 100 − k)` |
+
+`line_dft` keeps these 4 × 50 entries. It multiplies each one by `e^{−2πi k (c_a + c_b) / 100}`
+to correct for the grid index being `a − 1` and `b − 1` rather than `a` and `b`, so the phase
+refers to the value of `q`. For an input of shape `(100, 100, …)` it returns a complex array of
+shape `(4, 50, …)`. Axis 0 is the line, in the order `a`, `b`, `sum`, `diff`. Axis 1 is the
+harmonic `k = 1..50`. The remaining axes are those of one cell: `(4096,)` for the stream, none
+for a scalar. Harmonics 51..99 are not kept, because for a real-valued `x` the coefficient at
+`100 − k` is the complex conjugate of the one at `k` and carries no new information.
+
+**Removing the linear parts.** Activations also contain parts that grow steadily with `a` or
+with `b`: magnitude directions, written `lin(a)` and `lin(b)`, which encode "how large" rather than
+"which residue". A straight ramp is not periodic. Its line coefficients are nonzero at every
+harmonic and fall off like `1 / k`, so they would pile up at `k = 1..3` and look like mod-100 or
+mod-50 codes. To prevent this, the slope of `x` against `a − 50.5` is fitted by least squares
+over the grid, and so is the slope against `b − 50.5`. The ramp's own line coefficient times
+the fitted slope is then subtracted from the `a` line, and likewise for `b`. By fact 2, a ramp in
+`a` has no coefficient on the `b`, `sum` or `diff` lines, so those lines need no correction.
+The stored files keep the ramp in. The loaders `load_frame` (`storage.py`), `load_reads` and
+`load_writes` (`load.py`) subtract it. The share of variance in each ramp is reported
+separately, as `lin`.
+
+### Tool 2: the stream's codes ("frames")
+
+**Question.** At each stream point and token position, which quantities does the residual
+stream carry, how strongly, and in which directions? Do those directions stay the same from one
+stream point to the next, and do `a` and `b` use the same ones?
+
+**Calculation.** `spectra.py frames` loops over the 65 stream points, the four positions `a`,
+`op`, `b`, `=` (BOS is dropped) and the two operations. For each combination it takes the stream
+vectors of that operation's 10,000 prompts, reshapes them to `(100, 100, 4096)`, subtracts their
+mean and applies `line_dft`. The results are stored as two float16 arrays, `frames_re.npy` and
+`frames_im.npy`. They hold the real and imaginary parts of one complex array of shape
+`(65, 4, 2, 4, 50, 4096)`, whose axes are stream point, position, operation, line, harmonic and
+channel. `frames_stats.npz` stores, for each stream point, position and operation, the mean
+stream vector, the two fitted slopes (a 4,096-vector each), the total variance and the mean RMS
+norm.
+
+`storage.py` reduces the frames to three kinds of numbers, after removing the ramps:
+
+- `energy`: the share of the stream's variance carried by each (line, harmonic), as in Tool 1.
+- `cos_next`: the complex cosine `⟨F_t, F_{t+1}⟩ / (|F_t| |F_{t+1}|)` between the codes at
+  consecutive stream points. Here `⟨u, v⟩ = Σ_d u_d · conj(v_d)`. Its magnitude is 1 when the
+  two codes lie in the same plane with the same residue order, and its argument is the angle by
+  which the circle has turned.
+- `cos_pos` and `cos_op`: the same complex cosine between `a`'s code at position `a` and `b`'s
+  code at position `b`, and between the addition and subtraction codes.
+
+Where the report compares two planes directly, it uses the **principal cosine** (`pcos` in
+`routing.py`). This is the largest cosine between any direction in one plane and any direction
+in the other. It is 1 when the planes share a direction and 0 when they are orthogonal.
+
+**Why this answers the question.** By Tool 1, `F` at one (stream point, position, operation,
+line, harmonic) is the plane the stream uses for that code, and its energy is how much of the
+stream's variation that code accounts for. Comparing planes across stream points, positions or
+operations answers the "same directions?" questions directly.
+
+### Tool 3: what a component reads (`R_c`)
+
+**Question.** Which quantity, period and residue makes component `c`'s inner activation large?
+
+**Calculation.** `spectra.py reads` applies Tool 1 to the scalar grid `h_c(a, b)` of every
+alive component, at each of the four positions and both operations. The result `R` in
+`read_spec.npz` is a complex array of shape `(11604, 4, 2, 4, 50)`: component, position,
+operation, line, harmonic. The file also stores the mean, the variance and the two fitted
+slopes of each inner activation.
+
+**Why this answers the question.** `h_c` is the number the component multiplies its write
+vector by, so it is exactly what the component responds to. The energy of `R_c` on a (line,
+harmonic) is the share of `h_c`'s variation over the grid explained by that wave. `peak_value`
+of `R_c` is the residue where that wave is largest. "Component `c` reads `a mod 10` and prefers
+7" means that the energy of `R_c` is concentrated on (`a`, `k = 10`) and that its peak is at 7.
+
+### Tool 4: what a component writes (`U_c · F`)
+
+**Question.** Expressed in terms of the codes already present in the stream, what does adding
+`U_c` do?
+
+**Calculation.** For every residual writer `c`, take the frame `F` at the stream point just after
+its sublayer adds its output: `L<l>.attn` for an o component, `L<l>.mlp` for a down component. Then
+compute the complex number `W_c = U_c · F = Σ_d U_c[d] · F[d]` for every position, operation,
+line and harmonic. `spectra.py writes` stores `W` in `write_spec.npz` as a complex array of shape
+`(n_writers, 4, 2, 4, 50)`. The file also stores `U_c` dotted with the two fitted slopes, and with
+the difference between the mean stream vectors of addition and subtraction (`opdiff`). It also
+stores the norm of `U_c` (`unorm`).
+
+**Why this answers the question.** The transform is linear, so `U_c · F` is the line coefficient
+of the scalar grid `U_c · x(a, b)`: the stream projected onto the direction `U_c`. Its peak
+`q*` is the residue whose class-mean stream vector points furthest along `U_c`. So adding `+U_c`
+moves the stream toward residue `q*` on that code's circle. This is what the report means by
+"`U_c` is the spoke of residue `q*`". Its energy says how much of the stream's variation along
+`U_c` belongs to that code. `opdiff` says whether `U_c` points along the direction that separates
+addition from subtraction.
+
+### Tool 5: how each sublayer changes each code (`transfer.npz`)
+
+**Question.** Does a sublayer strengthen, erase, turn or mirror a code? Which of its components
+make that change?
+
+**Calculation.** Each of the 64 sublayers moves the stream from one stream point `t − 1` to the
+next point `t`. For each sublayer, position, operation, line and harmonic, `transfer.py` computes
+the change of the code, `dF = F_t − F_{t−1}` (a complex 4,096-vector), and from it:
+
+- `keep = Re⟨dF, F_{t−1}⟩ / |F_{t−1}|²`: the part of the change that lies along the existing
+  code. It is positive when the sublayer amplifies the code and negative when it erases it.
+- `turn = arg⟨dF, F_{t−1}⟩`: the angle of that aligned part, which says whether the sublayer
+  pushes the code toward a shifted residue.
+- `dF_energy`: the size of the change, as a share of the stream's variance at `t` (Tool 1 units).
+- `mirror` (subtraction only): `Re⟨dF_sub, T⟩ / |T|²` with `T = conj(F_add, t−1) − F_sub, t−1`.
+  Replacing `q` by `−q` turns a code `F` into its complex conjugate, so `conj(F_add)` is the
+  addition code mirrored. `mirror = 1` means the step moves the subtraction code all the way to
+  the mirror image of the addition code.
+- For every alive residual writer `c` of the sublayer, `share_c = Re⟨R_c U_c, dF⟩ / |dF|²`.
+
+**Why this answers the question.** On the original model, a sublayer's write to the stream is
+exactly the sum over all its components of `h_c(a, b) · U_c`, plus the weight delta applied to
+`x`. Because `U_c` is the same vector in every cell, the line coefficient of one component's
+write `h_c · U_c` is exactly `R_c · U_c`. So `R_c U_c` is `c`'s own contribution to the change of
+the code, and `share_c` is the fraction of the observed change `dF` it accounts for. The shares
+of a sublayer's alive writers add up to the fraction explained by the alive components. The
+remainder comes from the dead components and the weight delta.
+
+### Tool 6: the neurons behind a down component (`mlp_units.py`)
+
+**Question.** Which MLP neurons does a down component stand for? Do they pass along a code the
+stream already holds, or create a new code by multiplication?
+
+**Terms.** Each MLP neuron `n` computes a gate pre-activation `g_n` and an up pre-activation
+`up_n`, both linear functions of the normalised stream. Its value, which is passed on to
+`down_proj`, is `act_n = silu(g_n) · up_n`, with `silu(z) = z / (1 + e^{−z})`. A down component's
+read vector `V_c` has one weight per neuron (14,336 in total). Its **participation ratio**
+`(Σ_n V_c[n]²)² / Σ_n V_c[n]⁴` is the effective number of neurons it weights, and its median
+over down components is 5.6. So a down component's inner activation `h_c = Σ_n V_c[n] act_n` is
+a weighted sum of about six neurons. The gate and up components are different. Their write
+vectors spread over many neurons, so they act as read directions shared by many neurons.
+
+**Calculation.** For each layer, `mlp_units.py` takes, for every alive down component, the 8
+neurons with the largest `|V_c[n]|`, and forms the union of these sets. For each such neuron and
+each operation, at position `=` (and also at positions `a` and `b` for layers 0 to 5), it applies
+Tool 1 to four scalar grids: `g`, `up`, `s = silu(g)` and `act = s · up`. The results are stored
+in `<run>/analysis/arith_repr/vectors/mlp/L<l>.npz`.
+
+**Why this answers the question.** `g` and `up` are linear in the normalised stream, so their
+line coefficients can only contain codes the stream already holds. `s` and `act` are
+nonlinear. When two grids are multiplied, the product's coefficient on the `sum` line at harmonic
+`k` includes `s_a(k) · up_b(k) + s_b(k) · up_a(k)`, where `s_a(k)` is `s`'s coefficient on the
+`a` line. This is a code of `a` times a code of `b` at the same harmonic, and it produces a
+code of `a + b`, because `cos α · cos β = ½ [cos(α + β) + cos(α − β)]`. The `diff` line has the
+same terms, with `up_b` replaced by its complex conjugate. The product's sum-line coefficient also
+includes `mean(s) · up_sum(k) + mean(up) · s_sum(k)`, which only passes on a sum code already
+present in the inputs. Comparing these terms with the measured coefficient of `act` shows whether
+the neuron creates the result code or passes one through. Section 3.1 extends this bookkeeping
+exactly to every neuron of a layer, and defines its terms there.
+
+### Tool 7: attention couplings (`autointerp/wiring.py`, `vectors/qk.py`)
+
+**Terms.** Each attention layer has 32 query heads `h = 0..31`, each with 128 channels, and 8
+key-value heads. Query head `h` uses key-value head `kv(h) = h // 4`. A v component's write vector
+`U_v` lives in the output of `v_proj` (8 × 128 channels), and `U_v[kv(h)]` is its 128-channel
+slice for key-value head `kv(h)`. The same slicing applies to a k component's `U_k`. An o
+component's read vector `V_o` lives in the input of `o_proj` (32 × 128 channels), and `V_o[h]` is
+its slice for head `h`. A q component's `U_q[h]` is sliced the same way. **RoPE** is Llama's
+rotary position embedding. `RoPE_p` rotates each pair of channels of a 128-vector by angles set
+by the token position `p` (0..4), in the same rotate-half layout the model uses.
+
+**OV coupling.** *Question:* how much does a v component at a source position feed an o component
+at `=` through head `h`? *Calculation:* the coupling is `U_v[kv(h)] · V_o[h]`, stored in
+`autointerp/wiring.npz` as `vo_<l>`, with shape `(n_v, n_o, 32)`. *Why:* head `h`'s output at `=`
+is the attention-weighted sum of the value vectors at the source positions. The v component adds
+`h_v · U_v[kv(h)]` to the value vector at its source. The o component reads the head-`h` slice of
+the attention output with `V_o[h]`. So when head `h` puts attention weight `w` on that source,
+the o component's inner activation receives `w · h_v · (U_v[kv(h)] · V_o[h])`. The coupling is this
+gain at full attention and unit v activation. The OV phase figure then compares the residue that
+the v component prefers at the source (Tool 3) with the residue that the o component prefers at
+`=`. When the two match, the head copies the code without changing it.
+
+**QK coupling.** *Question:* which pair of a q component and a k component makes head `h` at `=`
+attend to source position `s`? *Calculation:* for q component `i` and k component `j`,
+
+```
+pair(i, j, h, s) = mean(h_i at =) · mean(h_j at s) · ⟨RoPE_4(U_i[h]), RoPE_s(U_j[kv(h)])⟩ / √128
+```
+
+where each mean is over the 10,000 prompts of one operation, and `√128` is the attention scale.
+The results are stored per layer in `qk.npz` as `pair_<l>`, with shape `(n_q, n_k, 32, 5, 2)`:
+q component, k component, head, source position, operation. *Why:* head `h`'s attention logit
+from `=` to `s` is `q · k / √128`, with `q = RoPE_4(Σ_i h_i U_i[h])` and
+`k = RoPE_s(Σ_j h_j U_j[kv(h)])` (plus the dead components and the weight delta). Expanding the
+dot product gives a sum over pairs `(i, j)`. Replacing each `h` by its mean gives each pair's
+typical contribution to the logit, which shows which pairs decide where the head looks. The
+calculation uses a product of means, so it ignores how `h_i` and `h_j` co-vary across prompts.
 
 ## 1. How values are stored, and how the representations are built
 
