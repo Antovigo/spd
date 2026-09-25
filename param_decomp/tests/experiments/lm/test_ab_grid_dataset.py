@@ -433,6 +433,7 @@ def test_the_grid_operation_consumes_the_invocation_s_placed_ci_fn() -> None:
         positions=POSITIONS,
         seq_len=T,
         mean_ci_floor=0.0,
+        selection_role="any",
         run_dir=Path("/nonexistent"),
         writes_snapshots=False,
     )

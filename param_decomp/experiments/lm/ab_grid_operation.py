@@ -16,6 +16,7 @@ from param_decomp.core.model import CaptureKeys, PlacedModel
 from param_decomp.core.run import PassOperation
 from param_decomp.core.train import TrainState
 from param_decomp.experiments.lm.ab_grid_dataset import (
+    ABGridSelectionRole,
     ABGridStep,
     ab_grid_payload,
     collect_ab_grid_snapshot,
@@ -68,6 +69,8 @@ class ABGridOperation:
     positions: tuple[int, ...]
     seq_len: int
     mean_ci_floor: float
+    selection_role: ABGridSelectionRole
+    """Which CI head the floor cut reads (`ABGridDatasetConfig.selection_role`)."""
     run_dir: Path
     writes_snapshots: bool
     """Process 0 writes the snapshot; every rank joins the collective pass and reports the
@@ -82,6 +85,7 @@ class ABGridOperation:
             self.chunks,
             self.n_prompts,
             self.mean_ci_floor,
+            self.selection_role,
         )
         if self.writes_snapshots:
             write_ab_grid_snapshot(
@@ -143,6 +147,7 @@ def make_ab_grid_operation(
         positions=positions,
         seq_len=seq_len,
         mean_ci_floor=config.mean_ci_floor,
+        selection_role=config.selection_role,
         run_dir=run_dir,
         writes_snapshots=jax.process_index() == 0,
     )

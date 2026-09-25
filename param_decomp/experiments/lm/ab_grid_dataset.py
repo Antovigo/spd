@@ -7,7 +7,7 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import equinox as eqx
 import jax
@@ -147,6 +147,11 @@ def _take_columns(per_prompt: Float[Array, "n_pad n_pos C"], idx: Int[Array, " k
     return per_prompt.at[:, :, idx].get(out_sharding=P(spec[0], spec[1], None))
 
 
+ABGridSelectionRole = Literal["any", "output", "hidden"]
+"""Which CI head the mean-CI floor cut reads; `any` is the max over every role the run
+carries (`ABGridDatasetConfig.selection_role`)."""
+
+
 def saved_indices(mean_ci: np.ndarray, mean_ci_floor: float) -> np.ndarray:
     """Components whose prompt-mean CI reaches the floor at SOME recorded position. The
     mean-CI vector is saved for every component either way, so the cut stays visible in the
@@ -180,6 +185,7 @@ def collect_ab_grid_snapshot(
     chunks: tuple[tuple[Int[Array, "n_pad T"], int], ...],
     n_prompts: int,
     mean_ci_floor: float,
+    selection_role: ABGridSelectionRole = "any",
 ) -> ABGridSnapshot:
     """Two-phase device->host pull, sized to what the snapshot stores — NEVER the full
     `(n_prompts, n_pos, C)` grids (they scale as n_prompts x C per site). Phase 1: the
@@ -214,13 +220,20 @@ def collect_ab_grid_snapshot(
         role: {site: total / n_prompts for site, total in totals.items()}
         for role, totals in ci_totals.items()
     }
-    # ONE index set for every role, cut on the MAX across them: a subcomponent that only the
-    # hidden head cares about must not be filtered away, and the applet indexes both roles'
-    # grids by this same list.
+    # ONE index set for every role, cut on the MAX across the SELECTED roles: a subcomponent
+    # that only the hidden head cares about must not be filtered away, and the applet indexes
+    # both roles' grids by this same list. `selection_role` narrows which roles feed the cut —
+    # a hidden-only run must not let its FROZEN output head (CI 0.5 everywhere) save every
+    # subcomponent. Refused rather than silently ignored if the run has no such role.
+    cut_roles = roles if selection_role == "any" else (selection_role,)
+    assert set(cut_roles) <= set(roles), (
+        f"ABGridDataset.selection_role={selection_role!r} but this run's CI fn carries "
+        f"{list(roles)} — the cut would read a head that does not exist"
+    )
     sites = tuple(mean_ci[roles[0]])
     saved = {
         site: saved_indices(
-            np.maximum.reduce([mean_ci[role][site] for role in roles]), mean_ci_floor
+            np.maximum.reduce([mean_ci[role][site] for role in cut_roles]), mean_ci_floor
         )
         for site in sites
     }

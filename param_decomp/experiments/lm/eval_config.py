@@ -84,6 +84,16 @@ class ABGridDatasetConfig(BaseConfig):
     stays visible in the applet. It is the ONLY bound on snapshot size — ~40 KB per saved
     component per recorded position at a 100x100 grid (u8 CI + f16 inner, base64) — so read
     `eval/ab_grids/saved_components/total` before trusting a floor at production C."""
+    selection_role: Literal["any", "output", "hidden"] = "any"
+    """Which CI head the `mean_ci_floor` cut reads. `any` (the default, and the only
+    behaviour before this field existed) takes the MAX over every role the run carries, so a
+    subcomponent only the hidden head cares about is not filtered away.
+
+    Set `hidden` on a HIDDEN-ONLY run. There the output head is frozen at its
+    `zero_init_readout` value — CI 0.5 for every subcomponent — so under `any` the max clears
+    any sane floor everywhere and ALL of them are saved: measured on p-ba5a0c0d, 124,928
+    saved against -05's ~1,100, i.e. 6.7 GB per snapshot instead of ~0.2 GB, which no browser
+    will open. The stored arrays are unaffected either way; this only decides the cut."""
     operation: Literal["add", "sub", "mul"] = "add"
     a_range: tuple[int, int] = (1, 100)
     b_range: tuple[int, int] = (1, 100)

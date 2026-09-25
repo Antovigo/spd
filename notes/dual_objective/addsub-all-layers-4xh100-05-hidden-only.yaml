@@ -491,6 +491,11 @@ eval:
     # were ~22 MB each at 7808 components, so expect ~0.2 GB each here.
     - type: ABGridDataset
       mean_ci_floor: 0.05
+      # HIDDEN-ONLY: the cut reads the hidden head ALONE. Under the `any` default it is the
+      # max over roles, and this run's output head is FROZEN at CI 0.5 everywhere, so every
+      # one of the 124,928 subcomponents clears any floor: measured on p-ba5a0c0d before this
+      # field existed, 6.7 GB per snapshot against -05's ~0.2 GB, which no browser opens.
+      selection_role: hidden
       operation: add
       a_range: [1, 100]
       b_range: [1, 100]
