@@ -18,8 +18,10 @@ from param_decomp.core.train import TrainState
 from param_decomp.experiments.lm.ab_grid_dataset import (
     ABGridStep,
     ab_grid_payload,
+    ab_grid_split_payload,
     collect_ab_grid_snapshot,
     make_ab_grid_step,
+    thumbnail_factor,
     write_ab_grid_snapshot,
 )
 from param_decomp.experiments.lm.arithmetic_probe import ArithmeticGrid, build_arithmetic_probe
@@ -84,18 +86,12 @@ class ABGridOperation:
             self.mean_ci_floor,
         )
         if self.writes_snapshots:
-            write_ab_grid_snapshot(
-                self.run_dir,
-                now_step,
-                ab_grid_payload(
-                    snapshot,
-                    self.grid,
-                    self.positions,
-                    self.seq_len,
-                    now_step,
-                    self.mean_ci_floor,
-                ),
-            )
+            args = (snapshot, self.grid, self.positions, self.seq_len, now_step, self.mean_ci_floor)
+            if thumbnail_factor(self.grid) > 1:
+                index, modules = ab_grid_split_payload(*args)
+                write_ab_grid_snapshot(self.run_dir, now_step, index, modules)
+            else:
+                write_ab_grid_snapshot(self.run_dir, now_step, ab_grid_payload(*args))
         record: LogRecord = {
             f"eval/ab_grids/saved_components/{site}": float(idx.size)
             for site, idx in snapshot.saved.items()

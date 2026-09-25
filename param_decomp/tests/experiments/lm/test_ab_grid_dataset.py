@@ -33,10 +33,13 @@ from param_decomp.experiments.lm.ab_grid_dataset import (
     ABGridSnapshot,
     _take_columns,
     ab_grid_payload,
+    ab_grid_split_payload,
     collect_ab_grid_snapshot,
     encode_ci_u8,
     make_ab_grid_step,
+    pool_grid,
     saved_indices,
+    thumbnail_factor,
     write_ab_grid_snapshot,
 )
 from param_decomp.experiments.lm.ab_grid_operation import ABGridOperation, resolve_positions
@@ -284,6 +287,78 @@ def test_write_snapshot_ships_the_applet_and_orders_the_manifest_by_step(tmp_pat
     assert json.loads(js[len("window.registerABGrids(") : -2])["step"] == 1000
     applet = Path(ab_grid_dataset.__file__).parent / APPLET_FILENAME
     assert (out / "index.html").read_bytes() == applet.read_bytes()
+
+
+def test_thumbnail_factor_brings_the_long_side_to_the_cap():
+    def grid(n_a: int, n_b: int) -> ArithmeticGrid:
+        return ArithmeticGrid(a_values=tuple(range(n_a)), b_values=tuple(range(n_b)), symbol="+")
+
+    assert thumbnail_factor(grid(100, 100)) == 1  # the -05 grid ships whole, as before
+    assert thumbnail_factor(grid(400, 400)) == 4
+    assert thumbnail_factor(grid(101, 3)) == 2
+
+
+def test_pool_grid_means_blocks_and_averages_a_partial_edge():
+    x = np.arange(5 * 4, dtype=np.float32).reshape(1, 1, 1, 5, 4)
+    pooled = pool_grid(x, 2)
+    assert pooled.shape == (1, 1, 1, 3, 2)
+    np.testing.assert_allclose(
+        pooled[0, 0, 0, 0], [x[..., 0:2, 0:2].mean(), x[..., 0:2, 2:4].mean()]
+    )
+    # the last row block holds ONE real row (a = 4): its mean is over that row alone
+    np.testing.assert_allclose(pooled[0, 0, 0, 2], [x[..., 4, 0:2].mean(), x[..., 4, 2:4].mean()])
+
+
+def test_split_payload_thumbnails_the_index_and_ships_full_grids_per_module(tmp_path: Path):
+    """A grid past `THUMBNAIL_MAX_SIDE` is written as an index of pooled thumbnails plus one
+    full-resolution file per module. The full grids must be byte-identical to what the whole
+    payload would have carried, and the index must keep every non-grid key."""
+    n_a, n_b, factor = 202, 200, 3
+    grid = ArithmeticGrid(
+        a_values=tuple(range(1, n_a + 1)), b_values=tuple(range(1, n_b + 1)), symbol="+"
+    )
+    rng = np.random.default_rng(0)
+    ci = rng.random((n_a * n_b, 1, 2)).astype(np.float32)
+    empty_site = "layers.0.mlp.up_proj"
+    snapshot = ABGridSnapshot(
+        mean_ci={
+            "output": {SITE: np.ones((1, 4), np.float32), empty_site: np.zeros((1, 4), np.float32)},
+            "hidden": {SITE: np.ones((1, 4), np.float32), empty_site: np.zeros((1, 4), np.float32)},
+        },
+        saved={SITE: np.asarray([1, 2]), empty_site: np.asarray([], dtype=int)},
+        ci_columns={
+            "output": {SITE: ci, empty_site: np.zeros((n_a * n_b, 1, 0), np.float32)},
+            "hidden": {SITE: ci * 0.5, empty_site: np.zeros((n_a * n_b, 1, 0), np.float32)},
+        },
+        inner_columns={SITE: ci - 0.5, empty_site: np.zeros((n_a * n_b, 1, 0), np.float32)},
+    )
+    whole = ab_grid_payload(snapshot, grid, (T - 1,), T, 4000, 0.05)
+    index, modules = ab_grid_split_payload(snapshot, grid, (T - 1,), T, 4000, 0.05)
+
+    assert index["thumb"] == {"factor": factor, "n_a": 68, "n_b": 67}
+    assert set(modules) == {SITE}, "a module with nothing saved gets no file"
+    by_name = {m["name"]: m for m in index["modules"]}
+    for key in ("ci", "ci_hidden", "inner"):
+        assert key not in by_name[SITE]
+        assert modules[SITE][key] == whole["modules"][0][key]
+    assert by_name[SITE]["file"] == f"step_4000/{SITE}.js"
+    assert by_name[SITE]["mean_ci"] == whole["modules"][0]["mean_ci"]
+    assert by_name[SITE]["saved"] == [1, 2]
+    assert {k: v for k, v in index.items() if k not in ("modules", "thumb")} == {
+        k: v for k, v in whole.items() if k != "modules"
+    }
+    thumb = np.frombuffer(base64.b64decode(by_name[SITE]["ci_thumb"]), np.uint8).reshape(
+        2, 1, 1, 68, 67
+    )
+    first_block = ci.reshape(n_a, n_b, 1, 2)[0:factor, 0:factor, 0, 1].mean()
+    assert thumb[1, 0, 0, 0, 0] == np.round(first_block * 255)
+
+    write_ab_grid_snapshot(tmp_path, 4000, index, modules)
+    out = tmp_path / "ab_grids"
+    assert (out / "manifest.js").read_text() == 'window.AB_GRIDS_MANIFEST = ["step_4000.js"];\n'
+    js = (out / "step_4000" / f"{SITE}.js").read_text()
+    assert js.startswith("window.registerABGridModule(") and js.endswith(");")
+    assert json.loads(js[len("window.registerABGridModule(") : -2]) == modules[SITE]
 
 
 def test_resolve_positions():

@@ -82,8 +82,10 @@ class ABGridDatasetConfig(BaseConfig):
     """Full `a x b` grids are stored only for components whose prompt-mean CI reaches this
     at SOME recorded position; the mean-CI vector is stored for every component, so the cut
     stays visible in the applet. It is the ONLY bound on snapshot size — ~40 KB per saved
-    component per recorded position at a 100x100 grid (u8 CI + f16 inner, base64) — so read
-    `eval/ab_grids/saved_components/total` before trusting a floor at production C."""
+    component per recorded position at a 100x100 grid (u8 CI + f16 inner, base64), scaling
+    with the cell count — so read `eval/ab_grids/saved_components/total` before trusting a
+    floor at production C. A grid past 100 on either side is written split (thumbnail index +
+    one full-resolution file per module; `ab_grid_dataset.THUMBNAIL_MAX_SIDE`)."""
     operation: Literal["add", "sub", "mul"] = "add"
     a_range: tuple[int, int] = (1, 100)
     b_range: tuple[int, int] = (1, 100)
@@ -94,9 +96,10 @@ class ABGridDatasetConfig(BaseConfig):
     chunk_prompts: PositiveInt | None = None
     """Rows per forward through the grid. `null` sends all `|a_range| x |b_range|` prompts
     in ONE forward — 10000 prompts needs ~20GiB and OOMs a 45GB L40. Chunking bounds the
-    forward without shrinking the grid; the CI / inner columns are concatenated across
-    chunks and the mean CI sums over them, so WHICH components are saved is
-    chunk-count-invariant and their values match the unchunked pass up to float
+    forward without shrinking the grid (the collector forwards each chunk twice — sums, then
+    saved columns — so only one chunk's grids are ever on device); the CI / inner columns are
+    concatenated across chunks and the mean CI sums over them, so WHICH components are saved
+    is chunk-count-invariant and their values match the unchunked pass up to float
     reassociation (SPEC D4). Prefer a multiple of the device count so no chunk carries
     sharding pad."""
 

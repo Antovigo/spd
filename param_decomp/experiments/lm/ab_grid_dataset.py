@@ -29,6 +29,11 @@ from param_decomp.core.model import CaptureKeys, PlacedModel, prepare_compute_we
 from param_decomp.experiments.lm.arithmetic_probe import ArithmeticGrid
 
 AB_GRIDS_DIR = "ab_grids"
+THUMBNAIL_MAX_SIDE = 100
+"""A grid wider than this on either axis is written SPLIT (`ab_grid_split_payload`): the
+applet's gallery draws every saved component at once, which a 100x100 grid at ~3000
+components already fills (~125 MB per snapshot); 400x400 would be ~2.5 GB in one file —
+past what a browser will parse as one script."""
 APPLET_FILENAME = "ab_grids_app.html"
 MANIFEST_VAR = "AB_GRIDS_MANIFEST"
 
@@ -147,6 +152,11 @@ def _take_columns(per_prompt: Float[Array, "n_pad n_pos C"], idx: Int[Array, " k
     return per_prompt.at[:, :, idx].get(out_sharding=P(spec[0], spec[1], None))
 
 
+def _padded_gather_index(idx: np.ndarray) -> Array:
+    width = -(-idx.size // GATHER_INDEX_MULTIPLE) * GATHER_INDEX_MULTIPLE
+    return jnp.asarray(np.pad(idx, (0, width - idx.size), mode="edge"))
+
+
 def saved_indices(mean_ci: np.ndarray, mean_ci_floor: float) -> np.ndarray:
     """Components whose prompt-mean CI reaches the floor at SOME recorded position. The
     mean-CI vector is saved for every component either way, so the cut stays visible in the
@@ -181,28 +191,30 @@ def collect_ab_grid_snapshot(
     n_prompts: int,
     mean_ci_floor: float,
 ) -> ABGridSnapshot:
-    """Two-phase device->host pull, sized to what the snapshot stores — NEVER the full
-    `(n_prompts, n_pos, C)` grids (they scale as n_prompts x C per site). Phase 1: the
-    step's per-position CI sums come to host (an `(n_pos, C)` array per site) and drive the
-    floor cut, identically on every rank. Phase 2: only the saved columns are host-gathered
+    """Two-pass device->host pull, sized to what the snapshot stores — NEVER the full
+    `(n_prompts, n_pos, C)` grids (they scale as n_prompts x C per site). Pass 1: every chunk's
+    per-position CI sums come to host (an `(n_pos, C)` array per site) and drive the floor
+    cut, identically on every rank; the chunk's grids are dropped as soon as its sums are
+    read. Pass 2: each chunk is forwarded AGAIN and only its saved columns are host-gathered
     (the index padded up to a `GATHER_INDEX_MULTIPLE` boundary so the gather retraces
-    rarely; each chunk's real-row count trims its sharding pad off the END). Both the step
-    and the column gather are COLLECTIVE — all ranks join, and every rank walks the same
-    chunks in the same order.
+    rarely; each chunk's real-row count trims its sharding pad off the END) before the next
+    chunk runs. Both the step and the column gather are COLLECTIVE — all ranks join, and
+    every rank walks the same chunks in the same order.
 
     `chunks` is `((tokens, n_valid_rows), ...)`: the grid split so ONE forward never carries
-    the whole operand sweep. The per-chunk CI / inner grids stay on device between the
-    phases (a few tens of MB total, unlike the forward that produced them), so chunking
-    costs no extra forward. The sums add over chunks and the columns concatenate in chunk
-    order, so WHICH components are saved is chunk-count-invariant exactly; the gathered
-    values match a single-chunk pass up to float reassociation (SPEC D4)."""
-    per_chunk: list[tuple[dict[CIRole, dict[str, Array]], dict[str, Array], int]] = []
+    the whole operand sweep. Re-forwarding in pass 2 is what keeps device memory at ONE
+    chunk's grids however large the sweep: holding every chunk's `(n, n_pos, C)` CI and inner
+    grids between the passes costs `n_prompts x 12 B x sum(C)` — 3.75 GB/rank for a 100x100
+    grid at the 32-block C (125k components on 4 ranks), 60 GB/rank at 400x400. The extra
+    frozen forward is a few seconds; the step is deterministic, so both passes see the same
+    CI. The sums add over chunks and the columns concatenate in chunk order, so WHICH
+    components are saved is chunk-count-invariant exactly; the gathered values match a
+    single-chunk pass up to float reassociation (SPEC D4)."""
     ci_totals: dict[CIRole, dict[str, np.ndarray]] = {}
     for chunk_tokens, chunk_valid_rows in chunks:
-        ci, inner, chunk_sum = step(
+        _ci, _inner, chunk_sum = step(
             model, components, placed_ci_fn, chunk_tokens, jnp.asarray(chunk_valid_rows)
         )
-        per_chunk.append((ci, inner, chunk_valid_rows))
         for role, role_sum in chunk_sum.items():
             totals = ci_totals.setdefault(role, {})
             for site, value in role_sum.items():
@@ -239,18 +251,19 @@ def collect_ab_grid_snapshot(
         role: {site: [] for site in live} for role in roles
     }
     inner_parts: dict[str, list[np.ndarray]] = {site: [] for site in live}
-    for ci, inner, chunk_valid_rows in per_chunk:
-        to_gather: dict[str, tuple[tuple[Array, ...], Array]] = {}
-        for site in live:
-            idx = saved[site]
-            width = -(-idx.size // GATHER_INDEX_MULTIPLE) * GATHER_INDEX_MULTIPLE
-            padded_idx = jnp.asarray(np.pad(idx, (0, width - idx.size), mode="edge"))
-            to_gather[site] = (
-                tuple(_take_columns(ci[role][site], padded_idx) for role in roles),
-                _take_columns(inner[site], padded_idx),
+    padded_idx = {site: _padded_gather_index(saved[site]) for site in live}
+    for chunk_tokens, chunk_valid_rows in chunks if live else ():
+        ci, inner, _sum = step(
+            model, components, placed_ci_fn, chunk_tokens, jnp.asarray(chunk_valid_rows)
+        )
+        to_gather: dict[str, tuple[tuple[Array, ...], Array]] = {
+            site: (
+                tuple(_take_columns(ci[role][site], padded_idx[site]) for role in roles),
+                _take_columns(inner[site], padded_idx[site]),
             )
-        if not to_gather:
-            break
+            for site in live
+        }
+        del ci, inner
         gathered = multihost_utils.process_allgather(to_gather, tiled=True)
         for site, (ci_cols_per_role, inner_cols) in gathered.items():
             k = saved[site].size
@@ -340,12 +353,99 @@ def ab_grid_payload(
     }
 
 
-def write_ab_grid_snapshot(run_dir: Path, step: int, payload: dict[str, Any]) -> None:
+def thumbnail_factor(grid: ArithmeticGrid) -> int:
+    """The pooling factor that brings the grid's longer side down to `THUMBNAIL_MAX_SIDE`;
+    1 means the grid is small enough to ship whole (`ab_grid_payload`)."""
+    return -(-max(grid.n_a, grid.n_b) // THUMBNAIL_MAX_SIDE)
+
+
+def pool_grid(comp_major: np.ndarray, factor: int) -> np.ndarray:
+    """Mean over `factor x factor` blocks of the trailing `(a, b)` axes. A partial edge
+    block averages the cells it has (NaN padding + nanmean), so a side that `factor` does
+    not divide still pools every cell exactly once."""
+    *lead, n_a, n_b = comp_major.shape
+    pad_a, pad_b = (-n_a) % factor, (-n_b) % factor
+    padded = np.pad(
+        comp_major.astype(np.float32),
+        [(0, 0)] * len(lead) + [(0, pad_a), (0, pad_b)],
+        constant_values=np.nan,
+    )
+    blocks = padded.reshape(*lead, (n_a + pad_a) // factor, factor, (n_b + pad_b) // factor, factor)
+    return np.nanmean(blocks, axis=(-3, -1))
+
+
+def module_filename(step: int, site: str) -> str:
+    """A split snapshot's full-resolution module file, relative to `ab_grids/`."""
+    return f"step_{step}/{site}.js"
+
+
+def ab_grid_split_payload(
+    snapshot: ABGridSnapshot,
+    grid: ArithmeticGrid,
+    positions: tuple[int, ...],
+    seq_len: int,
+    step: int,
+    mean_ci_floor: float,
+) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
+    """`(index, {site: module document})` for a grid too large to ship whole.
+
+    The index is `ab_grid_payload`'s document with each module's full-resolution grids
+    REPLACED by `factor x factor`-mean thumbnails (`ci_thumb`, `ci_hidden_thumb`,
+    `inner_thumb`, over the `thumb` block's `n_a x n_b`) plus the `file` holding the full
+    grids; `mean_ci`, `saved` and every top-level key keep their meaning, so a reader of the
+    mean-CI vectors reads the index exactly as it reads a whole snapshot. Each module
+    document carries the full `ci` / `ci_hidden` / `inner` in `ab_grid_payload`'s encoding,
+    loaded by the applet only for the component being inspected. Modules with nothing saved
+    get no file."""
+    factor = thumbnail_factor(grid)
+    assert factor > 1, f"a {grid.n_a}x{grid.n_b} grid ships whole; use ab_grid_payload"
+    whole = ab_grid_payload(snapshot, grid, positions, seq_len, step, mean_ci_floor)
+    has_hidden = "hidden" in snapshot.mean_ci
+    modules: dict[str, dict[str, Any]] = {}
+    for entry in whole["modules"]:
+        site = entry["name"]
+        if "ci" not in entry:
+            continue
+        full = {key: entry.pop(key) for key in ("ci", "ci_hidden", "inner") if key in entry}
+        modules[site] = {"step": step, "name": site} | full
+        entry["file"] = module_filename(step, site)
+        entry["ci_thumb"] = _b64(
+            encode_ci_u8(pool_grid(_comp_major(snapshot.ci_columns["output"][site], grid), factor))
+        )
+        if has_hidden:
+            entry["ci_hidden_thumb"] = _b64(
+                encode_ci_u8(
+                    pool_grid(_comp_major(snapshot.ci_columns["hidden"][site], grid), factor)
+                )
+            )
+        entry["inner_thumb"] = _b64(
+            pool_grid(_comp_major(snapshot.inner_columns[site], grid), factor).astype(np.float16)
+        )
+    whole["thumb"] = {
+        "factor": factor,
+        "n_a": -(-grid.n_a // factor),
+        "n_b": -(-grid.n_b // factor),
+    }
+    return whole, modules
+
+
+def write_ab_grid_snapshot(
+    run_dir: Path,
+    step: int,
+    payload: dict[str, Any],
+    module_payloads: dict[str, dict[str, Any]] | None = None,
+) -> None:
     """Write `<run_dir>/ab_grids/step_<n>.js` next to the applet, regenerating `manifest.js`
-    so a `file://`-opened `index.html` discovers every snapshot written so far. Process-0
-    only — the caller owns that gate."""
+    so a `file://`-opened `index.html` discovers every snapshot written so far. A split
+    snapshot (`ab_grid_split_payload`) also writes each module's full grids to
+    `step_<n>/<site>.js` — BEFORE the index, so a manifest entry never names a snapshot
+    whose module files are still missing. Process-0 only — the caller owns that gate."""
     target = run_dir / AB_GRIDS_DIR
     target.mkdir(parents=True, exist_ok=True)
+    for site, module in (module_payloads or {}).items():
+        path = target / module_filename(step, site)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"window.registerABGridModule({json.dumps(module)});")
     (target / f"step_{step}.js").write_text(f"window.registerABGrids({json.dumps(payload)});")
     (target / "index.html").write_bytes((Path(__file__).parent / APPLET_FILENAME).read_bytes())
     snapshots = sorted(target.glob("step_*.js"), key=lambda p: int(p.stem.removeprefix("step_")))

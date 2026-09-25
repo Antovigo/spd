@@ -176,17 +176,24 @@ stay cluster-portable. The ONE fused `make_ab_grid_step` slices, at each configu
 with the BATCH axis KEPT as the grid, each component's lower-leaky CI (from the CI fn) and its
 normalized inner activation `(x · V_c) / ‖V_c‖` — both off a SINGLE frozen
 `component_activation_forward` (the protocol seam harvest uses), so a snapshot costs no
-masked pass. The device→host pull is TWO-PHASE (`collect_ab_grid_snapshot`), sized to what
+masked pass. The device→host pull is TWO-PASS (`collect_ab_grid_snapshot`), sized to what
 the snapshot stores — never the full `(n_prompts, n_pos, C)` grids (~GBs/site at production
-C): the step's per-position CI SUMS over REAL rows (the sharding-pad tail is masked) come to
-host and drive the `mean_ci_floor` cut, identically on every rank, then only the saved
-columns are gathered (the index padded to a `GATHER_INDEX_MULTIPLE` boundary so the gather
-retraces rarely). Process 0 writes `<run_dir>/ab_grids/step_<n>.js` — per-component CI (u8)
-and inner activations (f16) over `[comp, pos, op, a, b]`, plus the fp32 mean-CI vector for
-EVERY component so the cut stays visible — alongside `index.html`, the self-contained
+C): pass 1 brings every chunk's per-position CI SUMS over REAL rows (the sharding-pad tail is
+masked) to host to drive the `mean_ci_floor` cut, identically on every rank, dropping each
+chunk's grids as it goes; pass 2 re-forwards each chunk and gathers only its saved columns
+(the index padded to a `GATHER_INDEX_MULTIPLE` boundary so the gather retraces rarely), so
+device memory holds ONE chunk's grids however wide the operand sweep. Process 0 writes
+`<run_dir>/ab_grids/step_<n>.js` — per-component CI (u8) and inner activations (f16) over
+`[comp, pos, op, a, b]`, plus the fp32 mean-CI vector for EVERY component so the cut stays
+visible. A grid wider than `THUMBNAIL_MAX_SIDE` (100) on either axis is written SPLIT
+(`ab_grid_split_payload`): `step_<n>.js` then carries `factor x factor`-mean thumbnails
+(`*_thumb`, sized by its `thumb` block) and each module's full grids go to
+`step_<n>/<site>.js`, which the applet loads only for the component opened in its detail
+drawer — a 400x400 snapshot at ~3000 saved components is ~2.5 GB, past what a browser parses
+as one script. All of this sits alongside `index.html`, the self-contained
 `file://`-openable applet (`ab_grids_app.html`, shipped next to the metric) with
-step/position/op selectors and a log-scale mean-CI threshold slider, and regenerates
-`manifest.js` so the applet discovers every snapshot. It is the one slow metric that opts
+step/position/op selectors and a log-scale mean-CI threshold slider; process 0 also
+regenerates `manifest.js` so the applet discovers every snapshot. It is the one slow metric that opts
 OUT of `eval.slow_on_first_step` (`EveryAfterFirst`, resolved in
 `experiments.eval_config.schedule_for`): at an untrained decomposition every component clears
 any floor, so the first-pass snapshot is enormous and shows nothing. The payload is
