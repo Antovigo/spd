@@ -1,6 +1,6 @@
 # What the readers read: a label-free atlas of quantities
 
-Code: `param_decomp/arith_repr/isa/`. Outputs: `<run>/analysis/arith_repr/atlas/` (report in
+Code: `param_decomp/arith_repr/isa/` (`atlas.py`, `writers.py`). Outputs: `<run>/analysis/arith_repr/atlas/` (report in
 `site/`, https://claude.ai/artifact/FHwWcPdX6cjPSech1iGR3Z).
 
 ## The problem
@@ -65,6 +65,33 @@ Log cosh ISA (`pipeline.py`, whiten + FastICA + dependence grouping) also recove
 components-only model (L18 at `=`, addition: 17 of 26 outputs explained by one label at η² >= 0.8,
 circle-like kurtosis), but tiles the long-period codes into sparse bumps on the original model.
 `directions.py` gives the stream directions of its outputs (patterns and filters).
+
+## How the quantities are built (`writers.py`)
+
+In the components-only model the stream at a position is exactly the embedding plus the masked writes
+of the o and down components, `x = e + sum_c h_c m_c U_c` (checked to within 1 %, the fp16 storage).
+Each quantity is a linear read `z = (x - mean) . F`, `F = (g * V) W` from its readers, so each writer's
+share of its variance is exact: `sum_j Cov(h_c m_c, z_j) (U_c . F_j) / Var(z)`; the shares of the
+embedding and of all earlier writers add up to 1 (0.999-1.001 over the 832 quantities).
+
+Provenance of every writer with >= 15 % of a quantity (J < 0.35): held-out R2 of its masked activation
+given the quantities it can read, in the form the component computes: linear for attention (values are
+linear in the source streams, over every source position), degree 2 for MLPs (neurons are
+silu(g) * u), on single quantities and the best pair. A flexible regression is uninformative: at
+positions a and op any code that identifies a predicts everything.
+
+- Op flag: at position b written by L0 head 10 (L0.o.c32, c0, 98 %), linear in the flag at op
+  (R2 0.999); at `=` rewritten layer by layer by MLP components that read it (L14.down.c1, ...).
+- b's codes: at position b from the embedding and the L0 MLP (b mod 100 at L2: 37 % embedding, 48 %
+  L0 MLP); copied to `=` by L15 head 13 (81 % of b mod 50, 99 % of b's mod-20 square wave at the L15
+  MLP input), linear in b's codes at position b.
+- a's codes: copied to `=` by L16 head 21 (50-97 % of a's codes at the L16-L18 MLP inputs), linear in
+  a's codes at positions a and op.
+- Result: L19.down.c6 writes 52 % of the result's mod-20 code at the L20 input; its activation is a
+  product of b's and a's mod-20 square waves (degree-2 R2 0.83 for the pair, 0.32 and 0.08 alone).
+  L17.down.c67 computes the result's parity from a's and b's parities (0.89). L18.down.c4 writes 61 %
+  of the result's parity, but the quantities at L18's input predict it poorly (0.16): the operands'
+  parities are not among them. Later MLPs refresh the result codes from themselves (L21.down.c1, 0.90).
 
 ## What did not work, and why
 
