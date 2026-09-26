@@ -1,10 +1,11 @@
 # addsub-all-layers-4xh100-08 (2026-09-25): a COPY of addsub-all-layers-4xh100-sota.yaml at
 # -05 (`p-ba5a0c05`, the canonical 32-block addsub run) with exactly two recipe changes, and
-# the leaves they drag along. Run id `p-ba8a0c08`; launch it explicitly:
-#   CONFIG=$REPO/notes/dual_objective/addsub-all-layers-4xh100-08.yaml RUN_ID=p-ba8a0c08 \
+# the leaves they drag along. Run id `p-ba8b0c08`; launch it explicitly:
+#   CONFIG=$REPO/notes/dual_objective/addsub-all-layers-4xh100-08.yaml RUN_ID=p-ba8b0c08 \
 #     ./launch_run.sh --profile 4xh100
-# This REPLACES the unlaunched 2026-09-20 "softened starts" draft of -08 (commit 5d17c0b05;
-# p-ba8a0c08 never ran and has no wandb run) — git history keeps that recipe.
+# This REPLACES the unlaunched 2026-09-20 "softened starts" draft of -08 (commit 5d17c0b05)
+# — git history keeps that recipe. NOT `p-ba8a0c08`: wandb refuses that id with 410 "run was
+# previously created and deleted" (it failed the first launch, 2026-09-26 00:07).
 #
 # THE ENTIRE DELTA FROM -05
 # 1. ADVERSARIAL SHARE 0.9, ANNEALED OVER 10000 STEPS, on all four merged recon terms
