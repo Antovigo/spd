@@ -321,5 +321,83 @@ def run(batch: int = 16) -> None:
     log("saved")
 
 
+@jax.jit
+def residual_effect(
+    xb: jax.Array, xa: jax.Array, g: jax.Array, WU: jax.Array
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """The component's effect on log-probs (base minus ablated, i.e. what the component ADDS),
+    d = log p_b - log p_a, split into temperature + shift (weighted fit on z_b, weights (p_b + p_a)/2) and the
+    residual r = d - c - (1 - beta) z_b. Returns (d, r, weights)."""
+    rb, ra = _rms(xb, EPS)[..., None], _rms(xa, EPS)[..., None]
+    zb = (xb / rb * g) @ WU.T
+    lb = jax.nn.log_softmax(zb, -1)
+    la = jax.nn.log_softmax((xa / ra * g) @ WU.T, -1)
+    w = (jnp.exp(lb) + jnp.exp(la)) / 2
+    d = lb - la
+    wm = lambda v: (w * v).sum(-1, keepdims=True)  # noqa: E731
+    dc, zc = d - wm(d), zb - wm(zb)
+    r = dc - wm(dc * zc) / wm(zc * zc) * zc
+    return d, r, w
+
+
+def residual(batch: int = 16) -> None:
+    """Profile of the NON-temperature part of each component's effect: number offset, correlation with log
+    unigram frequency and R2 on [is-number, log-freq], over seen tokens, (a) unweighted and (b) weighted by
+    the probability the token has (so only tokens that matter count); plus the tokens the residual moves most."""
+    toks, _ = fineweb(512, batch)
+    M = TextModel(toks.shape[1])
+    V = M.unembed.shape[0]
+    isnum_np, lf_np, seen_np = token_tables(V)
+    isnum, lf, seen = jnp.asarray(isnum_np), jnp.asarray(lf_np, jnp.float32), jnp.asarray(seen_np)
+    uv = {li: dict(np.load(FW / f"uv_L{li}.npz")) for li in (30, 31)}
+    flagged = np.load(ENT / "components_fineweb.npz")["flagged"]
+    fw_caps = base_pass(M, toks, batch, {60, 61, 62, 63})
+    atoks = addsub_tokens()
+    ad = base_pass(M, atoks, 1000, {60, 61, 62, 63})
+    out: dict[str, np.ndarray] = {}
+    for nm in CANDIDATES + CONTROLS:
+        li, kind, c = parse(nm)
+        Vc, Uc = comp_vectors(uv[li], kind, c)
+        tp = start_point(li, kind)
+        for tag in ("eq", "fw"):
+            sums = {"d": jnp.zeros(V), "r": jnp.zeros(V), "rw": jnp.zeros(V), "w": jnp.zeros(V)}
+            prof_u = {}
+            n = 0
+            if tag == "eq":
+                items = [(ad[tp][bi], ad[64][bi][:, -1:], None) for bi in range(len(ad[64]))]
+            else:
+                items = [
+                    (fw_caps[tp][bi], fw_caps[64][bi], jnp.asarray(flagged[s : s + batch]))
+                    for bi, s in enumerate(range(0, 512, batch))
+                ]
+            for xs, xb, sel in items:
+                xa, _, _ = M.run(xs, tp, {(li, kind): (Vc, Uc, jnp.zeros_like)})
+                xa = xa[:, -1:] if tag == "eq" else xa
+                d, r, w = residual_effect(xb, xa, M.g, M.unembed)
+                m = jnp.ones(d.shape[:-1]) if sel is None else sel.astype(jnp.float32)
+                sums["d"] += (d * m[..., None]).sum((0, 1))
+                sums["r"] += (r * m[..., None]).sum((0, 1))
+                sums["rw"] += (r * w * m[..., None]).sum((0, 1))
+                sums["w"] += (w * m[..., None]).sum((0, 1))
+                pu = logit_profile(r, isnum, lf, seen)
+                for k, v in pu.items():
+                    prof_u[k] = prof_u.get(k, 0.0) + float((v * m).sum())
+                n += float(m.sum())
+            for k, v in prof_u.items():
+                out[f"{nm}__{tag}__r_{k}"] = np.array(v / n)
+            for k, v in sums.items():
+                out[f"{nm}__{tag}__mean_{k}"] = np.asarray(v / n)
+            log(
+                nm,
+                tag,
+                {
+                    k: round(float(out[f"{nm}__{tag}__r_{k}"]), 3)
+                    for k in ("num_off", "corr_freq", "r2_numfreq")
+                },
+            )
+    out["isnum"], out["logfreq"], out["seen"] = isnum_np, lf_np, seen_np
+    savez(OUTC / "residual.npz", **out)
+
+
 if __name__ == "__main__":
-    {"run": run}[sys.argv[1]]()
+    {"run": run, "residual": residual}[sys.argv[1]]()

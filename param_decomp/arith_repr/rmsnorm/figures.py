@@ -335,9 +335,9 @@ def fig_split(out: Path) -> None:
                 ax[r, 1].plot([r2], [y[i]], "o", color=col, ms=5)
             r2f = 1 - float(z[p + "full__var_resid"]) / max(float(z[p + "full__var_d"]), 1e-12)
             ax[r, 1].plot([r2f], [y[i]], "|", color=INK, ms=10)
-        where = "addsub '='" if tag == "eq" else "fineweb (CI-flagged positions)"
-        ax[r, 0].set_title(f"{where}: KL of removing one part / KL of removing all")
-        ax[r, 1].set_title(f"{where}: temperature R² of each part's effect")
+        where = "addsub '='" if tag == "eq" else "fineweb (flagged)"
+        ax[r, 0].set_title(f"{where}: KL(remove part) / KL(remove all)")
+        ax[r, 1].set_title(f"{where}: temperature R² of each part")
         ax[r, 0].set_xscale("log")
         ax[r, 1].set_xlim(-0.05, 1)
         ax[r, 0].set_yticks(y, [SHORT[n] for n in names], fontsize=7)
@@ -350,46 +350,31 @@ def fig_split(out: Path) -> None:
 
 
 def fig_profile(out: Path) -> None:
-    z = np.load(CL / "claims.npz")
+    """The NON-temperature residual of each component's effect (claims.residual): which tokens it moves."""
+    z = np.load(CL / "residual.npz")
     names = CANDIDATES + CONTROLS
     y = np.arange(len(names))[::-1]
-    fig, ax = plt.subplots(1, 3, figsize=(11, 3.6), sharey=True)
-    for i, nm in enumerate(names):
-        p = f"{nm}__eq__"
-        for part, col in (("k512_S1prof", ORANGE), ("k512_S0prof", BLUE), ("full_prof", INK)):
-            mk = "|" if part == "full_prof" else "o"
-            ax[0].plot(
-                [float(z[p + part + "__num_off"])], [y[i]], mk, color=col, ms=5 if mk == "o" else 10
-            )
-            ax[1].plot(
-                [float(z[p + part + "__corr_freq"])],
-                [y[i]],
-                mk,
-                color=col,
-                ms=5 if mk == "o" else 10,
-            )
-            ax[2].plot(
-                [float(z[p + part + "__r2_numfreq"])],
-                [y[i]],
-                mk,
-                color=col,
-                ms=5 if mk == "o" else 10,
-            )
+    fig, ax = plt.subplots(1, 3, figsize=(11, 3.8), sharey=True)
+    for tag, col, off in (("eq", BLUE, 0.15), ("fw", ORANGE, -0.15)):
+        for i, nm in enumerate(names):
+            p = f"{nm}__{tag}__r_"
+            ax[0].plot([float(z[p + "num_off"])], [y[i] + off], "o", color=col, ms=5)
+            ax[1].plot([float(z[p + "corr_freq"])], [y[i] + off], "o", color=col, ms=5)
+            ax[2].plot([float(z[p + "r2_numfreq"])], [y[i] + off], "o", color=col, ms=5)
     ax[0].set_yticks(y, [SHORT[n] for n in names], fontsize=7)
-    ax[0].axvline(0, color=BASE, lw=1)
-    ax[1].axvline(0, color=BASE, lw=1)
-    ax[0].set_xlabel("number tokens − others (sd units)")
-    ax[0].set_title("pushes number tokens")
+    for a in ax[:2]:
+        a.axvline(0, color=BASE, lw=1)
+    ax[0].set_xlabel("number tokens − other tokens (sd units)")
+    ax[0].set_title("residual pushes numbers (sign varies)")
     ax[1].set_xlabel("corr with log unigram frequency")
-    ax[1].set_title("pushes frequent tokens")
-    ax[2].set_xlabel("R² of [is-number, log-freq]")
+    ax[1].set_title("…and frequent tokens, weakly")
+    ax[2].set_xlabel("R² of [is-number, log-frequency]")
     ax[2].set_xlim(0, 1)
-    ax[2].set_title("how much of the logit change they explain")
-    ax[0].plot([], [], "o", color=ORANGE, label="S1 (token-choosing part)")
-    ax[0].plot([], [], "o", color=BLUE, label="S0 (token-neutral part)")
-    ax[0].plot([], [], "|", color=INK, ms=10, label="whole write")
+    ax[2].set_title("…but those explain little of it")
+    ax[0].plot([], [], "o", color=BLUE, label="addsub '='")
+    ax[0].plot([], [], "o", color=ORANGE, label="fineweb (flagged)")
     ax[0].legend(loc="lower right", fontsize=7)
-    save(fig, out, "fig7_profile.png")
+    save(fig, out, "fig7_residual.png")
 
 
 def neuron_scan() -> dict[str, np.ndarray]:
@@ -482,7 +467,8 @@ def fig_same(out: Path) -> None:
     ax[0].plot([], [], "o-", color=BLUE, label="addsub '='")
     ax[0].plot([], [], "o-", color=ORANGE, label="fineweb (flagged)")
     ax[1].plot([], [], "x", color=MUTED, label="6 random neurons")
-    ax[0].legend(loc="lower left", fontsize=7)
+    ax[0].legend(loc="upper left", fontsize=7)
+    ax[0].set_xlim(-0.85, 0.8)
     ax[1].legend(loc="lower right", fontsize=7)
     save(fig, out, "fig9_same_direction.png")
 
@@ -525,7 +511,7 @@ def fig_connect(out: Path) -> None:
     ax[1].set_xlim(1e-9, None)
     ax[1].set_xlabel("nominal share |U_c[n]|² / |U_c|²")
     ax[1].set_ylabel("|effective share of the write|")
-    ax[1].set_title("gate c14: weight on a neuron ≠ use of it")
+    ax[1].set_title("gate c14: weight ≠ use")
     ax[1].legend(loc="lower right", fontsize=7, markerscale=1.5)
     sens = z["eq__state_abs_dsilu_g_u"]
     ax[2].scatter(sens * np.sqrt(nom), s, s=3, color=MUTED, alpha=0.35, lw=0)
@@ -536,7 +522,7 @@ def fig_connect(out: Path) -> None:
     ax[2].set_xlim(1e-7, None)
     ax[2].set_xlabel("|U_c[n]| × gate sensitivity |silu'(g_n) u_n| at '='")
     ax[2].set_ylabel("|effective share of the write|")
-    ax[2].set_title("the nonlinearity decides which channels are live")
+    ax[2].set_title("gate state decides which channels are live")
     save(fig, out, "fig10_connectivity.png")
 
 
