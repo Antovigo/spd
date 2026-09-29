@@ -45,35 +45,49 @@ The main caveat: in my experiments the set of switched-on components is fixed in
 
 ## 1. How different is the stream after removing components?
 
-To describe the difference, write the decomposed model's stream at some norm as
+Take the residual stream at one norm, at the `=` position, in the two models: x_orig (original Llama) and x_dec (decomposed). Their difference d = x_dec − x_orig is what I want to understand. Two questions: how large is it, and does it make the vector longer or shorter (the RMS is just length divided by √4096)?
 
-> x_dec = α · x_orig + (stray part)
+**A first, crude description.** Split x_dec into a part along x_orig and the rest:
 
-Here x_orig is the original model's stream on the same prompt, α is how much of x_orig is present in x_dec (1 would mean fully present), and the **stray part** is everything else in x_dec: the piece pointing in directions that are not x_orig. The stray part arises because the decomposition's active components don't write exactly what the original weights would have written. It contains no information the original had, but it does add to the vector's length.
+> x_dec = α · x_orig + (rest)
 
-The ratio of the two RMS values is then
+α is how much of x_orig's length is still there; the rest is everything in x_dec that points elsewhere. The RMS ratio then satisfies (RMS ratio)² = α² + (|rest| / |x_orig|)². This is an exact identity, but a description, not an explanation: it doesn't say whether the rest was *added* or whether something was *taken away*. Removing content from x_orig also produces a rest, since the part of the removed content that was not along x_orig shows up in x_dec's rest with a minus sign. So the rest should not be read as "added junk".
 
-> rms(x_dec) / rms(x_orig) = sqrt(α² + (size of stray part relative to |x_orig|)²)
+![Left: RMS ratio (decomposed over original), α, and their quotient, at the 62 norms. Right: size of the rest relative to the original stream.](figures/fig1_scale.png)
 
-So two effects fight over the RMS: missing energy in the right direction (α below 1) *lowers* it, and stray energy in other directions *raises* it.
-
-![Left: ratio of RMS values (decomposed over original), and the fraction of the original present, at each of the 62 norms. Right: how large the stray part is compared to the original stream.](figures/fig1_scale.png)
-
-Measured at the `=` position:
-
-| blocks | RMS ratio | α | stray size (relative to \|x_orig\|) |
+| blocks | RMS ratio | α | rest, relative to \|x_orig\| |
 |---|---|---|---|
 | 0–3 | 0.95–1.01 | 0.94–1.00 | 0.14–0.22 |
 | 10–15 | 0.98–1.08 | 0.93–0.99 | 0.28–0.44 |
 | 20–25 | 0.94–1.06 | 0.87–0.99 | 0.36–0.44 |
 | 28–30 | 0.86–0.91 | 0.78–0.84 | 0.33–0.36 |
 
-What to take from this:
+The RMS is within about 6% of the original's until block 25 and 9–14% low in blocks 28–30. The rest is large: 15–45% of the original stream's length.
 
-- The stray part is large: 15% to 45% of the original stream's length. That's a big chunk of the stream that has nothing to do with the original computation. It inflates the RMS while the missing energy deflates it, and the two mostly cancel. The RMS is within about 6% of the original's until block 25, and 9–14% low in blocks 28–30.
-- Prompt to prompt, the RMS ratio and α move together. This is mostly arithmetic, since the stray part is fairly constant in size, so it shouldn't be read as the network compensating.
-- Early in the network the RMS is a collective statistic of thousands of residual dimensions. From about block 20 the original stream is dominated by a couple of huge outlier dimensions (dimension 2352 alone holds 11% of the energy at block 20 and about a third at blocks 25–30), and the stray part mostly avoids them. So the RMS is set by a few dimensions in late blocks and the stray part hardly affects it there.
-- What the active components actually *read* after the norm is almost unchanged. The relative squared difference between the normalized input the decomposed and original models feed to the block is 0.1% in blocks 0–7, 0.4–0.8% in blocks 8–23 and about 1% in blocks 24–30. Using the original's RMS instead of its own gives a similar figure (0.1–1.5%).
+**A proper accounting: removal versus drift.** The stream is a sum of what every block wrote. So d at the start of block L is the sum, over the earlier blocks, of the difference between what the decomposed block wrote and what the original block wrote. For each block, that difference splits exactly into two pieces:
+
+- **Removal**: what the block's *switched-off* components would have written, given the same input the decomposed model gave it. Taking this out of the stream is the direct loss of content. I measure it by running the decomposed model with that one block dense (all components on) and comparing the stream after the block.
+- **Drift**: the original block's output changes because its input is already different from the original's. Even a perfectly faithful block would write something different when it reads a distorted stream.
+
+Both pieces are summed over all earlier blocks, and by construction they add up exactly to d (I checked this numerically: the leftover is zero). This uses 1000 prompts; the numbers are medians, at the `=` position, at the norms in front of each block's attention.
+
+![Left: size of the accumulated removal, accumulated drift and their sum (the actual difference), relative to the original stream. Right: what the RMS ratio would be if only the removal, only the drift, or both were present.](figures/fig8_removal_vs_drift.png)
+
+What this shows:
+
+- **Removal is real and big.** The removed content grows to 0.8 of the original stream's length by block 19. It is not a small correction.
+- **Drift is just as big, and it mostly undoes the removal.** The accumulated drift reaches 0.6 of the stream's length, and it points nearly opposite to the accumulated removal (cosine −0.6 to −0.85 from block 8 on). The sum, the actual difference, stays near 0.4. Blocks that see a stream with content missing write something that partly puts that content back. I haven't identified the mechanism; the simplest reading is that later blocks re-derive features that earlier ones would have supplied.
+- **Neither piece is along x_orig.** Their α contributions are only −0.01 to −0.12; almost all of both is in other directions. That's why the "rest" is large while α is close to 1.
+- **The removal inflates the RMS, and the drift alone would too.** Taking the removal out of the stream on its own would make the stream *longer*: 1.06 times the original's RMS at block 8, 1.26 at block 20. That sounds paradoxical. It means the switched-off components' writes are close to orthogonal to the stream x_orig, and the alive components' writes are anti-aligned with them: the off components were partly cancelling energy that the active ones write. Removing them uncovers that energy. The drift then cancels most of the inflation again, and what's left (1.00–1.06 up to block 25, then falling to 0.90) is the net RMS ratio.
+
+**Summary.** The rest is mostly the net of two large, opposing contributions: content the decomposed model doesn't write, and the network's response to that gap. It is not added noise. The removed content is, by construction, what the alive components can do without, and the drift shows the network partly rebuilding it downstream.
+
+Caveats: the removal is measured block by block, so attention-to-MLP effects inside a block sit in the removal term; and the measurement is at the last position only.
+
+**Other observations from the first analysis.**
+
+- Where the energy sits: in blocks 3–15 the top 8 residual dimensions carry only 4–9% of the original's energy, so the RMS is a collective statistic of thousands of dimensions. From about block 20 a couple of huge outlier dimensions dominate (dimension 2352 alone: 11% of the energy at block 20, 33–35% in blocks 25–30), and the rest avoids them (5–23% of it in the top 8 dimensions).
+- What the active components actually read after the norm is almost unchanged. The relative squared difference between the normalized inputs the two models feed to the block is 0.1% in blocks 0–7, 0.4–0.8% in blocks 8–23 and about 1% in blocks 24–30. Using the original's RMS instead of its own gives a similar figure (0.1–1.5%).
 
 So the RMS moves by a few percent and the normalized input by about 1% or less. The question becomes: does a few percent in RMS matter?
 

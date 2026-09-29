@@ -168,3 +168,32 @@ ax.set(
 ax.legend(frameon=False)
 fig.tight_layout()
 fig.savefig(OUT / "fig7_hybrid_forced.png", dpi=150)
+
+# 8. where the stream difference comes from: removal vs drift (accounting.npz), medians at "="
+ac = np.load(A / "accounting.npz")
+oo, To, Po, TT, PP, TP = (ac[k][1:] for k in ("oo", "To", "Po", "TT", "PP", "TP"))
+blocks = np.arange(1, 32)
+med = np.median
+size_t, size_p = med(np.sqrt(TT / oo), 1), med(np.sqrt(PP / oo), 1)
+size_d = med(np.sqrt(np.maximum(TT + PP + 2 * TP, 0) / oo), 1)
+r_full = med(np.sqrt(1 + 2 * (To + Po) / oo + (TT + PP + 2 * TP) / oo), 1)
+r_rem = med(np.sqrt(1 + 2 * To / oo + TT / oo), 1)
+r_drift = med(np.sqrt(1 + 2 * Po / oo + PP / oo), 1)
+fig, ax = plt.subplots(1, 2, figsize=(11, 3.6))
+ax[0].plot(blocks, size_t, color=C_D, label="removed content (accumulated)")
+ax[0].plot(blocks, size_p, color=C_O, label="downstream drift (accumulated)")
+ax[0].plot(blocks, size_d, color="k", label="their sum = total difference")
+ax[0].set(
+    xlabel="block",
+    ylabel="size relative to |original stream|",
+    title="what makes the streams differ",
+)
+ax[0].legend(frameon=False)
+ax[1].plot(blocks, r_rem, color=C_D, label="removal only")
+ax[1].plot(blocks, r_drift, color=C_O, label="drift only")
+ax[1].plot(blocks, r_full, color="k", label="both (what the model has)")
+ax[1].axhline(1, color="k", lw=0.5)
+ax[1].set(xlabel="block", ylabel="RMS ratio vs original", title="effect of each part on the RMS")
+ax[1].legend(frameon=False)
+fig.tight_layout()
+fig.savefig(OUT / "fig8_removal_vs_drift.png", dpi=150)
