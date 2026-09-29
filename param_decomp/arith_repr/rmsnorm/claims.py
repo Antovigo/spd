@@ -27,7 +27,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from param_decomp.arith_repr.autointerp.llama_weights import snapshot
+from param_decomp.arith_repr.autointerp.llama_weights import number_token_ids, snapshot
 from param_decomp.arith_repr.isa.components_model import _rms
 from param_decomp.arith_repr.rmsnorm.entropy import ENT, addsub_tokens, light
 from param_decomp.arith_repr.rmsnorm.run import savez
@@ -48,6 +48,7 @@ from param_decomp.arith_repr.rmsnorm.temperature import (
 )
 
 OUTC = TEMP / "claims"
+DATASET_INDEX = "/mnt/nw/home/a.vigouroux/out/pod-backup/p-ba5a0c05/analysis/ci_filter/step_40000/addsub-05-filter-last-pos-ceiling/dataset/index.npz"
 ENT6 = [1209, 2398, 2564, 3191, 5966, 6696]
 KS = (40, 512)
 
@@ -399,5 +400,260 @@ def residual(batch: int = 16) -> None:
     savez(OUTC / "residual.npz", **out)
 
 
+@jax.jit
+def group_effect(
+    xb: jax.Array, xa: jax.Array, g: jax.Array, WU: jax.Array, isnum: jax.Array
+) -> dict[str, jax.Array]:
+    """Is the change base -> ablated a global temperature change plus a shift between token groups, or a
+    temperature change inside one group? Per position: the global temperature (weighted fit on all tokens),
+    the within-group temperatures of the number tokens and of the rest (the same fit on each group's
+    conditional distribution), and the log-odds of the number mass: measured, and predicted by the global
+    temperature alone."""
+    rb, ra = _rms(xb, EPS)[..., None], _rms(xa, EPS)[..., None]
+    zb = (xb / rb * g) @ WU.T
+    za = (xa / ra * g) @ WU.T
+    num = isnum.astype(jnp.float32)
+
+    def fit(mask: jax.Array) -> tuple[jax.Array, jax.Array]:
+        """(beta, R2) of la ~ beta * zb + c on the tokens of `mask`, conditional distributions within it."""
+        neg = jnp.where(mask > 0, 0.0, -jnp.inf)
+        lb = jax.nn.log_softmax(zb + neg, -1)
+        la = jax.nn.log_softmax(za + neg, -1)
+        w = jnp.where(mask > 0, (jnp.exp(lb) + jnp.exp(la)) / 2, 0.0)
+        d = jnp.where(mask > 0, la, 0.0)
+        z = jnp.where(mask > 0, zb, 0.0)
+        wm = lambda v: (w * v).sum(-1, keepdims=True)  # noqa: E731
+        dc, zc = d - wm(d), z - wm(z)
+        beta = wm(dc * zc) / wm(zc * zc)
+        r = dc - beta * zc
+        # R2 of the CHANGE la - lb (lb = zb - const in the group): same residual, change's own variance
+        ch = jnp.where(mask > 0, la - lb, 0.0)
+        chc = ch - wm(ch)
+        return beta[..., 0], 1 - wm(r * r)[..., 0] / wm(chc * chc)[..., 0]
+
+    ones = jnp.ones_like(num)
+    b_all, r2_all = fit(ones)
+    b_num, r2_num = fit(num)
+    b_oth, r2_oth = fit(1 - num)
+
+    def logodds(z: jax.Array) -> jax.Array:
+        lse_n = jax.nn.logsumexp(jnp.where(num > 0, z, -jnp.inf), -1)
+        lse_o = jax.nn.logsumexp(jnp.where(num > 0, -jnp.inf, z), -1)
+        return lse_n - lse_o
+
+    lo_b, lo_a = logodds(zb), logodds(za)
+    lo_temp = logodds(b_all[..., None] * zb)
+    return {"beta_all": b_all, "r2_all": r2_all, "beta_num": b_num, "r2_num": r2_num, "beta_oth": b_oth,
+            "r2_oth": r2_oth, "logodds_base": lo_b, "d_logodds": lo_a - lo_b, "d_logodds_temp": lo_temp - lo_b}  # fmt: skip
+
+
+def group_temperature(batch: int = 16) -> None:
+    """For each candidate (and route: whole write, entropy neurons only, number neurons only, the rest), zero
+    ablation at addsub `=` and at fineweb CI-flagged positions: `group_effect`, averaged over positions."""
+    toks, _ = fineweb(512, batch)
+    M = TextModel(toks.shape[1])
+    V = M.unembed.shape[0]
+    isnum_np, _, _ = token_tables(V)
+    isnum = jnp.asarray(isnum_np)
+    Wd = M.W[31]["down"].astype(jnp.float32)
+    Wg, Wu = M.W[31]["gate"].astype(jnp.float32), M.W[31]["up"].astype(jnp.float32)
+    uv = {31: dict(np.load(FW / "uv_L31.npz"))}
+    cz = np.load(OUTC / "claims.npz")
+    routes = {"entropy": jnp.asarray(cz["class_entropy_like"], jnp.float32), "number": jnp.asarray(cz["class_number"], jnp.float32),
+              "rest": jnp.asarray(cz["class_rest"], jnp.float32)}  # fmt: skip
+    flagged = np.load(ENT / "components_fineweb.npz")["flagged"]
+    fw_caps = base_pass(M, toks, batch, {63})
+    atoks = addsub_tokens()
+    ad = base_pass(M, atoks, 1000, {63})
+    out: dict[str, np.ndarray] = {}
+    for nm in CANDIDATES + ["L31.up.c731"]:
+        li, kind, c = parse(nm)
+        Vc, Uc = comp_vectors(uv[li], kind, c)
+        for tag in ("eq", "fw"):
+            if tag == "eq":
+                items = [
+                    (ad[63][bi][:, -1:], ad[64][bi][:, -1:], None) for bi in range(len(ad[64]))
+                ]
+            else:
+                items = [(fw_caps[63][bi], fw_caps[64][bi], jnp.asarray(flagged[s : s + batch])) for bi, s in enumerate(range(0, 512, batch))]  # fmt: skip
+            acc: dict[str, list[np.ndarray]] = {}
+            for x63, xb, sel in items:
+                xa, _, ha = M.run(x63, 63, {(li, kind): (Vc, Uc, jnp.zeros_like)}, want_h=True)
+                xin = _normed(x63, M.ln[1][31])
+                hb = jax.nn.silu(xin @ Wg.T) * (xin @ Wu.T)
+                dh = hb - ha
+                m = jnp.ones(xb.shape[:-1]) if sel is None else sel.astype(jnp.float32)
+                for route, xa_r in [("whole", xa)] + [
+                    (r, xb - (dh * cm) @ Wd.T) for r, cm in routes.items()
+                ]:
+                    ge = group_effect(xb, xa_r, M.g, M.unembed, isnum)
+                    for k, v in ge.items():
+                        acc.setdefault(f"{route}__{k}", []).append(np.asarray(v)[np.asarray(m) > 0])
+            for k, v in acc.items():
+                out[f"{nm}__{tag}__{k}"] = np.concatenate(v)
+            log(nm, tag, {r: {k: round(float(np.median(out[f"{nm}__{tag}__{r}__{k}"])), 3) for k in ("beta_all", "beta_num", "beta_oth", "d_logodds", "d_logodds_temp")}
+                          for r in ("whole", "entropy", "number")})  # fmt: skip
+    savez(OUTC / "group_temperature.npz", **out)
+
+
+@jax.jit
+def calib(
+    xb: jax.Array, xa: jax.Array, g: jax.Array, WU: jax.Array, target: jax.Array
+) -> dict[str, jax.Array]:
+    """Per position: cross-entropy of the target in the base / ablated / ablated-with-frozen-final-rms model,
+    the temperature change the ablation makes (log beta, weighted fit of log p_a on z_b), and the CE-optimal
+    temperature direction at base, d CE / d beta at beta = 1 = E_p[z] - z_target (> 0: flattening lowers CE)."""
+    rb, ra = _rms(xb, EPS)[..., None], _rms(xa, EPS)[..., None]
+    zb = (xb / rb * g) @ WU.T
+    lb = jax.nn.log_softmax(zb, -1)
+    la = jax.nn.log_softmax((xa / ra * g) @ WU.T, -1)
+    lf = jax.nn.log_softmax((xa / rb * g) @ WU.T, -1)
+    pb = jnp.exp(lb)
+    w = (pb + jnp.exp(la)) / 2
+    wm = lambda v: (w * v).sum(-1, keepdims=True)  # noqa: E731
+    dc, zc = la - wm(la), zb - wm(zb)
+    beta = (wm(dc * zc) / wm(zc * zc))[..., 0]
+    t = jnp.maximum(target, 0)[..., None]
+    ce = lambda lp: -jnp.take_along_axis(lp, t, -1)[..., 0]  # noqa: E731
+    zt = jnp.take_along_axis(zb, t, -1)[..., 0]
+    rank = 1 + (zb > zt[..., None]).sum(-1)
+    return {"ce_b": ce(lb), "ce_a": ce(la), "ce_d": ce(lf), "log_beta": jnp.log(jnp.maximum(beta, 1e-3)),
+            "grad": (pb * zb).sum(-1) - zt, "correct": (jnp.argmax(zb, -1) == target).astype(jnp.float32),
+            "rr": 1.0 / rank, "H_b": -(pb * lb).sum(-1), "H_a": -(jnp.exp(la) * la).sum(-1)}  # fmt: skip
+
+
+def calibration(batch: int = 16) -> None:
+    """Are Llama's entropy neurons (and the candidate components) useful for the loss? Mean ablation (the
+    unit's deviation from its average is removed) on fineweb positions 1..62 (next-token target) and on addsub
+    `=` (target = the true answer; mean over `=`). Units: each entropy neuron, the six jointly (also zero
+    ablation), the 144 number neurons, six random neurons, and the candidate components."""
+    toks, target = fineweb(512, batch)
+    M = TextModel(toks.shape[1])
+    Wd = M.W[31]["down"].astype(jnp.float32)
+    Wg, Wu = M.W[31]["gate"].astype(jnp.float32), M.W[31]["up"].astype(jnp.float32)
+    uv = {31: dict(np.load(FW / "uv_L31.npz"))}
+    cz = np.load(OUTC / "claims.npz")
+    fw_caps = base_pass(M, toks, batch, {63})
+    atoks = addsub_tokens()
+    ix = np.load(DATASET_INDEX)
+    rows = np.sort(np.random.default_rng(0).choice(len(ix["tokens"]), 2000, replace=False))
+    num_ids, minus = number_token_ids(200)
+    a, b, op = ix["a"][rows].astype(int), ix["b"][rows].astype(int), ix["op"][rows].astype(int)
+    res = np.where(op == 0, a + b, a - b)
+    ans = np.where(res >= 0, num_ids[np.clip(res, 0, 200)], minus)
+    ad = base_pass(M, atoks, 1000, {63})
+
+    def hidden(x63: jax.Array) -> jax.Array:
+        xin = _normed(x63, M.ln[1][31])
+        return jax.nn.silu(xin @ Wg.T) * (xin @ Wu.T)
+
+    sets = {
+        "fw": [(fw_caps[63][bi][:, 1:-1], fw_caps[64][bi][:, 1:-1], jnp.asarray(target[s : s + batch, 1:-1]))
+               for bi, s in enumerate(range(0, 512, batch))],
+        "eq": [(ad[63][bi][:, -1:], ad[64][bi][:, -1:], jnp.asarray(ans[bi * 1000 : (bi + 1) * 1000])[:, None]) for bi in range(len(ad[64]))],
+    }  # fmt: skip
+    rng = np.random.default_rng(7)
+    units: dict[str, np.ndarray | str] = {f"n{n}": np.array([n]) for n in ENT6}
+    units |= {"ent6": np.array(ENT6), "ent7": np.flatnonzero(cz["class_entropy_like"]), "number144": np.flatnonzero(cz["class_number"]),
+              "random6": rng.choice(Wd.shape[1], 6, replace=False)}  # fmt: skip
+    for nm in ["L31.gate.c14", "L31.gate.c238", "L31.up.c534"]:
+        units[nm] = nm
+    out: dict[str, np.ndarray] = {}
+    for tag, items in sets.items():
+        H = jnp.concatenate([hidden(x).reshape(-1, Wd.shape[1]) for x, _, _ in items])
+        hmean = H.mean(0)
+        del H
+        for un, spec in list(units.items()) + [("ent6_zero", np.array(ENT6))]:
+            acc: dict[str, list[np.ndarray]] = {}
+            for x63, xb, tgt in items:
+                if isinstance(spec, str):
+                    li, kind, c = parse(spec)
+                    Vc, Uc = comp_vectors(uv[li], kind, c)
+                    inner = _normed(x63, M.ln[1][31]) @ Vc
+                    mu = float(
+                        np.mean([float((_normed(x, M.ln[1][31]) @ Vc).mean()) for x, _, _ in items])
+                    )
+                    xa, _, _ = M.run(
+                        x63, 63, {(li, kind): (Vc, Uc, lambda h, m=mu: jnp.full_like(h, m))}
+                    )
+                    del inner
+                else:
+                    h = hidden(x63)[..., spec]
+                    ref = 0.0 if un == "ent6_zero" else hmean[spec]
+                    xa = xb + (ref - h) @ Wd[:, spec].T
+                m = calib(xb, xa, M.g, M.unembed, tgt)
+                for k, v in m.items():
+                    acc.setdefault(k, []).append(np.asarray(v).ravel())
+            for k, v in acc.items():
+                out[f"{un}__{tag}__{k}"] = np.concatenate(v)
+            d = out[f"{un}__{tag}__ce_a"] - out[f"{un}__{tag}__ce_b"]
+            cor = out[f"{un}__{tag}__correct"] > 0
+            log(
+                tag,
+                un,
+                f"dCE(ablated-base) {d.mean():+.5f} | correct {d[cor].mean():+.5f} wrong {d[~cor].mean():+.5f}",
+            )
+    savez(OUTC / "calibration.npz", **out)
+
+
+def induction(n_seq: int = 100, batch: int = 10) -> None:
+    """Stolfo et al. section 6 on Llama: fineweb rows of 64 tokens repeated once (128 tokens, no BOS). Per
+    position: the six entropy neurons' activations, and entropy / next-token loss of the base model and with
+    each neuron (and all six) CLIPPED-mean-ablated (activation set to its fineweb mean only where it exceeds it)."""
+    rows = np.load(FW / "tokens.npy")[:n_seq]
+    toks = np.concatenate([rows, rows], 1)
+    target = np.concatenate([toks[:, 1:], np.full((n_seq, 1), -1)], 1)
+    M = TextModel(toks.shape[1])
+    Wd = M.W[31]["down"].astype(jnp.float32)
+    Wg, Wu = M.W[31]["gate"].astype(jnp.float32), M.W[31]["up"].astype(jnp.float32)
+
+    def hidden(x63: jax.Array) -> jax.Array:
+        xin = _normed(x63, M.ln[1][31])
+        return jax.nn.silu(xin @ Wg.T) * (xin @ Wu.T)
+
+    mtoks, _ = fineweb(512, 16)
+    mc = base_pass(M, mtoks, 16, {63})
+    hmean = jnp.stack([hidden(x)[:, 1:].sum((0, 1)) for x in mc[63]]).sum(0) / (512 * 63)
+    del mc
+    caps = base_pass(M, toks, batch, {63})
+    out: dict[str, np.ndarray] = {"tokens": toks}
+    units = {f"n{n}": [n] for n in ENT6} | {"ent6": ENT6}
+    acc: dict[str, list[np.ndarray]] = {}
+    for bi, s in enumerate(range(0, n_seq, batch)):
+        x63, xb = caps[63][bi], caps[64][bi]
+        h = hidden(x63)
+        acc.setdefault("act", []).append(np.asarray(h[..., ENT6]))
+        tgt = jnp.asarray(target[s : s + batch])
+        for un, ids in [("base", [])] + list(units.items()):
+            if ids:
+                hi = h[..., ids]
+                xa = xb + (jnp.minimum(hi, hmean[jnp.asarray(ids)]) - hi) @ Wd[:, ids].T
+            else:
+                xa = xb
+            m = calib(xb, xa, M.g, M.unembed, tgt)
+            for k in ("ce_a", "H_a") if un != "base" else ("ce_b", "H_b", "rr", "correct"):
+                acc.setdefault(f"{un}__{k}", []).append(np.asarray(m[k]))
+    for k, v in acc.items():
+        out[k] = np.concatenate(v)
+    out["h_mean"] = np.asarray(hmean[jnp.asarray(ENT6)])
+    savez(OUTC / "induction.npz", **out)
+    H, C = out["base__H_b"], out["base__ce_b"]
+    log(
+        f"first half H {H[:, 1:63].mean():.3f} CE {C[:, 1:63].mean():.3f} | second half H {H[:, 65:127].mean():.3f} CE {C[:, 65:127].mean():.3f}"
+    )
+    for un in units:
+        log(
+            un,
+            f"second-half H {H[:, 65:127].mean():.3f} -> {out[f'{un}__H_a'][:, 65:127].mean():.3f}, "
+            f"CE {C[:, 65:127].mean():.3f} -> {out[f'{un}__ce_a'][:, 65:127].mean():.3f}",
+        )
+
+
 if __name__ == "__main__":
-    {"run": run, "residual": residual}[sys.argv[1]]()
+    {
+        "run": run,
+        "residual": residual,
+        "groups": group_temperature,
+        "calibration": calibration,
+        "induction": induction,
+    }[sys.argv[1]]()

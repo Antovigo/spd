@@ -615,6 +615,148 @@ def fig_coupling(out: Path) -> None:
     save(fig, out, "fig12_coupling.png")
 
 
+def _binned(x: np.ndarray, y: np.ndarray, nb: int = 12) -> tuple[np.ndarray, np.ndarray]:
+    qs = np.unique(np.percentile(x, np.linspace(0, 100, nb + 1)))
+    mid, mean = [], []
+    for lo, hi in zip(qs[:-1], qs[1:], strict=True):
+        s = (x >= lo) & (x <= hi)
+        mid.append(np.median(x[s]))
+        mean.append(y[s].mean())
+    return np.array(mid), np.array(mean)
+
+
+def fig_hedging(out: Path) -> None:
+    """Mirror of Stolfo et al. Fig. 4a: change in loss when the unit is mean-ablated vs the token's initial
+    loss, coloured by the correct token's reciprocal rank; binned mean on top."""
+    z = np.load(CL / "calibration.npz")
+    panels = [("ent6", "fw", "6 entropy neurons, fineweb"), ("ent6", "eq", "6 entropy neurons, addsub '='"),
+              ("L31.gate.c14", "fw", "component gate c14, fineweb"), ("L31.gate.c14", "eq", "component gate c14, addsub '='")]  # fmt: skip
+    fig, ax = plt.subplots(1, 4, figsize=(14, 3.6))
+    sc = None
+    for a, (u, tag, title) in zip(ax, panels, strict=True):
+        cb, ca, rr = z[f"{u}__{tag}__ce_b"], z[f"{u}__{tag}__ce_a"], z[f"{u}__{tag}__rr"]
+        d = ca - cb
+        sc = a.scatter(cb, d, c=rr, cmap="Blues", vmin=0, vmax=1, s=3, lw=0, alpha=0.6)
+        mx, my = _binned(cb, d)
+        a.plot(mx, my, color=ORANGE, lw=2, label="binned mean")
+        a.axhline(0, color=BASE, lw=1)
+        lim = np.percentile(np.abs(d), 99.5)
+        a.set_ylim(-lim, lim)
+        a.set_xlabel("initial loss (nats)")
+        a.set_title(title)
+    ax[0].set_ylabel("loss change when mean-ablated")
+    ax[0].legend(loc="upper left", fontsize=7)
+    assert sc is not None
+    fig.colorbar(sc, ax=ax, fraction=0.015, label="reciprocal rank of correct token")
+    fig.savefig(out / "fig13_hedging.png", dpi=160, bbox_inches="tight")
+    plt.close(fig)
+    print("wrote fig13_hedging.png", flush=True)
+
+
+def fig_direction(out: Path) -> None:
+    """Does the unit move the temperature in the CE-reducing direction, position by position?"""
+    z = np.load(CL / "calibration.npz")
+    units = ["n1209", "n2398", "n2564", "n3191", "n5966", "n6696", "ent6", "ent6_zero", "number144", "random6",
+             "L31.gate.c14", "L31.gate.c238", "L31.up.c534"]  # fmt: skip
+    labels = {"ent6": "6 entropy neurons", "ent6_zero": "6 entropy n. (zero-abl.)", "number144": "144 number neurons",
+              "random6": "6 random neurons"} | {n: SHORT.get(n, n) for n in units}  # fmt: skip
+    y = np.arange(len(units))[::-1]
+    fig, ax = plt.subplots(1, 3, figsize=(12, 4.2), sharey=True)
+    for tag, col, off in (("eq", BLUE, 0.15), ("fw", ORANGE, -0.15)):
+        for i, u in enumerate(units):
+            p = f"{u}__{tag}__"
+            unit_lb = -z[
+                p + "log_beta"
+            ]  # the unit's own temperature change (log): < 0 = it flattens
+            grad = z[p + "grad"]
+            wgt = np.abs(unit_lb) * np.abs(grad)
+            good = (unit_lb * grad < 0).astype(float)
+            ax[0].plot(
+                [(good * wgt).sum() / max(wgt.sum(), 1e-12)], [y[i] + off], "o", color=col, ms=5
+            )
+            d = z[p + "ce_a"] - z[p + "ce_b"]
+            cor = z[p + "correct"] > 0
+            ax[1].plot([d.mean()], [y[i] + off], "o", color=col, ms=5)
+            ax[2].plot([d[cor].mean()], [y[i] + off], "<", color=col, ms=5)
+            ax[2].plot([d[~cor].mean()], [y[i] + off], ">", color=col, ms=5)
+    ax[0].axvline(0.5, color=BASE, lw=1)
+    ax[0].set_xlim(0, 1)
+    ax[0].set_yticks(y, [labels[u] for u in units], fontsize=7)
+    ax[0].set_xlabel("share of its temperature change in the loss-reducing direction")
+    ax[0].set_title("right direction? (0.5 = chance)")
+    ax[1].axvline(0, color=BASE, lw=1)
+    ax[1].set_xscale("symlog", linthresh=1e-4)
+    ax[1].set_xlabel("loss change when ablated (> 0: the unit helps)")
+    ax[1].set_title("net effect on the loss")
+    ax[2].axvline(0, color=BASE, lw=1)
+    ax[2].set_xscale("symlog", linthresh=1e-4)
+    ax[2].set_xlabel("loss change when ablated")
+    ax[2].set_title("◀ model right   ▶ model wrong")
+    ax[0].plot([], [], "o", color=BLUE, label="addsub '='")
+    ax[0].plot([], [], "o", color=ORANGE, label="fineweb")
+    ax[0].legend(loc="lower right", fontsize=7)
+    save(fig, out, "fig14_direction.png")
+
+
+def fig_induction(out: Path) -> None:
+    z = np.load(CL / "induction.npz")
+    fig, ax = plt.subplots(1, 2, figsize=(11, 3.4))
+    act = z["act"].astype(np.float32)  # (n, 128, 6)
+    for j in range(len(ENT6)):
+        ax[0].plot(
+            np.arange(1, act.shape[1]),
+            act[:, 1:, j].mean(0) - z["h_mean"][j],
+            lw=1.2,
+            color=BLUE if j < 3 else "#86b6ef",
+        )
+    ax[0].axvline(64, color=MUTED, lw=1)
+    ax[0].axhline(0, color=BASE, lw=1)
+    ax[0].set_xlabel("position (sequence repeated from 64)")
+    ax[0].set_ylabel("activation − fineweb mean")
+    ax[0].set_title("entropy neurons during the repeat")
+    Hb, Ha = z["base__H_b"], z["ent6__H_a"]
+    x = np.arange(1, Hb.shape[1] - 1)
+    ax[1].plot(x, Hb[:, 1:-1].mean(0), color=INK, lw=1.5, label="model")
+    ax[1].plot(x, Ha[:, 1:-1].mean(0), color=ORANGE, lw=1.5, label="6 entropy neurons clipped")
+    ax[1].axvline(64, color=MUTED, lw=1)
+    ax[1].set_xlabel("position")
+    ax[1].set_ylabel("output entropy (nats)")
+    ax[1].set_title("clipping them barely changes the induction entropy")
+    ax[1].legend(loc="upper right", fontsize=7)
+    save(fig, out, "fig15_induction.png")
+
+
+def fig_groups(out: Path) -> None:
+    z = np.load(CL / "group_temperature.npz")
+    comps = CANDIDATES
+    routes = [("entropy", BLUE, "via entropy neurons"), ("number", ORANGE, "via number neurons"),
+              ("rest", MUTED, "via all other neurons"), ("whole", INK, "whole component")]  # fmt: skip
+    y = np.arange(len(comps))[::-1]
+    fig, ax = plt.subplots(1, 2, figsize=(11, 3.6), sharey=True)
+    for j, (r, col, lab) in enumerate(routes):
+        off = (j - 1.5) * 0.15
+        for i, nm in enumerate(comps):
+            p = f"{nm}__eq__{r}__"
+            bn, bo = np.median(z[p + "beta_num"]), np.median(z[p + "beta_oth"])
+            ax[0].plot([np.log(bo), np.log(bn)], [y[i] + off] * 2, color=col, lw=1.5)
+            ax[0].plot(
+                [np.log(bn)], [y[i] + off], "o", color=col, ms=5, label=lab if i == 0 else None
+            )
+            ax[0].plot([np.log(bo)], [y[i] + off], "o", mfc="#fcfcfb", mec=col, ms=5)
+            ex = np.median(z[p + "d_logodds"] - z[p + "d_logodds_temp"])
+            ax[1].plot([ex], [y[i] + off], "o", color=col, ms=5)
+    ax[0].set_yticks(y, [SHORT[n] for n in comps], fontsize=8)
+    ax[0].set_xlabel(
+        "log sharpening when removed (filled: among numbers, open: among other tokens)"
+    )
+    ax[0].set_title("global (open = filled) or number-specific?")
+    ax[0].legend(loc="lower right", fontsize=7)
+    ax[1].axvline(0, color=BASE, lw=1)
+    ax[1].set_xlabel("number-mass change beyond what the temperature predicts (log-odds)")
+    ax[1].set_title("number preference beyond temperature")
+    save(fig, out, "fig16_groups.png")
+
+
 if __name__ == "__main__":
     out = Path(sys.argv[1])
     out.mkdir(parents=True, exist_ok=True)
@@ -647,3 +789,11 @@ if __name__ == "__main__":
         fig_classes(out)
     if want("12"):
         fig_coupling(out)
+    if want("13"):
+        fig_hedging(out)
+    if want("14"):
+        fig_direction(out)
+    if want("15"):
+        fig_induction(out)
+    if want("16"):
+        fig_groups(out)

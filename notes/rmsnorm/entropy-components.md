@@ -20,6 +20,8 @@ ordinary web text, where they were never trained to be faithful.
 | **3.** The non-entropy part is a mix of number preference and preference for frequent tokens (like token-frequency neurons). | **Partly.** The non-temperature remainder does push number tokens (up to +2.6 sd) and frequent tokens (corr up to +0.37). Together these explain only 9–18 % of it, though. Much of the rest is about the *format* of the continuation ("+" boosted, "?"-style endings suppressed). The number push even has opposite signs in different components (Fig. 7). |
 | **4.** On the inputs where they are active, the components write in directions similar to those of Llama's own entropy neurons on the same inputs. | **Supported.** The median cosine with the entropy neurons' write is +0.60 to +0.71 on arithmetic and +0.29 to +0.59 on web text. 34–60 % of each write lies in the 6-dimensional span of those neurons' output weights (random neurons: 0 %) (Fig. 9). |
 | **5.** The components' U vectors touch many neurons, but most of those channels are inert because of the gating nonlinearity. The neurons that actually matter are the model's entropy / token-frequency neurons. | **First half supported, second half only partly.** 46–71 % of the U weight lands on neurons whose gate is shut, and gate state predicts which channels are live (Fig. 10). The entropy neurons are the largest *individual* contributors: they give 12–18 % of the write from < 2 % of the U weight. But hundreds of other neurons carry most of the effect. Token-frequency neurons play a small role (Fig. 11). |
+| **6.** Is the entropy control specific to number predictions, or a generic mechanism merged with a number mechanism? | **Both.** Through the entropy neurons the effect is a global temperature change, identical among number tokens and among the rest. The rest of the neuron population adds a number-specific part: removing the component sharpens the choice *among numbers* 7–18 % more than among other tokens (§8, Fig. 16). |
+| **7.** Are Llama's entropy neurons effective, i.e. do they lower the loss by hedging? | **On general text, yes.** Mean-ablating the six costs +0.0043 nats/token, with the cost concentrated on tokens the model got badly wrong (the paper's Fig. 4a pattern). At individual positions, though, they pick the loss-reducing temperature direction only 53 % of the time (chance: 50 %). Their benefit comes from hedging the confidently-wrong tail. Unlike GPT-2, they play no hedging role in induction (§9). |
 
 <details>
 <summary><b>Reading guide: the words used in this post</b></summary>
@@ -437,6 +439,135 @@ small set dominates.
 sorted. Middle: gate c14's nominal share vs effective share per neuron, coloured by class. Right: the
 effective share against U weight × gate sensitivity.*
 
+## 8. Generic entropy control plus a number-specific part (component level)
+
+The components mix a confidence change with a number preference. This could be two mechanisms merged
+(a generic entropy mechanism and a number mechanism), or one mechanism that controls confidence
+specifically for number predictions. The two can be told apart at the output. The final RMSNorm divides
+every logit by the same number, so an entropy mechanism acting through it can only change the
+temperature of the *whole* distribution. A number-specific confidence mechanism instead changes the
+temperature *among the number tokens*, i.e. how sure the model is about *which* number.
+
+So for each route of §3 we fit the temperature change separately on the number tokens' and on the other
+tokens' conditional distributions (the same weighted fit as before, within each group). We also measure
+how much the probability mass on numbers moves, compared with what the global temperature change alone
+would move.
+
+![Fig. 16](figures_entropy/fig16_groups.png)
+
+*Fig. 16. Addsub `=`, 2,000 prompts, medians. Left: how much removing the component (or only its effect
+through one neuron class) sharpens the distribution among number tokens (filled) and among the other
+tokens (open); equal = a global temperature change. Right: change in the log-odds of the number mass beyond
+what the global temperature change predicts.*
+
+- **Through the entropy neurons: global.** The sharpening is the same among numbers and among the rest
+  for every candidate: the log ratio is between −0.004 and 0.000, and the temperature fit is excellent in
+  both groups (R² 0.96 / 0.92 for c14). The number mass moves exactly as the global temperature
+  predicts. Llama's entropy neurons do not do number-specific entropy control.
+- **Through all other neurons: partly number-specific.** Removing the component sharpens the choice
+  among numbers 7–18 % more than among the other tokens (log ratio +0.07 to +0.16 for c14 / c238 / c288 /
+  c534 / c36, +0.03 for c50). Within the numbers the change is well described as a temperature change
+  (R² 0.86–0.93 for c14 / c238 / c288 / c534). The final norm cannot act on one group of tokens only, so
+  this part is a direct compression of the spread of the number logits.
+- **Through the number neurons: mass, not temperature.** The effect is barely a temperature change (R²
+  within numbers 0.13–0.57). The whole component also moves number mass beyond what the temperature
+  predicts, with a component-specific sign: +1.3 log-odds towards numbers for c534, −0.3 to −0.5 for
+  c36 and c50.
+- **On fineweb** the number-specific part mostly disappears. c14 (1.041 vs 1.023) and c534 keep a small
+  version; c238, c288 and c36 show none or the reverse.
+
+<details>
+<summary>A caveat on "number-specific temperature"</summary>
+
+A temperature change applied only to the number tokens is, by definition, a change of the number
+logits proportional to how strongly each number is already favoured. Reading it as "confidence about which
+number" is an interpretation of that shape. What is solid is the split: one part goes through the norm and
+is global; the other is a direct effect on the number logits only.
+
+</details>
+
+## 9. Do the entropy neurons improve the loss?
+
+The paper's claim is that entropy neurons *hedge*. They cost a little loss when the model is right,
+because they flatten a correct prediction, and they prevent loss spikes when it is confidently wrong. We
+mirror its two tests and add a third. All use **mean ablation** (the paper's protocol), which removes only
+the unit's *variation* around its average. Targets are the next token on fineweb (positions 1–62, 512
+rows) and the correct answer at addsub `=` (2,000 prompts).
+
+**Test 1 — the paper's Fig. 4a.** Change in loss when the unit is mean-ablated, against the token's initial
+loss, coloured by the correct token's reciprocal rank.
+
+![Fig. 13](figures_entropy/fig13_hedging.png)
+
+*Fig. 13. Each dot is a position; orange is the binned mean. Positive = the unit was lowering the loss.*
+
+On fineweb the six entropy neurons reproduce the paper's shape. Removing their variation *lowers* the loss
+on the easy half of the tokens (−0.017 nats) and *raises* it on the hardest tenth (+0.11 nats). Net, they
+lower the loss by **+0.0043 nats per token**, 67 % of it through the final norm. Six random neurons:
+−0.0001. The component c14 shows the same shape, weaker. At addsub `=` the neurons' variation is small and
+net slightly harmful (−0.0018). Their *total* contribution (zero ablation) is a strong hedge, though:
+−0.24 nats on the easy half, +0.79 on the hardest tenth, +0.023 net. On arithmetic their mostly
+constant cooling protects the 41 % of prompts the model gets wrong.
+
+**Test 2 — do they move the temperature in the right direction at each position?** The loss-reducing
+direction at a position is known: flatten when the target's logit is below the distribution's mean logit,
+sharpen when it is above (the sign of `E_p[z] − z_target`). We count how often each unit's own temperature
+change (the change its removal undoes) points that way, weighting positions by the size of both.
+
+![Fig. 14](figures_entropy/fig14_direction.png)
+
+*Fig. 14. Left: share of the unit's temperature change in the loss-reducing direction (0.5 = chance).
+Middle: net loss change when the unit is ablated (> 0: the unit helps). Right: the same split into positions
+where the model's top prediction is right (◀) or wrong (▶).*
+
+- **Entropy neurons: barely better than chance.** The six together go the right way 53 % of the time on
+  fineweb and 51 % at `=`. Individually the picture is mixed: 2398 and 5966 are right 74–81 % of the time at
+  `=`, while 1209 and 6696 are right only 21–22 %. Their loss benefit therefore does not come from
+  fine-grained, per-token calibration. It comes from the tail: when the model is badly wrong, any extra
+  flattening saves a lot of loss.
+- **Components at `=`:** c14 and c238 move the temperature the right way 74–76 % of the time and lower the
+  loss (+0.013 and +0.008 nats); c534 goes the wrong way (33 %) and costs loss (−0.010).
+- **Number neurons:** they are content, not temperature, and have the largest loss effect of all (+0.021 on
+  fineweb, +0.023 at `=`).
+
+**Test 3 — the paper's induction test (its §6).** 100 fineweb rows repeated once (128 tokens). On the
+second copy Llama-3.1-8B becomes extremely confident: entropy falls from 3.0 to 0.29 nats and loss from 3.0
+to 0.10. The paper found that GPT-2's entropy neurons fire during the repeat to hedge, and that *clipped*
+mean ablation (activation set to the mean only where it exceeds it) reduces the entropy by up to 70 %. In
+Llama:
+
+- **Clipping does little.** Clipping all six lowers the repeat's entropy by only 8 % (0.291 → 0.268) and
+  slightly *lowers* the loss (0.101 → 0.097). Hedging a correct copy has no benefit here.
+- **The main two go the other way.** Neurons 1209 and 2398 drop far *below* their mean during the repeat
+  (−9.7 and −10.7 vs −3.0 and −3.7 on the first copy), removing their cooling so the model can be
+  confident. The paper's clipped ablation cannot see this, since it only acts above the mean.
+- **Only two hedge.** Neurons 2564 and 6696 rise during the repeat (+4.2, +3.8), the hedging direction,
+  but their effect is small.
+
+![Fig. 15](figures_entropy/fig15_induction.png)
+
+*Fig. 15. Left: each entropy neuron's activation minus its fineweb mean, averaged over 100 repeated
+sequences (the repeat starts at 64). Right: output entropy of the model and with the six neurons clipped.*
+
+<details>
+<summary>Method details for §9</summary>
+
+- **Units:** each entropy neuron; all six jointly (also zero ablation); the 144 number neurons jointly;
+  6 random L31 neurons (seed 7); the components gate c14, gate c238, up c534.
+- **Neuron ablation:** a neuron is mean-ablated by
+  `x_final += (mean − h_n) W_down[:, n]`, with the mean over fineweb positions 1–63 (fineweb) or over
+  the 2,000 `=` positions (addsub).
+- **Component ablation:** a component's inner activation is replaced by its mean over the same positions.
+- **Norm-mediated share of the loss change:** 1 − (loss change with the final rms frozen) / (loss change).
+- **Temperature change of a unit:** the weighted fit of `log p_ablated` on `z_base`; the unit's own change
+  is minus its log. Direction weights: |log β| × |E_p[z] − z_target|.
+- **Induction:** 128-token sequences = a 64-token fineweb row twice (no BOS). Clipping
+  `h → min(h, fineweb mean)` is applied to each of the six neurons and to all six; the repeat is scored on
+  positions 65–126.
+- **Code:** `claims.py` (`calibration`, `induction`, `groups`).
+
+</details>
+
 ## What this means for reading tPD components
 
 - **The confidence mechanism is not an artifact.** The decomposition found a real mechanism: Llama's own
@@ -476,7 +607,7 @@ Code (worktree `experiment/arith_representations`, `param_decomp/arith_repr/rmsn
 | `temperature.py` | fp32 dense forward, zero/mean/dose ablations, temperature fit (`deep`, `addsub`, `dose`, `scan`) |
 | `ci_screen.py` | -05 CI on fineweb + U/V of blocks 30–31 |
 | `entropy.py` | neuron scan (`neurons`), per-position component study (`components`) |
-| `claims.py` | neuron classes, class-routed ablations, gate states, geometric split (`run`), residual profile (`residual`) |
+| `claims.py` | neuron classes, class-routed ablations, gate states, geometric split (`run`), residual profile (`residual`), group temperatures (`groups`), loss/hedging (`calibration`), induction (`induction`) |
 | `figures.py` | every figure here |
 
 Outputs are in `~/out/pod-backup/p-ba5a0c05/analysis/rmsnorm/temperature/{.,entropy,claims}`. Figures are
