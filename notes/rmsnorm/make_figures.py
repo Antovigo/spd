@@ -109,3 +109,62 @@ ax.set(
 fig.tight_layout()
 fig.savefig(OUT / "fig4_direct_vs_norm.png", dpi=150)
 print("done")
+
+# 5. forced-original-rms windows (dec model)
+j = json.loads((A / "robust_forced.json").read_text())
+wins = ["b0-7", "b8-15", "b16-23", "b24-30", "b0-30"]
+fig, ax = plt.subplots(figsize=(6, 3.6))
+x = np.arange(len(wins))
+ax.bar(
+    x - 0.2, [j[f"dec_forced_orig_{w}"]["kl"] for w in wins], 0.4, color=C_D, label="all positions"
+)
+ax.bar(
+    x + 0.2, [j[f"dec_forced_orig_{w}_eq"]["kl"] for w in wins], 0.4, color=C_O, label="only at '='"
+)
+ax.axhline(j["dec_free"]["kl"], color="k", lw=0.8, ls="--", label="own norms (0.051)")
+ax.set(
+    xticks=x,
+    xticklabels=wins,
+    ylabel="KL to original",
+    yscale="log",
+    title="decomposed model, rms forced to the original's",
+)
+ax.legend(fontsize=8, frameon=False)
+fig.tight_layout()
+fig.savefig(OUT / "fig5_forced_windows.png", dpi=150)
+
+# 6. whole-block ablation, free vs frozen norms
+g = np.load(A / "groups.npz")
+nm = list(g["names"])
+blk = [i for i in range(31) if f"L{i}" in nm]
+idx = [nm.index(f"L{i}") for i in blk]
+kf = g["kl_free"].mean(1)[idx]
+kz = np.nan_to_num(g["kl_frozen"], nan=np.inf, posinf=np.inf).mean(1)[idx]
+fig, ax = plt.subplots(figsize=(8, 3.6))
+ax.semilogy(blk, kf, "o-", ms=3, color=C_O, label="norms free")
+ax.semilogy(blk, kz, "o-", ms=3, color=C_D, label="norms frozen at the unablated rms")
+ax.set(
+    xlabel="block whose alive components are all ablated", ylabel="KL to unablated decomposed model"
+)
+ax.legend(frameon=False)
+fig.tight_layout()
+fig.savefig(OUT / "fig6_block_ablation_free_frozen.png", dpi=150)
+
+# 7. single-block hybrid: free vs forced original rms (median KL)
+h = np.load(A / "hybrid.npz")
+fr, fo = [], []
+for li in range(31):
+    o = h[f"block{li}_forced_orig__kl"]
+    fr.append(np.median(h[f"block{li}_free__kl"]))
+    fo.append(np.median(o[np.isfinite(o)]))
+fig, ax = plt.subplots(figsize=(8, 3.6))
+ax.plot(range(31), fr, "o-", ms=3, color=C_O, label="norms free")
+ax.plot(range(31), fo, "o-", ms=3, color=C_D, label="all norms forced to the original's rms")
+ax.set(
+    xlabel="the one decomposed block",
+    ylabel="median KL to original",
+    title="original model with one block decomposed",
+)
+ax.legend(frameon=False)
+fig.tight_layout()
+fig.savefig(OUT / "fig7_hybrid_forced.png", dpi=150)

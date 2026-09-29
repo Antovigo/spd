@@ -38,6 +38,9 @@ by a chosen value ("forced"), or the components' write is dropped from the strea
 `fig1_scale.png`. Notation at `=`: decomposed stream x_d = alpha x_o + perp, r = rms_d / rms_o, so
 r^2 = alpha^2 + perp^2 (perp relative to |x_o|).
 
+![fig1](figures/fig1_scale.png)
+*Fig. 1. Left: rms ratio, alpha and their quotient at `=`. Right: unread error norm; it equals sqrt(r^2 - alpha^2).*
+
 | blocks | rms ratio r | alpha | perp | cos(x_d, x_o) |
 |---|---|---|---|---|
 | 0-3 | 0.95-1.01 | 0.94-1.00 | 0.14-0.22 | 0.975-0.99 |
@@ -62,11 +65,14 @@ r^2 = alpha^2 + perp^2 (perp relative to |x_o|).
 ## 2. Test of the three hypotheses (+ two more)
 
 **H1: some components exist only to hold the rms in range.** Rejected for blocks 0-30
-(`fig4_direct_vs_norm.png`; 10,599 live components on 500 prompts, `split/`, `ablate/`).
+(Fig. 4; 10,599 live components on 500 prompts, `split/`, `ablate/`).
 
 | | sum of ablation KL | direct-only | norm-only |
 |---|---|---|---|
 | blocks 0-30 | 2.03 | 2.28 | 0.26 |
+
+![fig4](figures/fig4_direct_vs_norm.png)
+*Fig. 4. Each dot is a live component: direct-only vs norm-only KL. Almost all lie below the diagonal and below 1e-3; none reaches the norm-dominated corner at a size that matters (floor at 1e-7).*
 
 * 89 % of the live components: ablation KL < 1e-4. Components with either split effect > 1e-3: 252; among them
   norm-dominated (norm-only > direct-only) 9; at > 1e-2: 1 of 24.
@@ -82,16 +88,22 @@ r^2 = alpha^2 + perp^2 (perp relative to |x_o|).
 **H2: ablating inactive components moves the rms and magnitudes, and it does not matter downstream (a property of the model).**
 Largely supported, and stronger for the decomposed forward than for Llama itself.
 
-* One norm's rms scaled by 0.9 or 1.1, KL against the same model's clean run (`fig2_single_norm.png`, 1000 prompts):
+* One norm's rms scaled by 0.9 or 1.1, KL against the same model's clean run (Fig. 2, 1000 prompts):
   original Llama median 2-4e-3, max 0.04 (block 1-2 norms, embedding norm, block 30 MLP); decomposed median 2e-5, and
   > 0.01 only at block 30 MLP (0.049), block 29 MLP (0.007). Blocks 0-23: < 5e-4 everywhere.
-* Random rms noise on all 62 norms (lognormal sigma), 2000 prompts (`fig3_noise.png`):
+![fig2](figures/fig2_single_norm.png)
+*Fig. 2. Sensitivity of each norm to a +-10 % rms error, both models.*
+
+* Random rms noise on all 62 norms (lognormal sigma), 2000 prompts (Fig. 3):
 
 | sigma | original, every token | original, `=` only | decomposed, every token | decomposed, `=` only |
 |---|---|---|---|---|
 | 0.03 | 0.041 | 0.017 | 0.0043 | 0.0042 |
 | 0.10 | 0.581 | 0.215 | 0.051 | 0.049 |
 | 0.20 | 2.22 | 1.18 | 0.196 | 0.186 |
+
+![fig3](figures/fig3_noise.png)
+*Fig. 3. KL vs own clean run under log-normal rms noise on the 62 inner norms.*
 
   The rms mismatch actually observed (sd 1-5 %, mean offset up to -14 %) is inside the flat region of the decomposed
   model. In Llama itself, 10 % noise is not free, which fits "the norm is a stabiliser" (section 3) rather than
@@ -118,6 +130,9 @@ Largely supported, and stronger for the decomposed forward than for Llama itself
   Any window of blocks 0-23 is harmless, blocks 24-30 hurt, all together break the model, mostly through other positions.
   The original's rms is not the target the decomposed model needs; its own is.
 * All 65 norms frozen at the pool mean: NaN (own means) / KL 5.0 (original's means). Freezing all norms of Llama itself gives 15 % NaN prompts.
+![fig7](figures/fig7_hybrid_forced.png)
+*Fig. 7. Original Llama with one block decomposed: forcing the original rms back never lowers the median KL.*
+
 * Original model with ONE block decomposed (`hybrid.npz`): KL 0.009-0.042 free (medians 0.008-0.026), and forcing the original
   rms back RAISES the median KL in every block 5-30 (+0.0016..+0.020), never helping (blocks 0-4 also blow up on a few prompts). The single-block substitution moves later rms by ~1 % (|dlog rms| 0.006-0.023).
 
@@ -129,6 +144,9 @@ decomposition-side adaptation, not a property of the mapping being copied from t
 
 **H5 (added): the norm repairs the removal (self-normalisation).** Whole-block ablation of all alive components
 (`groups.npz`, 2000 prompts), free vs frozen norms:
+
+![fig6](figures/fig6_block_ablation_free_frozen.png)
+*Fig. 6. All alive components of one block ablated, norms free vs frozen at the unablated rms (2000 prompts).*
 
 | block | free | frozen |
 |---|---|---|
