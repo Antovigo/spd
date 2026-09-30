@@ -47,12 +47,12 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from param_decomp.arith_repr.isa.atlas import ATLAS, POSITIONS, SITES, read_point_index
+from param_decomp.arith_repr.isa.atlas import ATLAS, POSITIONS, SITES, read_point_index, results
 from param_decomp.arith_repr.isa.components_model import ComponentsModel, kl
 from param_decomp.arith_repr.vectors.common import DATASET, RESID, comp_table, load_uv
 
 MODEL = "decomposed"
-INTERV = ATLAS / MODEL / "interventions"
+INTERV = results(MODEL) / "interventions"
 N_BASE = 500
 POS_OF = {v: k for k, v in POSITIONS.items()}
 
@@ -73,8 +73,8 @@ def maps(layer: int) -> None:
         G_all = np.stack(V, 1) * gains["ln1" if site == "attn" else "ln2"][layer][:, None]
         for pos, pname in POSITIONS.items():
             key = f"L{layer}_{site}_{pname}".replace("=", "eq")
-            d = json.loads((ATLAS / MODEL / "points" / f"{key}.json").read_text())
-            arr = np.load(ATLAS / MODEL / "points" / f"{key}.npz")
+            d = json.loads((results(MODEL) / "points" / f"{key}.json").read_text())
+            arr = np.load(results(MODEL) / "points" / f"{key}.npz")
             x = np.asarray(resid[read_point_index(layer, site), :, pos], np.float64)
             N = len(x)
             rms = np.sqrt((x**2).mean(1) + 1e-5)
@@ -175,7 +175,7 @@ def swap() -> None:
     other = lambda v: (v - 1 + rng.integers(1, 100, len(v))) % 100 + 1  # noqa: E731
     src = {"a": (other(a) - 1) * 100 + b - 1, "b": (a - 1) * 100 + other(b) - 1, "op": 10000 + base,
            "result": rng.choice(np.flatnonzero(M.op == 0), N_BASE)}  # fmt: skip
-    atlas = json.loads((ATLAS / MODEL / "atlas.json").read_text())
+    atlas = json.loads((results(MODEL) / "atlas.json").read_text())
     keys = sorted(
         {q["point"] for q in atlas["quantities"] if q["pos"] == "="},
         key=lambda k: (key_parts(k)[0], k),
@@ -502,7 +502,7 @@ def local() -> None:
     other = lambda v: (v - 1 + rng.integers(1, 100, len(v))) % 100 + 1  # noqa: E731
     src = {"a": (other(a) - 1) * 100 + b - 1, "b": (a - 1) * 100 + other(b) - 1, "op": 10000 + base,
            "result": rng.choice(np.flatnonzero(op_all == 0), N_BASE)}  # fmt: skip
-    atlas = json.loads((ATLAS / MODEL / "atlas.json").read_text())
+    atlas = json.loads((results(MODEL) / "atlas.json").read_text())
     resid = np.load(DATASET / MODEL / "resid.npy", mmap_mode="r")
     rows: list[dict[str, Any]] = []
     for layer in range(32):

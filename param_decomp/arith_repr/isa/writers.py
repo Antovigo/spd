@@ -24,7 +24,7 @@ from typing import Any
 
 import numpy as np
 
-from param_decomp.arith_repr.isa.atlas import ATLAS, POSITIONS, SITES, read_point_index
+from param_decomp.arith_repr.isa.atlas import ATLAS, POSITIONS, SITES, read_point_index, results
 from param_decomp.arith_repr.vectors.common import DATASET, RESID, comp_table, load_uv
 
 MODEL = "decomposed"
@@ -80,7 +80,7 @@ def run(pname: str) -> None:
     pos = {v: k for k, v in POSITIONS.items()}[pname]
     comps = comp_table()
     gains = dict(np.load(RESID / "norms.npz"))
-    at = json.loads((ATLAS / MODEL / "atlas.json").read_text())
+    at = json.loads((results(MODEL) / "atlas.json").read_text())
     qs = [q for q in at["quantities"] if q["pos"] == pname]
     order = {(li, s): 2 * li + (0 if s == "attn" else 1) for li in range(32) for s in SITES}
     qs.sort(key=lambda q: (order[(q["layer"], q["site"])], q["qi"]))
@@ -89,7 +89,7 @@ def run(pname: str) -> None:
     for i, q in enumerate(qs):
         by_point[q["point"]].append(i)
     for key, idx in by_point.items():
-        arr = np.load(ATLAS / MODEL / "points" / f"{key}.npz")
+        arr = np.load(results(MODEL) / "points" / f"{key}.npz")
         q0 = qs[idx[0]]
         Z = np.concatenate([arr[f"z{qs[i]['qi']}"].astype(np.float64) for i in idx], 1)
         F, fit = filters(q0["layer"], q0["site"], pos, Z - Z.mean(0), comps, gains)
@@ -154,7 +154,7 @@ def run(pname: str) -> None:
                     "by_sublayer": {k: round(v, 4) for k, v in agg[qi].items() if abs(v) >= 0.005},
                     "top": [[n, round(s, 4)] for s, n in best]})  # fmt: skip
     res: dict[str, Any] = {"position": pname, "model": MODEL, "quantities": out}
-    (ATLAS / MODEL / f"writers_{pname.replace('=', 'eq')}.json").write_text(json.dumps(res))
+    (results(MODEL) / f"writers_{pname.replace('=', 'eq')}.json").write_text(json.dumps(res))
     print("saved", len(out), flush=True)
 
 
@@ -190,7 +190,7 @@ def provenance(min_share: float = 0.15, max_j: float = 0.35) -> None:
     A flexible regression would be uninformative: at positions a and op every prompt with the same a
     shares one stream, so any code that identifies a predicts everything."""
     comps = comp_table()
-    at = json.loads((ATLAS / MODEL / "atlas.json").read_text())
+    at = json.loads((results(MODEL) / "atlas.json").read_text())
     qmeta = {f"{q['point']}#{q['qi']}": q for q in at["quantities"]}
     by_point: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for q in at["quantities"]:
@@ -199,7 +199,7 @@ def provenance(min_share: float = 0.15, max_j: float = 0.35) -> None:
 
     def zs(point: str) -> list[tuple[str, np.ndarray]]:
         if point not in zcache:
-            f = ATLAS / MODEL / "points" / f"{point}.npz"
+            f = results(MODEL) / "points" / f"{point}.npz"
             arr = np.load(f) if f.exists() else None
             zcache[point] = [] if arr is None else [
                 (f"{point}#{q['qi']}", arr[f"z{q['qi']}"].astype(np.float64)) for q in by_point[point] if q["J"] < 0.5]  # fmt: skip
@@ -207,7 +207,7 @@ def provenance(min_share: float = 0.15, max_j: float = 0.35) -> None:
 
     wanted: dict[str, dict[str, Any]] = {}
     for pname in POSITIONS.values():
-        d = json.loads((ATLAS / MODEL / f"writers_{pname.replace('=', 'eq')}.json").read_text())
+        d = json.loads((results(MODEL) / f"writers_{pname.replace('=', 'eq')}.json").read_text())
         for q in d["quantities"]:
             if q["J"] >= max_j:
                 continue
@@ -257,7 +257,7 @@ def provenance(min_share: float = 0.15, max_j: float = 0.35) -> None:
         ]
         out.append(entry)
         print(key, entry.get("head"), entry["single"][:2], entry["pair"][:1], flush=True)
-    (ATLAS / MODEL / "provenance.json").write_text(json.dumps(out))
+    (results(MODEL) / "provenance.json").write_text(json.dumps(out))
     print("saved", len(out), flush=True)
 
 

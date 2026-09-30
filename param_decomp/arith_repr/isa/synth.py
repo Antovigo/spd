@@ -134,15 +134,17 @@ def recovery(s: Synth, Zs: list[np.ndarray]) -> list[tuple[str, int, float, int]
 
 
 if __name__ == "__main__":
-    from param_decomp.arith_repr.isa.atlas import analyse_point
+    from param_decomp.arith_repr.isa.atlas import METHOD, RANK, analyse_point
 
     defaults = [0.0, 0.3, 0.5, 0.05]
     args = [float(v) for v in sys.argv[1:]] + defaults[len(sys.argv) - 1 :]
     seed, noise, overlap, leak = int(args[0]), args[1], args[2], args[3]
     s = make(seed, noise=noise, overlap=overlap, leak=leak)
-    # the synthetic stream has no norm: a constant x makes the RMS factor 1
-    res = analyse_point(
-        s.H, np.ones((len(s.H), 4), np.float32), [f"r{i}" for i in range(s.H.shape[1])]
+    # the synthetic stream has no norm: a constant x makes the RMS factor 1; every (a, b) is distinct
+    res = analyse_point(s.H, np.ones((len(s.H), 4), np.float32), [f"r{i}" for i in range(s.H.shape[1])],
+                        rank=RANK, method=METHOD, prefix=np.stack([s.a, s.b], 1))  # fmt: skip
+    print(
+        f"r {res['r']}, {len(res['quantities'])} quantities, dimensions {[q['k'] for q in res['quantities']]}"
     )
     for name, d, ov, k in recovery(s, [q["z"] for q in res["quantities"]]):
         print(f"{name:20s} ({d} dims): overlap {ov:.2f}, found with k = {k}")

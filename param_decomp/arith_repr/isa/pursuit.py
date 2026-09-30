@@ -15,6 +15,9 @@ from dataclasses import dataclass
 
 import numpy as np
 
+SPLIT_STARTS = 16  # random starts for each sub-frame size (frames have at most 4 dimensions)
+SPLIT_FLAT = 0.2  # squared lengths varying less than this fraction of their mean count as constant
+
 
 @dataclass
 class Quantity:
@@ -88,13 +91,16 @@ def split(
     V = U @ W
     best = None
     for k1 in range(1, k // 2 + 1):
-        for _ in range(4):
+        for _ in range(SPLIT_STARTS):
             init = np.linalg.qr(rng.standard_normal((k, k1)))[0]
             part, JA = fit_frame(V, init)
             Bc = np.linalg.qr(np.concatenate([part, np.eye(k)], 1))[0][:, k1:k]
             JB = norm_var(V @ Bc)
             qa, qb = ((V @ part) ** 2).sum(1), ((V @ Bc) ** 2).sum(1)
-            anti = -float(np.corrcoef(qa, qb)[0, 1]) if qa.std() > 1e-9 and qb.std() > 1e-9 else 0.0
+            # a part whose squared length is (nearly) constant is a sphere on its own, and the
+            # correlation of its squared length with the other part's measures only noise
+            flat = qa.std() < SPLIT_FLAT * qa.mean() or qb.std() < SPLIT_FLAT * qb.mean()
+            anti = 0.0 if flat else -float(np.corrcoef(qa, qb)[0, 1])
             if tol > JA and tol > JB and anti < max_anti and (best is None or best[0] > JA + JB):
                 best = (JA + JB, part, Bc)
     if best is None:
