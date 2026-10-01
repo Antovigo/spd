@@ -770,7 +770,8 @@ before the MLP (0.2 %); right after it, it is the circle on the right (4.5 %).
 
 **What a read sees of a circle.** Take a read vector `v` (a gate or up row). On the prompts with a
 given `a`, the read gives `v · x̂ ≈ const + R (v·e1 cos θ_a + v·e2 sin θ_a)`. Any such mix of a
-cosine and a sine is a single shifted cosine, `ρ cos(θ_a − 2πφ/50)`. The read therefore sees the
+cosine and a sine is a single shifted cosine, `ρ cos(θ_a − 2πφ/50)`, with an amplitude `ρ ≥ 0` and
+a residue `φ` (a real number from 0 to 50). The read therefore sees the
 circle through one window: a wave over the residues that peaks at one residue `φ`, the **phase** of
 the read. The report writes this "reads `a` @φ". "Reading `cos θ_a`" means `φ = 0`; "reading
 `sin θ_a`" means `φ = 12.5`, a quarter period later, because `sin θ_a = cos(θ_a − π/2)`. Every other
@@ -1411,6 +1412,8 @@ The old pattern can be removed and rewritten elsewhere (a real move), or the old
 while new, larger copies are added in other directions (dilution). The bottom row separates the
 two:
 
+- `X_ref` is `X_t` at the reference point, and `|X|` is the square root of the sum of the squared
+  entries of `X`;
 - black: the size of the representation, `|X_t| / |X_ref|`;
 - dashed: how much of the reference pattern is still in `X_t`, `⟨X_ref, X_t⟩ / |X_ref|²` (1 means
   the reference pattern is still present at full size);
