@@ -1025,7 +1025,67 @@ The first three terms of the expansion in step 2 are not about the result:
 - `u0 · α cos X` does the same for `a`.
 
 The L18 MLP's period-50 write along `b` is in fact larger than its write along `a + b` (power 1.07
-against 0.90), and its write along `a` is 0.55. This report does not follow those writes further.
+against 0.90), and its write along `a` is 0.55. Step 8 shows what these writes do: in the plane of
+the result, they erase the operands that the stream already holds there.
+
+#### Step 8: why the written circle looks noisy, and what cleans it
+
+Drawn prompt by prompt with all its terms, the seven neurons' write is a fuzzy ring rather than a
+circle (the applet's panel 3 with every term ticked). Four explanations were tested.
+
+**Definitions.** `s = (a + b) mod 50` is the result residue, an integer from 0 to 49. A **view** is a
+set of 10,000 points in a plane, one per addition prompt: some 4,096-vector (a write, or the
+residual stream at `=`) projected on the plane. For each view:
+
+- **share s / share a / share b**: the fraction of the points' variance explained by the class
+  means of `s` (the 50 averages over the prompts that share a value of `s`), of `a` (100 class
+  means) and of `b` (100 class means). Share s is the result circle; shares a and b are the operands'
+  own content.
+- **order**: how well the 50 class means of `s` follow the residue order around a circle,
+  `|mean over s of exp(i(angle of the class mean of s − 2πs/50))|`, where `i` is the imaginary unit,
+  the angle is measured in the plane, and the orientation (clockwise or counterclockwise) is chosen
+  to maximise it. 1 means perfect order up to a rotation.
+- **nearest**: the fraction of prompts whose point is closer to the class mean of their own `s` than
+  to any other class mean.
+- `x_in` is the stream that the L18 MLP reads (right after L18 attention), and `x_out` the stream
+  right after the MLP's write is added (`x_out − x_in` equals the MLP's write to within 0.5 %).
+
+![circle check](figures_auto_interp_vectors/k2_circle_check.png)
+
+| view | share s | share a | share b | order | nearest |
+|---|---|---|---|---|---|
+| 1. seven neurons' write, all terms, in the plane of their a + b write (the applet) | 0.58 | 0.11 | 0.20 | 0.999 | 0.10 |
+| 2. the same with the class means of `a` and of `b` subtracted | 0.84 | 0 | 0 | 0.999 | 0.22 |
+| 3-5. seven neurons or the whole MLP, in their own a + b plane or in the stream's | 0.56-0.58 | 0.11-0.13 | 0.20-0.21 | 0.998-0.999 | 0.10 |
+| 6. `x_in`, in the stream's a + b plane after L18 | 0.04 | 0.36 | 0.50 | 0.91 | 0.03 |
+| 7. `x_in` + the seven neurons' write | 0.81 | 0.04 | 0.04 | 0.999 | 0.18 |
+| 8. `x_out` | 0.80 | 0.04 | 0.05 | 0.999 | 0.17 |
+| 9. the stream at L19, L22, L25 and L28, each in its own (a + b) mod 50 plane | 0.83-0.87 | 0.01-0.04 | 0.01-0.03 | 0.996-0.999 | 0.17-0.24 |
+| 10. the stream at L31 | 0.64 | 0.16 | 0.05 | 0.99 | 0.14 |
+
+- **The plane is not the problem.** Four different planes (views 1 and 3-5) give the same shares.
+- **The fuzz is the operands, and the stream already holds them.** In view 1, 31 % of the variance
+  is the operands' own content (the `g0 · δ cos Y` and `u0 · α cos X` terms of step 7). Before the
+  MLP, the same plane holds almost no result (4 %) but a lot of operand content (a 36 %, b 50 %;
+  view 6). Adding the write to the stream (view 7) leaves only 8 % operand content and a circle with
+  81 % of the variance. The sum is cleaner than either part, so the neurons' operand terms point
+  against the operand content already there: **in the plane where they write the result, these
+  neurons also erase the operands.** The applet's "add the stream" switch shows this.
+- **Later layers refine it a little.** From L19 to L28 the circle grows to 0.83-0.87 of its plane's
+  variance and operand content falls to 1-4 %. Most of the cleaning is done by L18's own write. The
+  last layer, L31, makes it worse again.
+- **What stays imperfect.** The class means are always in order (0.996-0.999), even in the fuzzy
+  view: the circle itself is not collapsed, single prompts are spread around it. Even at its
+  cleanest, 12-16 % of the plane's variance is not a function of `s`, and only 17-24 % of single
+  prompts sit closest to their own class mean (neighbouring class means are only 7.2° apart). The
+  model gets 546 of the 10,000 additions wrong: 312 of its top answers are not numbers from 0 to 200,
+  and 170 are exactly 100 too low (a lost hundreds digit). The mod-50 circle cannot carry either
+  error. Wrong prompts sit only a little farther from their class mean than right ones (1.55 against
+  1.33 at L25, in that view's units). So this circle's imprecision is not the main source of errors;
+  the exact result is presumably fixed by combining it with the other periods (mod 10, 25, 100),
+  which live in other planes.
+
+Code: `param_decomp/arith_repr/vectors/circle_check.py`.
 
 #### What the example shows
 
@@ -1038,6 +1098,8 @@ against 0.90), and its write along `a` is 0.55. This report does not follow thos
   `cos θ_a`". Each reads one phase, and the seven neurons read seven different phases of `a` and
   several of `b`. Their writes point at five different residues, enough to span the result plane.
   One neuron (n61) holds a cosine and a sine of both operands in its two inputs.
+- **The operand terms.** The same products also re-write the operands, and in the result's plane
+  those writes cancel the operand content the stream already holds (step 8).
 - **The gate.** Here it is mostly open and acts as a multiplier. Where it closes, it turns the
   neuron into a detector of a window of `a` (or of `a` and `b`), without changing the period-50
   phase.
@@ -1480,6 +1542,7 @@ choice.
   - `mirror_neurons.py` + `mirror.py` (the b-mirror of section 5);
   - `case_k2.py` (the period-50 worked example of section 3.1);
   - `drift.py` (section 6);
+  - `circle_check.py` (section 3.1, step 8);
   - `routing.py` (section 2.1-2.2 numbers) and `figures.py` `routing` / `operand_separation`;
   - `mlp_periods.py` + `periods_summary.py` + `periods_compare.py` (section 3.2; the
     component-only rebuild is `mlp_periods <layer> comp|comp_mean`);

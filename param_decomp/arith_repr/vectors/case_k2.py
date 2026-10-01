@@ -611,6 +611,15 @@ def figures() -> None:
     table(z)
 
 
+def stream_in(basis: np.ndarray) -> np.ndarray:
+    resid = np.load(DATASET / "original/resid.npy", mmap_mode="r")
+    out = np.empty((2, 10000, basis.shape[0]), np.float32)
+    for o in range(2):
+        x = np.asarray(resid[IN_PT, o * 10000 : (o + 1) * 10000, 4], np.float32)
+        out[o] = (x - x.mean(0)) @ basis.T
+    return out
+
+
 def applet() -> None:
     """Data for the interactive page: per-prompt gate / up values of the seven neurons (both ops),
     their period-50 coefficients, full write vectors, and a 4-D view basis (the a + b write plane,
@@ -644,6 +653,9 @@ def applet() -> None:
         "u_coef": [cpx(z[f"u_coef_o{o}"]) for o in range(2)],
         "W": b64(W.T, np.float32),  # (7, 4096)
         "view": (W.T @ basis.T).round(5).tolist(),  # (7, 4): each write vector in the 4-D view
+        # the stream the L18 MLP reads (after L18 attention) at '=', its mean over prompts removed, in
+        # the 4-D view: (2 ops, 10000 prompts, 4) float32
+        "x_in": b64(stream_in(basis), np.float32),
         "power": {
             "coh": [z[f"coh_o{o}"].round(4).tolist() for o in range(2)],
             "inc": [z[f"inc_o{o}"].round(4).tolist() for o in range(2)],
