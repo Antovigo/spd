@@ -86,11 +86,11 @@ Code: `param_decomp/arith_repr/vectors/`. Data and full-size figures:
      on subtraction while `a` is unchanged;
    - the same L16-L18 "adder" units then compute `a + (−b)`.
 
-6. **Between the computing layers.** The other layers keep the representations' arrangement
-   (linear CKA 0.88-1.0 across L2-L30) but write re-scaled, rotated copies into new directions while
-   leaving the old copy in place. For `a` at token a, only a quarter of the representation still
-   points where it did at L2 by L27, though the original pattern is still there at full size
-   (section 6).
+6. **Between the computing layers.** The other layers keep the representations' arrangement up to
+   a linear map (CCA about 0.8 across L2-L30) but write linearly transformed copies into new
+   directions while leaving the old copy in place. For `a` at token a, only a quarter of the
+   representation still points where it did at L2 by L27, though the original pattern is still
+   there at full size (section 6).
 
 ## Method
 
@@ -1308,7 +1308,7 @@ Mode shares of the odd write: k2 B 0.94; k10 B 0.75 / A 0.25; k20 A 0.96.
 Sections 1-5 find only a few layers that change what is represented: the L0 MLP at the operand
 tokens, the copies at L15-L16, and the L16-L19 MLPs that create the result. The other layers still
 have components that read and write the codes. This section asks what those layers do to the
-representations as a whole. Do they leave them in place, rotate them into other directions, or
+representations as a whole. Do they leave them in place, move them into other directions, or
 change their arrangement?
 
 Code: `param_decomp/arith_repr/vectors/drift.py`. Data: `<run>/analysis/arith_repr/vectors/drift.npz`.
@@ -1321,21 +1321,32 @@ Code: `param_decomp/arith_repr/vectors/drift.py`. Data: `<run>/analysis/arith_re
   average over all prompts. At stream point `t` this gives a matrix `X_t` with one row per value,
   each row a 4,096-vector (a **class mean**). The rows of `X_t` are the representation's points; how
   they sit relative to each other is its **arrangement**.
+- **Where a representation is present.** A quantity counts as present at a stream point when its
+  codes carry at least 5 % of the stream's variance there. The codes are all harmonics of its line
+  in Tool 2's frames, plus its linear part for `a` and `b`. Comparisons are shown only between points
+  where the quantity is present (the grey regions in the figures are left out).
+  - `a` at token a is present at every point.
+  - `b` at `=` is present from L0 attention on: the previous-token copy (section 1) already puts
+    21-60 % of the `=` stream's variance on b's codes.
+  - `a + b` at `=` is present from L17.mlp on (7 % of the variance, growing to 60 % by L25). Before
+    that, the class means of `a + b` are not empty, but what they hold is the magnitude
+    `lin(a) + lin(b)` and edge effects of the operands' own codes, not a representation of the sum.
 - **Direct similarity** between two stream points `t` and `t'`:
   `⟨X_t, X_t'⟩ / (|X_t| |X_t'|)`, where `⟨X, Y⟩` is the sum of the products of matching entries. It
   compares the class means in the stream's own coordinates, with no realignment. It is 1 when the
   points sit in the same directions with the same arrangement, and 0 when the two sets of directions
   are orthogonal. This measures **movement**.
-- **Linear CKA** (centred kernel alignment). Form for each point the 100 × 100 matrix of dot
-  products between its class means, `K_t = X_t X_tᵀ`. CKA is the cosine between `K_t` and `K_t'`,
-  treating each matrix as one long vector. A rotation of the stream, or a common rescaling, leaves
-  every dot product unchanged up to that scale, so CKA is 1 for a rotated copy. It is **not**
-  unchanged by other linear maps, such as stretching one direction.
-- **CCA similarity.** Take the 10 leading principal coordinates of `X_t` and of `X_t'` (each a
-  100 × 10 matrix). The canonical correlations are the correlations between the best-matched
-  linear combinations of the two sets. Their mean square is 1 when one set is any invertible linear
-  map of the other. Unlike CKA, it weights the 10 coordinates equally, so a small code counts as
-  much as a large one.
+- **CCA similarity** (canonical correlation analysis). Take the 10 leading principal coordinates of
+  `X_t` and of `X_t'`, each a 100 × 10 matrix (one row per value). CCA finds the linear combination
+  of the first set and the linear combination of the second set that are most correlated across the
+  values; that correlation is the first canonical correlation. It then finds the next most
+  correlated pair, uncorrelated with the first, and so on, ten times. The score is the mean of the
+  ten squared correlations.
+  - It is 1 when one set of coordinates is any invertible linear map of the other (rotated,
+    stretched, sheared), so it measures whether the **arrangement** is the same up to a linear map.
+  - Each of the ten directions counts equally, so a small code counts as much as a large one.
+  - With 100 values and 10 coordinates, two unrelated representations still score about
+    10/99 ≈ 0.1 by chance (dotted line in the figure).
 
 **Results.**
 
@@ -1348,24 +1359,36 @@ result is made). Bottom row: sizes, explained below.
 
 - **Step by step, the representations barely change.** Attention steps leave the class means almost
   where they were: median direct similarity from L3 to L30 is 0.99-1.00 at the operand tokens and
-  0.96-0.97 at `=`. MLP steps move them more: 0.90-0.93 at the operand tokens, 0.80-0.81 at `=`.
-  That is the saw-tooth in the top row. CKA stays at or above 0.97 at almost every step. The
-  exceptions are the steps that compute (L15 at `=`) and the last layer, L31 (0.90-0.99).
+  0.96-0.99 at `=`. MLP steps move them more: 0.90-0.93 at the operand tokens, 0.80-0.90 at `=`. That
+  is the saw-tooth in the top row. CCA between consecutive points is 0.99-1.00 for attention steps
+  and 0.89-0.99 for MLP steps (medians). It dips only where something is computed (L15 at `=`, the
+  first result layers) and at L31.
 - **Over a segment, the representation drifts to other directions while keeping its arrangement.**
-  For `a` at token a, the direct similarity with L2.mlp falls steadily, to 0.47 by L10, 0.34 by L19
-  and 0.25 by L27. Over the same layers CKA stays at 0.95-0.97 and CCA at 0.77-0.87. For `a + b` at
-  `=` after L19: direct similarity 0.63 by L23 and 0.46 by L27, against CKA 0.88-0.92. Seen in the
-  stream's own coordinates, the representation keeps moving away from where it started. Its
-  arrangement stays the same: a rotated (or close to rotated) copy.
+  - `a` at token a: direct similarity with L2.mlp falls to 0.47 by L10, 0.34 by L19 and 0.25 by L27.
+    CCA stays at 0.80-0.82 over the same layers.
+  - `a + b` at `=`: direct similarity with L19.mlp falls to 0.63 by L23 and 0.46 by L27; CCA stays at
+    0.80-0.84.
+  - `b` at `=`: direct similarity with L15.attn falls to 0.28 by L19 and 0.16 by L27; CCA stays at
+    0.83-0.89.
+
+  In the stream's own coordinates each representation keeps moving away from where it started.
+  Its arrangement, up to a linear map, stays close to the original.
+- **The early and late `b` at `=` are different representations.** Up to L12, b's representation
+  at `=` (the previous-token copy) has a direct similarity of 0.02-0.3 with the L15 copy and a CCA of
+  only 0.45-0.76. So the L15H13 copy is not the early one moved into place: it writes a new copy, in
+  other directions and with a different arrangement.
 
 ![drift direct](figures_auto_interp_vectors/drift_direct.png)
 
-![drift cka](figures_auto_interp_vectors/drift_cka.png)
+![drift cca](figures_auto_interp_vectors/drift_cca.png)
 
-The same two measures between every pair of stream points. Direct similarity (first figure) is a
-band along the diagonal: each point resembles its neighbours and nothing far away. CKA (second
-figure) is close to 1 over whole blocks of layers. The blocks change exactly where something is
-computed: at L15-L16 for `b` at `=` (copy and mirror) and at L16-L19 for `a + b`.
+The same two measures between every pair of stream points where the quantity is present. Direct
+similarity (first figure) is a band along the diagonal: each point resembles its neighbours and
+nothing far away. CCA (second figure) stays high over whole blocks of layers.
+- For `a` at token a the blocks are roughly L3-L11, L12-L22 and L23-L30: around 0.9 within a block
+  and 0.75-0.85 between blocks.
+- For `b` at `=` the break is at L15.
+- For `a + b` the arrangement settles from about L23.
 
 **Moved away, or added to? (bottom row).** Direct similarity can fall for two different reasons.
 The old pattern can be removed and rewritten elsewhere (a real move), or the old pattern can stay
@@ -1377,39 +1400,36 @@ two:
   the reference pattern is still present at full size);
 - dotted: the size of the rest of `X_t`, which is orthogonal to the reference pattern.
 
-| representation | reference | at | size | reference pattern still present | direct | CKA |
+| representation | reference | at | size | reference pattern still present | direct | CCA |
 |---|---|---|---|---|---|---|
-| `a` at token a | L2.mlp | L10 / L19 / L27 | 2.1 / 5.2 / 9.8 | 0.97 / 1.78 / 2.46 | 0.47 / 0.34 / 0.25 | 0.97 / 0.97 / 0.95 |
-| `a + b` at `=` | L19.mlp | L23 / L27 / L31 | 1.7 / 2.5 / 5.6 | 1.09 / 1.16 / 0.95 | 0.63 / 0.46 / 0.17 | 0.92 / 0.88 / 0.88 |
-| `b` at `=` | L15.attn | L19 / L23 / L27 | 1.4 / 1.5 / 2.0 | 0.38 / 0.31 / 0.32 | 0.28 / 0.20 / 0.16 | 0.96 / 0.96 / 0.94 |
+| `a` at token a | L2.mlp | L10 / L19 / L27 | 2.1 / 5.2 / 9.8 | 0.97 / 1.78 / 2.46 | 0.47 / 0.34 / 0.25 | 0.81 / 0.82 / 0.80 |
+| `a + b` at `=` | L19.mlp | L23 / L27 / L31 | 1.7 / 2.5 / 5.6 | 1.09 / 1.16 / 0.95 | 0.63 / 0.46 / 0.17 | 0.84 / 0.80 / 0.76 |
+| `b` at `=` | L15.attn | L19 / L23 / L27 | 1.4 / 1.5 / 2.0 | 0.38 / 0.31 / 0.32 | 0.28 / 0.20 / 0.16 | 0.89 / 0.89 / 0.83 |
 
 - **`a` at token a and `a + b` at `=`: added to, not moved.** The reference pattern stays at full
   size or more (0.95-2.5), while the representation grows 2-15 times through new parts orthogonal
-  to it. Since CKA stays high, those new parts have the same arrangement as the old one. The layers
-  between the computing steps keep writing re-scaled, rotated copies of the same representation
-  into new directions, and leave the old copy in place. This matches section 1: almost every writer
-  is a "spoke" that writes the code it reads, in the stream's existing phase, with little erasing.
+  to it. Since CCA stays around 0.8, those new parts carry nearly the same arrangement as the old
+  one. The layers between the computing steps keep writing linearly transformed copies of the same
+  representation into new directions, and leave the old copy in place. This matches section 1:
+  almost every writer is a "spoke" that writes the code it reads, in the stream's existing phase,
+  with little erasing.
 - **`b` at `=` after L15: partly moved.** Two thirds of the reference pattern is gone by L19
   (0.38 left). The loss starts at the L15 MLP, which removes part of b's copy while it builds the
-  mirrored code (section 5), and continues to L19. The rest of the drift is again new copies with the same arrangement (CKA
-  0.94-0.96).
+  mirrored code (section 5), and continues to L19. The rest of the drift is again new copies with
+  nearly the same arrangement (CCA 0.83-0.89).
 - **The readers see a shrinking share of the old copy.** These are sizes in the raw stream. The
   stream's total size also grows with depth, and every reader sees the stream after RMSNorm. So
   even an old copy that keeps its size becomes a smaller part of what later layers read, and the
   newer copies take over.
-- **L31 is different.** In the last layer all three measures drop (direct 0.06-0.17 against the
-  references, CKA 0.85-0.89), and for `a` at token a the reference pattern shrinks from 2.5 to 1.3.
-  The last MLP rewrites the representations as well as copying them, which fits section 4's
-  finding that L31 is poorly captured by the codes.
+- **L31 is different.** In the last layer both measures drop (direct 0.06-0.17 against the
+  references, CCA 0.60-0.76), and for `a` at token a the reference pattern shrinks from 2.5 to 1.3.
+  The last MLP rewrites the representations as well as copying them, which fits section 4's finding
+  that L31 is poorly captured by the codes.
 
-**What CKA cannot see.** Linear CKA is dominated by the largest directions of variation. Before the
-result exists (`a + b` at `=` before L16), CKA with L19.mlp is already 0.80-0.89. The reason is
-that the class means of `a + b` are ordered by the magnitude part `lin(a) + lin(b)`, which is large
-and already present. CCA, which weights the ten leading coordinates equally, stays at 0.31-0.50
-until the codes are made at L16-L19, then jumps to 0.8-0.9. Read the CKA curves as "the large-scale
-arrangement is the same" and the CCA curves as the stricter test. The comparison also uses class
-means only: structure inside a class (for example how `a + b` prompts differ by their `a`) is
-averaged out.
+**Limits.** The comparison uses class means only: structure inside a class (for example how
+`a + b` prompts differ by their `a`) is averaged out. CCA looks at the ten leading principal
+coordinates only; smaller codes beyond those ten are not compared. The 5 % presence threshold is a
+choice.
 
 ## What the vectors do not settle (for the validation pass)
 
