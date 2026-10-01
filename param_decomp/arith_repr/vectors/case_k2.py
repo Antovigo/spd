@@ -274,15 +274,27 @@ def fig_gates(z: dict[str, np.ndarray]) -> None:
 
 
 def textbook() -> dict[str, Any]:
-    """The four textbook neurons on the full grid: products of cos / sin of a and b, written along
-    +e1, -e1, +e2, +e2 of a plane (period 50)."""
+    """The four textbook neurons on the full grid: products of cos / sin of theta_a = 2 pi a / 50 and
+    theta_b = 2 pi b / 50, written along +e1, -e1, +e2, +e2 of a plane."""
     i = np.arange(10000)
     ta, tb = 2 * np.pi * (i // 100 + 1) / T, 2 * np.pi * (i % 100 + 1) / T
     return {
-        "cos a · cos b → +e1": (np.cos(ta) * np.cos(tb), np.array([1.0, 0.0])),
-        "sin a · sin b → −e1": (np.sin(ta) * np.sin(tb), np.array([-1.0, 0.0])),
-        "cos a · sin b → +e2": (np.cos(ta) * np.sin(tb), np.array([0.0, 1.0])),
-        "sin a · cos b → +e2": (np.sin(ta) * np.cos(tb), np.array([0.0, 1.0])),
+        "$\\cos\\theta_a \\cdot \\cos\\theta_b$ → +e1": (
+            np.cos(ta) * np.cos(tb),
+            np.array([1.0, 0.0]),
+        ),
+        "$\\sin\\theta_a \\cdot \\sin\\theta_b$ → −e1": (
+            np.sin(ta) * np.sin(tb),
+            np.array([-1.0, 0.0]),
+        ),
+        "$\\cos\\theta_a \\cdot \\sin\\theta_b$ → +e2": (
+            np.cos(ta) * np.sin(tb),
+            np.array([0.0, 1.0]),
+        ),
+        "$\\sin\\theta_a \\cdot \\cos\\theta_b$ → +e2": (
+            np.sin(ta) * np.cos(tb),
+            np.array([0.0, 1.0]),
+        ),
     }
 
 
