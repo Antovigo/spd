@@ -49,13 +49,16 @@ Code: `param_decomp/arith_repr/vectors/`. Data and full-size figures:
 3. **Computing.** The result code is made at `=` by the L16-L18 MLPs:
    - gate and up read `a` and `b` codes at the **same harmonic k**;
    - `silu(gate)·up` contains the cross term `cos k(a) · cos k(b)`, which is a code of
-     `a + b` (and of `a − b`);
+     `a + b` and, equally, of `a − b`;
+   - each neuron reads one phase of each operand, so it writes along one line; several neurons
+     reading at different phases (the "cosine" and the "sine" of each operand) draw the `a + b`
+     circle together, and their `a − b` parts cancel (worked example for period 50 in section 3.1);
    - the a×b product predicts the newly created result code with cosine 0.99-1.00 (add) and
      0.82-0.91 (sub);
    - U writes it into a result circle, in phase for 40 / 40 of the (unit, harmonic) pairs.
    - From L19 on, the MLPs receive the result code (40-80 % of their input) and re-write and
      refine it.
-   - Period by period (exact bookkeeping over all neurons, section 3.1):
+   - Period by period (exact bookkeeping over all neurons, section 3.2):
      - mod 100, 5, 10, 50 and 20 are made at L16-L19 from a-code × b-code across gate and up;
      - parity is made inside silu(gate) by a single neuron (L18 unit c4);
      - mod 25 and mod 4 never come from the operands: later MLPs make them by multiplying result
@@ -383,7 +386,7 @@ code of `a + b`, because `cos α · cos β = ½ [cos(α + β) + cos(α − β)]`
 same terms, with `up_b` replaced by its complex conjugate. The product's `a + b` coefficient also
 includes `mean(s) · up_sum(k) + mean(up) · s_sum(k)`, which only passes on an `a + b` code already
 present in the inputs. Comparing these terms with the measured coefficient of `act` shows whether
-the neuron creates the result code or passes one through. Section 3.1 extends this bookkeeping
+the neuron creates the result code or passes one through. Section 3.2 extends this bookkeeping
 exactly to every neuron of a layer, and defines its terms there.
 
 ### Tool 7: attention couplings (`autointerp/wiring.py`, `vectors/qk.py`)
@@ -612,7 +615,7 @@ finding that copies split when `a < b`.
     97 % b), L18 c12 (gate 96 % a, up 97 % b), L18 c21, c22, L16 c106, c76, c94 (gate b, up a).
   - Others read both operands in both inputs (L18 c23, c26, c24).
   - (This corrects "almost every creating unit reads both operands in both inputs" in section
-    3.1: about half do, half split.)
+    3.2: about half do, half split.)
 - **Is separation needed?** For a + b it is not: a unit reading `cos a + cos b` in both inputs
   still makes `cos(a+b)`. It matters for a − b, where only b must be mirrored. The L15 MLP
   mirror acts on b in H13's subspace, after b has arrived and before a arrives through H21.
@@ -668,15 +671,307 @@ versus what they hand to the down components (`silu(g)·up`), per layer:
   the product stays diagonal (pass-through / sharpening).
 - **Sub** (4th column): the same neuron's output follows `a − b` (diagonal).
 
-The product also makes `a − b` harmonics on add (the second term of the identity). These are
-smaller (diff share 0.04-0.24 per unit) and do not accumulate across units.
+The product also makes `a − b` harmonics on add (the second term of the identity). Each neuron
+makes them nearly as strongly as the `a + b` ones, but across neurons they point in different
+directions and mostly cancel; section 3.1 works this out for period 50.
 
 **L19-L30** keep re-writing the result: 75-90 % of their inner variance is on the result quantity.
 The newly created part is no longer an a×b product; it mixes result harmonics (e.g. k = 1 → k =
 2 and 3). This matches the earlier finding that the long periods fan out from Fourier circles
 into higher-dimensional codes from L26.
 
-### 3.1 Period by period: which MLP makes which period, and how
+### 3.1 Worked example: how the L18 MLP computes `(a + b) mod 50`
+
+This subsection follows a single period, 50, through a single MLP, L18, on the addition prompts.
+It is the cleanest case in the network: the L18 MLP creates almost all of the `a + b` mod-50 code
+(section 3.2), and **seven of its 14,336 neurons carry 98 % of that write**. The subsection answers
+three questions that the summary above glosses over:
+
+1. The product `cos a · cos b` contains `cos(a − b)` exactly as much as `cos(a + b)`. Where does the
+   `a − b` part go?
+2. Why does the `a + b` part come out on top?
+3. A neuron that reads "`cos a`" sees only part of `a`. Where are the sine parts?
+
+The short answer: **each neuron makes `a + b` and `a − b` about equally, and the neurons' `a − b`
+parts cancel when added, while their `a + b` parts reinforce.** The cancellation works only because
+different neurons read the operands at different phases: the sine parts are read by other neurons,
+or by the neuron's other input. Every number below is measured on the original model.
+
+Code: `param_decomp/arith_repr/vectors/case_k2.py`. Data: `<run>/analysis/arith_repr/vectors/case_k2.npz`.
+
+#### The objects involved
+
+- **Residue.** `a mod 50` is the remainder of `a` divided by 50, an integer from 0 to 49. Period 50
+  is harmonic `k = 2` in the notation of Tool 1.
+- **Angle of a residue.** For any integer `q`, write `θ(q) = 2π q / 50`: the residue `q mod 50` as
+  an angle on a clock with 50 hours (7.2° per hour). The key property is
+  `θ(a + b) = θ(a) + θ(b)`. Adding two numbers mod 50 is the same as adding their angles. This is
+  why a circle is a useful way to store a number that will be added.
+- **Residual stream `x`.** At position `=` and one stream point, `x` is a vector of 4,096 numbers
+  for each prompt.
+- **Class mean.** Group the 10,000 addition prompts by the value of some quantity mod 50 (for
+  example `a mod 50`: 200 prompts per residue). The class mean of residue `q` is the average of `x`
+  over its group, minus the average over all prompts. It is one 4,096-vector per residue.
+- **Circle (code plane).** The stream "holds `a mod 50` as a circle" when there are two orthogonal
+  directions `e1`, `e2` and a radius `r` such that the class mean of residue `q` is close to
+  `r (cos θ(q) e1 + sin θ(q) e2)`. The plane spanned by `e1` and `e2` is the **code plane**. It is
+  found with Tool 2: `e1` is along `C`, `e2` along `S`.
+- **MLP neuron.** Llama's MLP is a SwiGLU. For neuron `n`, with `x̂` the stream after the block's
+  RMSNorm:
+  - the **gate pre-activation** `g_n = W_gate[n] · x̂` and the **up pre-activation**
+    `u_n = W_up[n] · x̂` are two numbers per prompt, each a dot product of the stream with a fixed
+    vector (a **read**);
+  - the **neuron value** is `act_n = silu(g_n) · u_n`, with `silu(z) = z / (1 + e^{−z})`. silu is
+    close to 0 when `z` is well below 0 (the **gate is closed**) and close to `z` when `z` is well
+    above 0 (the **gate is open**);
+  - the neuron **writes** `act_n · w_n` to the stream, where `w_n`, column `n` of `W_down`, is a
+    fixed 4,096-vector: the neuron's **write direction**. The MLP's output is the sum of the
+    14,336 neurons' writes.
+- **Unit.** The report names a neuron by the alive down component that reads it ("unit c12" is
+  neuron 12,778). From the neuron-aligned initialisation, the gate, up and down components with the
+  same index sit on the same neuron. At the component level, the gate component with the unit's own
+  index carries 12-42 % of the neuron's period-50 input, and shared gate directions (c21, c22, c61)
+  carry the rest. This section therefore works with the neurons.
+
+#### Step 1: what goes in is two circles
+
+![circles](figures_auto_interp_vectors/k2_circles.png)
+
+Left and middle: the stream that the L18 MLP reads (right after L18 attention), at `=`. Each large
+dot is the class mean of one residue, projected on the code plane, coloured by residue; the faint
+dots are single prompts. `a mod 50` and `b mod 50` are clean circles, with their residues in order.
+They carry 5.8 % and 9.2 % of the stream's variance at `=`. `(a + b) mod 50` is almost absent
+before the MLP (0.2 %); right after it, it is the circle on the right (4.5 %).
+
+**What a read sees of a circle.** Take a read vector `v` (a gate or up row). On the prompts with
+residue `q`, the read gives `v · x̂ ≈ const + r (v·e1 cos θ(q) + v·e2 sin θ(q))`. Any such mix of a
+cosine and a sine is a single shifted cosine, `ρ cos(θ(q) − θ(φ))`. The read therefore sees the
+circle through one window: a wave over the residues that peaks at one residue `φ`, the **phase** of
+the read. The report writes this "reads `a` @φ". "Reading `cos a`" means `φ = 0`; "reading `sin a`"
+means `φ = 12.5`, a quarter period later, because `sin θ = cos(θ − 90°)`. Every other phase is a mix
+of the two: `cos(θ(a) − θ(φ)) = cos θ(φ) cos θ(a) + sin θ(φ) sin θ(a)`. One read sees one coordinate
+of the circle. This is the observation behind question 3.
+
+In the figure, each arrow points at the residue a neuron's read peaks at, and its length is the
+read's amplitude. The seven gates read `a` at seven different phases (left), and the ups read `b`
+at several phases (middle). The table lists every read:
+
+| unit (neuron) | gate reads a | gate reads b | up reads a | up reads b | value: a + b wave | value: a − b wave | write points at | gate open | share of the a + b write |
+|---|---|---|---|---|---|---|---|---|---|
+| c12 (12778) | **1.29 @2.1** | 0.33 @37.6 | 0.15 @39.2 | **1.67 @20.9** | 0.94 @23.5 | 0.77 @30.3 | 22.8 | 86 % | 0.25 |
+| c21 (1448) | **1.34 @10.4** | 0.26 @37.9 | 0.29 @5.2 | **1.34 @25.5** | 0.76 @36.5 | 0.68 @35.5 | 37.1 | 76 % | 0.17 |
+| c27 (61) | **0.81 @30.8** | **1.27 @32.5** | **0.80 @41.8** | **0.82 @44.7** | 0.66 @23.7 | 0.20 @2.5 | 23.4 | 69 % | 0.15 |
+| c22 (6339) | **1.03 @48.3** | 0.61 @45.3 | 0.42 @37.4 | **1.30 @38.2** | 0.69 @35.9 | 0.45 @8.4 | 34.1 | 85 % | 0.14 |
+| c25 (1768) | **1.06 @14.9** | 0.29 @38.5 | 0.22 @10.0 | **1.18 @33.5** | 0.52 @49.3 | 0.62 @32.4 | 1.9 | 79 % | 0.11 |
+| c36 (2372) | 0.54 @46.9 | **1.02 @21.5** | **0.93 @35.7** | 0.39 @13.1 | 0.47 @7.1 | 0.43 @15.9 | 8.7 | 70 % | 0.09 |
+| c61 (8343) | 0.59 @0.4 | **1.02 @8.1** | **0.91 @9.3** | 0.62 @12.5 | 0.45 @16.9 | 0.33 @48.4 | 17.0 | 68 % | 0.08 |
+
+Each read entry is "amplitude @ residue of the peak", in mod-50 residues: the period-50 wave of that
+pre-activation over the grid is `amplitude · cos(θ(q) − θ(peak))`. "Value" is the same for the neuron
+value `act_n` along `a + b` and along `a − b`. "Write points at" is the residue whose position on the
+result circle the write direction `w_n` points at. "Gate open" is the fraction of prompts with
+`g_n > 0`. The last column is the neuron's share of the MLP's whole period-50 `a + b` write; the
+seven sum to 0.98.
+
+Four neurons (c12, c21, c22, c25) **split the operands**: the gate reads `a` and up reads `b`. Two
+(c36, c61) split them the other way round. One (c27) reads both operands in both inputs.
+
+#### Step 2: one neuron multiplies two waves and gets `a + b` and `a − b` alike
+
+Take c12. To a good approximation its gate is `g = g0 + α cos X` with `X = θ(a) − θ(2.1)`, and its
+up is `u = u0 + δ cos Y` with `Y = θ(b) − θ(20.9)`. Here `g0` and `u0` are the means over prompts,
+and `α`, `δ` the amplitudes from the table. While the gate is open, `silu(g) ≈ g`, so the neuron
+value is roughly the product. The product-to-sum identity
+
+```
+cos X · cos Y = ½ cos(X + Y) + ½ cos(X − Y)
+```
+
+expands it into five terms:
+
+```
+(g0 + α cos X)(u0 + δ cos Y) =  g0 u0                                   a constant
+                               + g0 δ cos Y                             b's own wave
+                               + u0 α cos X                             a's own wave
+                               + ½ α δ cos(θ(a + b) − θ(2.1 + 20.9))    an a + b wave, peak at 23.0
+                               + ½ α δ cos(θ(a − b) − θ(2.1 − 20.9))    an a − b wave, peak at 31.2
+```
+
+The last two lines use `X + Y = θ(a) + θ(b) − θ(2.1) − θ(20.9) = θ(a + b) − θ(23.0)`, and likewise
+`X − Y = θ(a − b) − θ(−18.8)`, with `−18.8 ≡ 31.2 (mod 50)`. The measured neuron value has its
+`a + b` wave peaking at 23.5 and its `a − b` wave at 30.3, as predicted.
+
+**The `a − b` wave is not a small correction: the identity gives it the same amplitude as the `a + b`
+wave.** Measured, it is 0.77 against 0.94 for c12. Across all neurons, the `a − b` parts carry 69 %
+as much power as the `a + b` parts (power is defined in step 5). No single neuron favours `a + b`
+much. The selection happens when the neurons' writes are added (steps 3-5).
+
+**Where the gate is open.**
+
+![gates](figures_auto_interp_vectors/k2_gates.png)
+
+Four of the neurons on the full grid (a vertical, b horizontal). The gate pre-activation `g` is
+shown with its closed region hatched, then silu(g), up, and the neuron value.
+
+- **Split neurons (c12, c21).** The gate reads `a`, so it is a set of horizontal stripes. It is open
+  on 76-86 % of the prompts and closes only in a band of `a` residues half a period from the gate's
+  peak: for c12, `a mod 50` from about 20 to 33, around `2.1 + 25`. Up reads `b` (vertical stripes).
+  The product is a lattice of blobs. Each blob is the conjunction "`a` near 2 mod 50 **and** `b` near
+  21 mod 50" (positive) or "`a` near 2 **and** `b` near 46" (negative).
+- **Both-operand neurons (c27, c36).** The gate reads a weighted mix of `a` and `b`, so its open
+  region is a pattern of patches, and the value has blobs where both inputs are large.
+- **Effect of closing.** The gates are open on most prompts (68-86 %), so silu mostly acts as a
+  smooth multiplier, not a switch. Closing removes the negative half of the gate's wave. That adds
+  higher harmonics (other periods), but the period-50 part keeps the phase the identity predicts.
+
+The diagonal line `a = b` in some panels is a separate token-level effect and plays no part here.
+
+#### Step 3: one neuron draws a line; a circle needs several
+
+A neuron writes `act_n · w_n`, always along the same direction `w_n`. As the prompts vary, it can
+only push the stream back and forth along one line. Group the prompts by `(a + b) mod 50` and its
+class means lie on a segment through the origin, along `w_n` (first column of the next figure). A
+segment is one coordinate of a circle. The circle `r (cos θ e1 + sin θ e2)` needs a cosine along one
+direction and a sine along another. So **at least two neurons, writing along different directions,
+are needed to draw the `a + b` circle**. This is question 3 again, on the output side.
+
+**The spoke rule.** The segments add up to the circle only if each neuron pushes toward the right
+place: its write direction must point at the position, on the result circle, of the residue where
+its own `a + b` wave peaks. The section 1 table showed this holds for writers across the network
+("spokes"). Here it holds for all seven neurons: compare "write points at" with the peak of
+"value: a + b" in the table (22.8 vs 23.5, 37.1 vs 36.5, 23.4 vs 23.7, 34.1 vs 35.9, 1.9 vs 49.3,
+8.7 vs 7.1, 17.0 vs 16.9). The arrows in the right panel of the circles figure show it directly.
+The seven write directions also point at five different residues (about 2, 9, 17, 23 and 34-37),
+spread around the circle, so they span the plane.
+
+#### Step 4: the textbook version of the trick
+
+![textbook](figures_auto_interp_vectors/k2_textbook.png)
+
+Synthetic example, not model data. The four angle-addition identities are
+
+```
+cos(a + b) = cos a cos b − sin a sin b        cos(a − b) = cos a cos b + sin a sin b
+sin(a + b) = sin a cos b + cos a sin b        sin(a − b) = sin a cos b − cos a sin b
+```
+
+(writing `a` for `θ(a)`). Take four neurons, each computing one product, written along `+e1`, `−e1`,
+`+e2`, `+e2`. Their total is `e1 (cos a cos b − sin a sin b) + e2 (sin a cos b + cos a sin b)`, which
+is `e1 cos(a + b) + e2 sin(a + b)`: the `a + b` circle. Each product, though, is half `a + b` and
+half `a − b` (top and bottom rows). The `a − b` halves appear with opposite signs in the two rows of
+each identity. `cos a cos b` and `sin a sin b` each contain `+½ cos(a − b)`, but they are written
+along `+e1` and `−e1`, so those halves cancel. The minus sign that `cos(a + b)` needs is supplied
+by the write direction. That same sign is what removes `cos(a − b)`.
+
+This answers questions 1 and 3 in the ideal case. Without the `sin a sin b` neuron, the
+`cos a cos b` neuron alone would write `½ cos(a + b) + ½ cos(a − b)`, with nothing to cancel the
+second term. The sine reads are what remove `a − b`.
+
+#### Step 5: the measured version: arrows that add or cancel
+
+![cancel](figures_auto_interp_vectors/k2_cancel.png)
+
+The same picture with the seven real neurons. Top row, prompts grouped by `(a + b) mod 50`: each
+neuron alone draws a segment along its own write direction; the seven added draw the circle; the
+whole MLP draws the same circle. Bottom row, the same writes grouped by `(a − b) mod 50`: each
+neuron alone draws a segment about as long as its `a + b` segment, but **the seven added collapse to
+a small smudge**. The third panel shows the whole MLP's `a − b` write in the plane where it is
+largest, the most favourable view for `a − b`. Even there it is a loop about 40 % the size of the
+`a + b` circle.
+
+**Why the `a + b` parts align and the `a − b` parts do not.** Take a split neuron whose gate reads
+`a` at phase `φ` and whose up reads `b` at phase `ψ`. By step 2, its `a + b` wave peaks at `φ + ψ`
+and its `a − b` wave at `φ − ψ`. By the spoke rule, its write direction points at residue `φ + ψ`.
+Its `a − b` wave is therefore rotated away from its write direction by `(φ + ψ) − (φ − ψ) = 2ψ`:
+twice the phase at which it reads `b`.
+
+- If every neuron read `b` at the same phase, the rotations would all be equal. The `a − b` parts
+  would then line up as well as the `a + b` parts, and the MLP would draw an `a − b` circle as large
+  as the `a + b` one.
+- The four split neurons read `b` at 20.9, 25.5, 33.5 and 38.2. Doubled (mod 50) these are 41.8,
+  1.0, 17.0 and 26.4, spread around the whole circle, so the `a − b` parts point in different
+  directions. The predicted rotations, 2ψ converted to degrees, are −59°, 7°, 122° and −170°; the
+  measured ones are −54°, 11°, 141° and −175° (figure below).
+
+![phasors](figures_auto_interp_vectors/k2_phasors.png)
+
+Each arrow is one neuron's contribution to the circle in the plane of the `a + b` write. Its length
+is how much the neuron writes. Its angle is how far the neuron's write direction is rotated from the
+peak of its own wave. Arrows are added head to tail; the dashed line is the total.
+
+- For `a + b`, all seven arrows lie within 19° of the horizontal. The total, 1.31, is almost the sum of
+  the lengths, 1.33.
+- For `a − b`, the angles are −54°, 11°, 151°, −175°, 141°, −52° and 134°. The total is 0.10 out of
+  1.03.
+- c21 and c22 show the textbook pair in the wild. They read `b` at 25.5 and 38.2, 12.7 residues
+  apart: almost exactly a quarter period, a cosine and a sine of `b` relative to each other. Their
+  `a + b` arrows agree (5°, −13°) and their `a − b` arrows are opposite (11°, −175°).
+
+**Cancellation inside one neuron.** c27 reads both operands in both inputs, at the same phase in
+each input: its gate peaks at about 31.6 for both `a` and `b`, its up at about 43. The two inputs
+are 11.6 residues apart, close to a quarter period. In textbook form, with equal weights for simplicity, its gate is
+`cos a + cos b` and its up is `sin a + sin b`, and
+
+```
+(cos a + cos b)(sin a + sin b) = sin(a + b) + ½ sin 2a + ½ sin 2b
+```
+
+has no `a − b` term at all: the two cross terms `cos a sin b` and `cos b sin a` cancel each other's
+`a − b` parts. Measured, c27's `a − b` wave is 0.20 against 0.66 for `a + b`. (The leftover terms
+`½ sin 2a` and `½ sin 2b` are period-25 codes of each operand.)
+
+**In all 4,096 dimensions.** The figures show planes. In the full stream, measure a write by its
+**power**: the squared length of its period-50 coefficient vector (Tool 1, all 4,096 channels).
+For the whole MLP:
+
+| | a + b | a − b |
+|---|---|---|
+| summed power of the neurons' writes taken one at a time (`Σ_n \|w_n\|² \|A_n\|²`, `A_n` = the neuron's coefficient) | 0.46 | 0.32 |
+| power of their sum (the MLP's actual write) | 0.90 | 0.15 |
+| ratio: > 1 means the neurons reinforce, < 1 that they cancel | 1.94 | 0.46 |
+
+The neurons' `a + b` writes reinforce each other (×1.94) and their `a − b` writes cancel (×0.46). The
+MLP's `a − b` write ends up with 16 % of the power of its `a + b` write. Inside the result plane the
+cancellation is almost complete (0.10 out of 1.03 above), so most of the leftover lies in other
+directions. In the stream at `=`, `(a + b) mod 50` grows from 0.2 % to 4.5 % of the variance across
+the MLP, while `(a − b) mod 50` grows from 0.6 % to 1.0 %. The 0.6 % was there before, from the early
+comparator of section 1. Whether any later layer reads the leftover `a − b` write was not checked.
+
+#### Step 6: subtraction uses the same neurons
+
+On subtraction, the L15 MLP has mirrored `b` (`b → −b`) in the stream these neurons read (section
+5). The same reads now see `θ(−b) = −θ(b)`, so in every formula above `a + b` and `a − b` swap
+roles. The same seven neurons, with the same weights, line up their `a − b` parts (reinforcement
+×1.60) and cancel their `a + b` parts (×0.54), and they carry 71 % of the MLP's `a − b` write.
+
+#### Step 7: what else the product writes
+
+The first three terms of the expansion in step 2 are not about the result:
+
+- `g0 · δ cos Y` re-writes `b`'s own code, scaled by the gate's mean. The gate means are positive
+  (+0.5 to +1.2), because these gates are open most of the time.
+- `u0 · α cos X` does the same for `a`.
+
+The L18 MLP's period-50 write along `b` is in fact larger than its write along `a + b` (power 1.07
+against 0.90), and its write along `a` is 0.55. This report does not follow those writes further.
+
+#### What the example shows
+
+- **Questions 1 and 2.** A product of two waves always yields the sum and the difference with equal
+  weight, so the selection of `a + b` cannot happen inside a typical neuron. It happens when the
+  neurons' writes are added. Each neuron points its write direction at the peak of its `a + b` wave,
+  so the `a + b` parts line up. Its `a − b` part is then rotated by twice its `b` phase, and with `b`
+  read at spread-out phases these rotated parts cancel.
+- **Question 3.** Yes, the sine parts are needed, and the MLP has them. No neuron reads "only
+  `cos a`". Each reads one phase, and the seven neurons read seven different phases of `a` and
+  several of `b`. Their writes point at five different residues, enough to span the result plane.
+  One neuron (c27) holds a cosine and a sine of both operands in its two inputs.
+- **The gate.** Here it is mostly open and acts as a multiplier. Where it closes, it turns the
+  neuron into a detector of a window of `a` (or of `a` and `b`), without changing the period-50
+  phase.
+
+
+### 3.2 Period by period: which MLP makes which period, and how
 
 **Exact bookkeeping.** On the full grid the neuron output `act = silu(g)·u` has, as its 2-D DFT,
 the circular convolution of the DFTs of `s = silu(g)` and `u`. So every neuron's coefficient on
@@ -975,8 +1270,9 @@ Mode shares of the odd write: k2 B 0.94; k10 B 0.75 / A 0.25; k20 A 0.96.
   - `qk.py`;
   - `mlp_units.py` + `mlp_analysis.py`;
   - `mirror_neurons.py` + `mirror.py` (the b-mirror of section 5);
+  - `case_k2.py` (the period-50 worked example of section 3.1);
   - `routing.py` (section 2.1-2.2 numbers) and `figures.py` `routing` / `operand_separation`;
-  - `mlp_periods.py` + `periods_summary.py` + `periods_compare.py` (section 3.1; the
+  - `mlp_periods.py` + `periods_summary.py` + `periods_compare.py` (section 3.2; the
     component-only rebuild is `mlp_periods <layer> comp|comp_mean`);
   - `output.py`;
   - `figures.py`;
@@ -987,5 +1283,6 @@ Mode shares of the odd write: k2 B 0.94; k10 B 0.75 / A 0.25; k20 A 0.96.
   - `mlp/L*.npz`, `mlp_units.parquet`;
   - `mirror/L14-16_neurons.npz` (all 14,336 neurons at `=`);
   - `periods/L14-31.npz`, `periods/summary.npz`;
+  - `case_k2.npz` (section 3.1);
   - `figs/`.
 - sbatch files: `~/pd_scratch/dual_obj_jax/arith_repr/vectors/`.
