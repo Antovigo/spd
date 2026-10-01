@@ -599,5 +599,47 @@ def figures() -> None:
     table(z)
 
 
+def applet() -> None:
+    """Data for the interactive page: per-prompt gate / up values of the seven neurons (both ops),
+    their period-50 coefficients, full write vectors, and a 4-D view basis (the a + b write plane,
+    then the plane of the a - b write's part outside it). -> OUT/case_k2_applet.json"""
+    import base64
+    import json
+
+    assert ml_dtypes.bfloat16
+    z = dict(np.load(FILE))
+    top = z["top"]
+    W = Weights().get(f"model.layers.{L}.mlp.down_proj.weight").astype(np.float32)[:, top]
+    A = z["act_coef_o0"]
+    Tp, Tm = W @ A[:, LINE_IX["sum"]], W @ A[:, LINE_IX["diff"]]
+    Bp = plane(Tp)
+    Bo = plane(Tm - Bp.T @ (Bp @ Tm))
+    basis = np.concatenate([Bp, Bo])  # (4, 4096)
+
+    def b64(x: np.ndarray, dtype: Any) -> str:
+        return base64.b64encode(np.ascontiguousarray(x.astype(dtype)).tobytes()).decode()
+
+    def cpx(x: np.ndarray) -> list[Any]:
+        return np.stack([np.real(x), np.imag(x)], -1).round(5).tolist()
+
+    out = {
+        "neurons": [int(n) for n in top],
+        "units": [int(c) for c in z["unit"]],
+        "g": [b64(np.round(z[f"g_o{o}"] * 1000), np.int16) for o in range(2)],
+        "u": [b64(np.round(z[f"u_o{o}"] * 1000), np.int16) for o in range(2)],
+        "act_coef": [cpx(z[f"act_coef_o{o}"]) for o in range(2)],
+        "g_coef": [cpx(z[f"g_coef_o{o}"]) for o in range(2)],
+        "u_coef": [cpx(z[f"u_coef_o{o}"]) for o in range(2)],
+        "W": b64(W.T, np.float32),  # (7, 4096)
+        "view": (W.T @ basis.T).round(5).tolist(),  # (7, 4): each write vector in the 4-D view
+        "power": {
+            "coh": [z[f"coh_o{o}"].round(4).tolist() for o in range(2)],
+            "inc": [z[f"inc_o{o}"].round(4).tolist() for o in range(2)],
+        },  # fmt: skip
+    }
+    (OUT / "case_k2_applet.json").write_text(json.dumps(out))
+    print("wrote", OUT / "case_k2_applet.json")
+
+
 if __name__ == "__main__":
-    {"compute": compute, "figures": figures}[sys.argv[1]]()
+    {"compute": compute, "figures": figures, "applet": applet}[sys.argv[1]]()
