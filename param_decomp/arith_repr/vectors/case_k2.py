@@ -458,6 +458,136 @@ def table(z: dict[str, np.ndarray]) -> None:
         )
 
 
+def fig_planes(z: dict[str, np.ndarray]) -> None:
+    """Why the a - b leftover lands outside the a + b plane: the pair rule (sum vs difference of two
+    write vectors), a 3-D toy, and the measured shares."""
+    assert ml_dtypes.bfloat16
+    top = z["top"]
+    W = Weights().get(f"model.layers.{L}.mlp.down_proj.weight").astype(np.float32)[:, top]
+    A = z["act_coef_o0"]
+    Tp, Tm = W @ A[:, LINE_IX["sum"]], W @ A[:, LINE_IX["diff"]]
+    Bp = plane(Tp)
+    share_w = ((Bp @ W) ** 2).sum(0) / (W**2).sum(0)
+    in_top = float((np.abs(Bp @ Tm) ** 2).sum() / (np.abs(Tm) ** 2).sum())
+    y = z["mlp_w_sum_o0"]  # whole MLP write in the plane of its a + b write, per prompt
+    in_mlp = float(
+        (np.abs(line_dft(y.reshape(100, 100, 2))[LINE_IX["diff"], K - 1]) ** 2).sum()
+    ) / float(z["coh_o0"][LINE_IX["diff"]])
+    print(
+        f"a - b write inside the a + b plane: top {len(top)} {in_top:.2f}, whole MLP {in_mlp:.2f}"
+    )
+    fig = plt.figure(figsize=(17, 5.6))
+    # A: the pair rule
+    ax: Any = fig.add_subplot(1, 3, 1)
+    for x0, ang, ttl in (
+        (0.0, 0.0, "ideal: w1 = w2"),
+        (3.2, 62.0, "measured pair n1448, n6339:\nangle 62° (cos 0.47), equal lengths"),
+    ):
+        h = np.radians(ang / 2)
+        w1, w2 = np.array([np.cos(h), np.sin(h)]), np.array([np.cos(h), -np.sin(h)])
+        o = np.array([x0, 0.0])
+        for w, c, lab in ((w1, NEURON_COLORS[1], "w1"), (w2, NEURON_COLORS[3], "w2")):
+            ax.annotate("", xy=o + w, xytext=o, arrowprops=dict(arrowstyle="-|>", color=c, lw=1.8))
+            if ang > 0:
+                ax.text(*(o + w * 1.08), lab, color=c, fontsize=9)
+        if ang == 0:
+            ax.text(*(o + np.array([0.1, 0.45])), "w1 = w2", color=INK2, fontsize=9)
+        sm, df = (w1 + w2) / 2, (w1 - w2) / 2
+        ax.annotate(
+            "", xy=o + sm, xytext=o, arrowprops=dict(arrowstyle="-|>", color=C_SUM, lw=3, alpha=0.8)
+        )
+        ax.text(
+            *(o + sm + np.array([0.05, -0.32 if ang == 0 else -0.12])),
+            "a + b:\n(w1 + w2)/2",
+            color=C_SUM,
+            fontsize=8.5,
+        )
+        if np.linalg.norm(df) > 1e-6:
+            ax.annotate(
+                "", xy=o + df, xytext=o, arrowprops=dict(arrowstyle="-|>", color=C_DIFF, lw=3)
+            )
+            ax.text(
+                *(o + df + np.array([-0.15, 0.1])),
+                "a − b:\n(w1 − w2)/2",
+                color=C_DIFF,
+                fontsize=8.5,
+            )
+            ax.plot(*(o + np.array([[0.09, 0], [0.09, 0.09], [0, 0.09]])).T, color=INK2, lw=0.8)
+        else:
+            ax.text(
+                *(o + np.array([0.1, 0.25])), "a − b: (w1 − w2)/2 = 0", color=C_DIFF, fontsize=8.5
+            )
+        ax.text(x0 + 0.5, -0.95, ttl, ha="center", fontsize=8.5, color=INK)
+    ax.set_xlim(-0.3, 4.6)
+    ax.set_ylim(-1.1, 1.0)
+    _plain(ax, "A. Two neurons with the same a + b phase and opposite a − b phases:\n"
+           "a + b is written along w1 + w2, a − b along w1 − w2")  # fmt: skip
+    # B: a 3-D toy
+    ax = fig.add_subplot(1, 3, 2, projection="3d")
+    i = np.arange(10000)
+    ta, tb = 2 * np.pi * (i // 100 + 1) / T, 2 * np.pi * (i % 100 + 1) / T
+    hgt, s_ = 0.45, 0.15
+    vals = (
+        np.cos(ta) * np.cos(tb),
+        -np.sin(ta) * np.sin(tb),
+        np.cos(ta) * np.sin(tb),
+        np.sin(ta) * np.cos(tb),
+    )
+    ws = np.array([[1, 0, hgt], [1, 0, -hgt], [-s_, 1, 0], [s_, 1, 0]], float)
+    ws /= np.linalg.norm(ws, axis=1, keepdims=True)
+    th = np.linspace(0, 2 * np.pi, 80)
+    ax.plot_trisurf(
+        np.r_[0, np.cos(th)] * 1.3,
+        np.r_[0, np.sin(th)] * 1.3,
+        np.zeros(81),
+        color=C_SUM,
+        alpha=0.08,
+    )
+    for line, col in (("sum", C_SUM), ("diff", C_DIFF)):
+        pts = np.sum(
+            [class_means(v, line)[:, None] * w[None] for v, w in zip(vals, ws, strict=True)], 0
+        )
+        pts = np.r_[pts, pts[:1]]
+        ax.plot(*pts.T, color=col, lw=2.2)
+        ax.scatter(*pts[:-1].T, color=col, s=8)
+    for j, w in enumerate(ws):
+        ax.quiver(0, 0, 0, *w, color=NEURON_COLORS[j], lw=1.6, arrow_length_ratio=0.12)
+    ax.set_xlim(-1.2, 1.2)
+    ax.set_ylim(-1.2, 1.2)
+    ax.set_zlim(-1.2, 1.2)
+    ax.set_box_aspect((1, 1, 1))
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.set_zticks([])
+    ax.view_init(elev=18, azim=-60)
+    ax.set_title("B. Toy: four write vectors (arrows) that agree in the shaded plane\nbut not above / below it. "
+                 "Green: a + b classes (circle, in the plane);\namber: a − b classes (small loop, mostly vertical)",
+                 fontsize=8.5)  # fmt: skip
+    # C: measured
+    ax = fig.add_subplot(1, 3, 3)
+    labels = [f"w of n{n}" for n in top] + [
+        "a + b write",
+        f"a − b write\n({len(top)} neurons)",
+        "a − b write\n(whole MLP)",
+    ]
+    vals_in = np.r_[share_w, 1.0, in_top, in_mlp]
+    yy = np.arange(len(labels))[::-1]
+    ax.barh(yy, vals_in, color=[GRAY] * len(top) + [C_SUM, C_DIFF, C_DIFF], height=0.65)
+    ax.barh(yy, 1 - vals_in, left=vals_in, color=FAINT, height=0.65)
+    for y_, v in zip(yy, vals_in, strict=True):
+        ax.text(v + 0.01, y_, f"{v:.0%}", va="center", fontsize=8, color=INK)
+    ax.set_yticks(yy)
+    ax.set_yticklabels(labels, fontsize=8)
+    ax.set_xlim(0, 1.0)
+    ax.set_xlabel("share of the squared length inside the plane of the a + b write", fontsize=8)
+    for sp in ("top", "right"):
+        ax.spines[sp].set_visible(False)
+    ax.tick_params(labelsize=7)
+    ax.set_title("C. Measured (L18, period 50, addition)", fontsize=8.5)
+    fig.suptitle("Why the a − b leftover lands outside the a + b plane", fontsize=10.5, color=INK2)
+    save(fig, "k2_planes")
+
+
 def figures() -> None:
     z = dict(np.load(FILE))
     fig_textbook()
@@ -465,6 +595,7 @@ def figures() -> None:
     fig_gates(z)
     fig_cancel(z)
     fig_phasors(z)
+    fig_planes(z)
     table(z)
 
 

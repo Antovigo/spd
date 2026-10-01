@@ -949,9 +949,43 @@ For the whole MLP:
 The neurons' `a + b` writes reinforce each other (×1.94) and their `a − b` writes cancel (×0.46). The
 MLP's `a − b` write ends up with 16 % of the power of its `a + b` write. Inside the result plane the
 cancellation is almost complete (0.10 out of 1.03 above), so most of the leftover lies in other
-directions. In the stream at `=`, `(a + b) mod 50` grows from 0.2 % to 4.5 % of the variance across
+directions (next paragraphs). In the stream at `=`, `(a + b) mod 50` grows from 0.2 % to 4.5 % of the variance across
 the MLP, while `(a − b) mod 50` grows from 0.6 % to 1.0 %. The 0.6 % was there before, from the early
 comparator of section 1. Whether any later layer reads the leftover `a − b` write was not checked.
+
+**Where the leftover goes: another plane, by geometry rather than by design.** Nothing in the MLP
+sends `a − b` somewhere separate. Each neuron writes both of its waves along the same direction
+`w_n`. The MLP's `a + b` write is one weighted sum of the seven vectors `w_n`. Its `a − b` write is
+another weighted sum of the same seven vectors, with each weight rotated by `2ψ_n`. Two different
+weightings of the same vectors point in different directions.
+
+![planes](figures_auto_interp_vectors/k2_planes.png)
+
+- **The pair rule (panel A).** n1448 and n6339 have almost the same `a + b` phase (36.5 and 35.9).
+  Their `a − b` phases are almost opposite: 35.5 and 8.4, 27 residues apart, about half a period.
+  Their amplitudes are similar (0.76 and 0.69). So the pair writes `a + b` along `w1 + w2` and
+  `a − b` along `w1 − w2`, where `w1` and `w2` are the two neurons' write directions.
+  - In the ideal circuit `w1 = w2`, so `w1 − w2 = 0` and there is no `a − b` at all.
+  - In the model the two write vectors have the same length (0.77 and 0.76) but are 62° apart
+    (cosine 0.47). For any two vectors of equal length, the sum and the difference are
+    perpendicular, because `(w1 + w2) · (w1 − w2) = |w1|² − |w2|² = 0`. The pair's `a − b` leftover
+    is therefore automatically at right angles to its `a + b` write.
+- **Why the leftover leaves the plane.** Inside the `a + b` plane, `w1` and `w2` point at residues
+  37.1 and 34.1, only 22° apart. Most of their 62° disagreement lies outside the plane: only about
+  10 % of the squared length of `w1 − w2` is inside it.
+- **For all seven neurons.** Each neuron's write vector has only 40-79 % of its squared length
+  inside the `a + b` plane (panel C); the rest points in other directions. In the `a + b` sum those
+  other parts cancel exactly, since the `a + b` write lies in its own plane by definition. With the
+  rotated weights of the `a − b` sum they do not cancel, and the leftover is left mostly outside the
+  plane. Panel B is a three-dimensional toy of this: four write vectors agree in the shaded plane and
+  differ above and below it. The `a + b` classes draw the circle in the plane, and the `a − b`
+  classes draw a small loop standing mostly upright.
+- **Measured.** 15 % of the power of the seven neurons' `a − b` write lies inside the `a + b` plane,
+  and 12 % for the whole MLP. Between the two planes, the principal cosines are 0.61 and 0.10: they
+  share about one direction partly and are otherwise unrelated.
+- **What is out there.** The parts of the write vectors outside the `a + b` plane carry whatever else
+  the neurons write; step 7 shows they also re-write the operands' own codes. Those parts have not
+  been decomposed further.
 
 #### Step 6: subtraction uses the same neurons
 
