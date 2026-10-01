@@ -212,16 +212,15 @@ def arrows(ax: Any, Z: np.ndarray, m: float, labels: list[str], dashed: bool = F
 
 def fig_circles(z: dict[str, np.ndarray]) -> None:
     """The three circles of the case study (add), with the neurons' reads and writes drawn on them."""
-    unit = z["unit"]
     fig, axes = plt.subplots(1, 3, figsize=(14, 5))
     ga, ub = z["g_coef_o0"][:, 0], z["u_coef_o0"][:, 1]
     specs = (
         ("a", z["xa_o0"], "a mod 50 at '=', in the stream the L18 MLP reads\narrows: what each gate reads of a",
-         np.conj(ga), [f"c{c}" for c in unit]),
+         np.conj(ga), [f"n{n}" for n in z["top"]]),
         ("b", z["xb_o0"], "b mod 50, same stream\narrows: what each up reads of b", np.conj(ub),
-         [f"c{c}" for c in unit]),
+         [f"n{n}" for n in z["top"]]),
         ("sum", z["xres_o0"], "(a + b) mod 50, right after the L18 MLP's add\n"
-         "arrows: each neuron's down vector; label = the a + b residue\nwhere the neuron's value peaks", None, [f"c{c}" for c in unit]),
+         "arrows: each neuron's down vector; label = the a + b residue\nwhere the neuron's value peaks", None, [f"n{n}" for n in z["top"]]),
     )  # fmt: skip
     for ax, (line, x, title, zs, lab) in zip(axes, specs, strict=True):
         pts = class_means(x, line)
@@ -230,7 +229,7 @@ def fig_circles(z: dict[str, np.ndarray]) -> None:
             P = z["P_res_o0"]  # (7, 2): down vectors in the result plane
             zs = P[:, 0] + 1j * P[:, 1]
             pk = peak(z["act_coef_o0"][:, LINE_IX["sum"]])
-            lab = [f"c{c}: {p:.0f}" for c, p in zip(unit, pk, strict=True)]
+            lab = [f"n{n}: {p:.0f}" for n, p in zip(z["top"], pk, strict=True)]
         arrows(ax, zs, m, lab)
         ax.set_xlim(-1.5 * m, 1.5 * m)
         ax.set_ylim(-1.5 * m, 1.5 * m)
@@ -262,7 +261,7 @@ def fig_gates(z: dict[str, np.ndarray]) -> None:
                 ax.contour(
                     np.arange(1, 101), np.arange(1, 101), g, levels=[0], colors=INK, linewidths=0.8
                 )
-            ax.set_title(f"neuron {top[j]} (down c{unit[j]}): {lab}", fontsize=7.5, color=INK)
+            ax.set_title(f"n{top[j]} (read by down c{unit[j]}): {lab}", fontsize=7.5, color=INK)
             ax.set_xlabel("b", fontsize=7)
             ax.set_ylabel("a", fontsize=7)
             ax.tick_params(labelsize=6)
@@ -333,7 +332,7 @@ def _plain(ax: Any, title: str) -> None:
 def fig_cancel(z: dict[str, np.ndarray]) -> None:
     """Measured: each neuron alone draws a line for a + b and for a - b; together they draw the a + b
     circle and cancel the a - b one."""
-    top, unit = z["top"], z["unit"]
+    top = z["top"]
     act = silu(z["g_o0"]) * z["u_o0"]  # (7, 10000)
     P = z["P_w_sum_o0"]  # (7, 2) down vectors in the plane of the MLP's a + b write
     zoom = 2.0
@@ -349,7 +348,7 @@ def fig_cancel(z: dict[str, np.ndarray]) -> None:
             end = pts[np.argmax(np.linalg.norm(pts, axis=1))]
             ax.text(
                 *(end * 1.18),
-                f"c{unit[j]}",
+                f"n{top[j]}",
                 fontsize=7,
                 color=NEURON_COLORS[j],
                 ha="center",
@@ -385,7 +384,6 @@ def fig_cancel(z: dict[str, np.ndarray]) -> None:
 
 def fig_phasors(z: dict[str, np.ndarray]) -> None:
     """Each neuron's contribution to the circle as an arrow (amplitude and angle), added head to tail."""
-    unit = z["unit"]
     P = z["P_w_sum_o0"]
     Pc = P[:, 0] + 1j * P[:, 1]
     fig, axes = plt.subplots(1, 2, figsize=(13, 3.6))
@@ -405,7 +403,7 @@ def fig_phasors(z: dict[str, np.ndarray]) -> None:
             ax.text(
                 mid.real,
                 mid.imag + 0.04 * lim,
-                f"c{unit[j]}",
+                f"n{z['top'][j]}",
                 fontsize=7,
                 color=NEURON_COLORS[j],
                 ha="center",

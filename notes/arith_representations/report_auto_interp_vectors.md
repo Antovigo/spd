@@ -727,11 +727,27 @@ Code: `param_decomp/arith_repr/vectors/case_k2.py`. Data: `<run>/analysis/arith_
   - the neuron **writes** `act_n · w_n` to the stream, where `w_n`, column `n` of `W_down`, is a
     fixed 4,096-vector: the neuron's **write direction**. The MLP's output is the sum of the
     14,336 neurons' writes.
-- **Unit.** The report names a neuron by the alive down component that reads it ("unit c12" is
-  neuron 12,778). From the neuron-aligned initialisation, the gate, up and down components with the
-  same index sit on the same neuron. At the component level, the gate component with the unit's own
-  index carries 12-42 % of the neuron's period-50 input, and shared gate directions (c21, c22, c61)
-  carry the rest. This section therefore works with the neurons.
+- **Naming: neurons, not components.** This section works with the model's own neurons and names
+  them by index (`n12778`). Each of the seven is also the neuron that one alive L18 down component
+  reads most, so `n12778` is "the neuron read by down c12". A down component is a rank-1 piece of
+  `W_down`: its read vector `V` weights a few neurons and its write vector `U` is one direction of the
+  stream. For the three neurons with the largest share of the write:
+
+  | | down c12 | down c21 | down c27 |
+  |---|---|---|---|
+  | neuron its `V` reads most | n12778 | n1448 | n61 |
+  | share of the squared weights of `V` on that neuron | 0.49 | 0.50 | 0.54 |
+  | effective number of neurons in `V` (participation ratio) | 4.2 | 4.0 | 3.4 |
+  | cosine of its `U` with that neuron's write direction `w_n` | 0.89 | 0.84 | 0.71 |
+
+  So a down component is mostly its neuron, plus small weights on the other adder neurons (down c12
+  also reads n61, n8343 and n1448 at 0.12-0.16 of its top weight). The gate and up components with
+  the same index are a different matter: gate c12 puts only 1 % of its write (`|U|²`) on n12778, and
+  up c12 4 %. They are read directions shared by many neurons, and a neuron's period-50 input is
+  spread over several of them. The gate or up component with the down component's index is
+  usually the largest single feeder, but it carries only 8-42 % of the neuron's period-50 input
+  (measured as `U_c[n]` times the component's coefficient, Tool 6). A shared index therefore names
+  a neuron's write, not its reads.
 
 #### Step 1: what goes in is two circles
 
@@ -756,15 +772,15 @@ In the figure, each arrow points at the residue a neuron's read peaks at, and it
 read's amplitude. The seven gates read `a` at seven different phases (left), and the ups read `b`
 at several phases (middle). The table lists every read:
 
-| unit (neuron) | gate reads a | gate reads b | up reads a | up reads b | value: a + b wave | value: a − b wave | write points at | gate open | share of the a + b write |
+| neuron (down component reading it) | gate reads a | gate reads b | up reads a | up reads b | value: a + b wave | value: a − b wave | write points at | gate open | share of the a + b write |
 |---|---|---|---|---|---|---|---|---|---|
-| c12 (12778) | **1.29 @2.1** | 0.33 @37.6 | 0.15 @39.2 | **1.67 @20.9** | 0.94 @23.5 | 0.77 @30.3 | 22.8 | 86 % | 0.25 |
-| c21 (1448) | **1.34 @10.4** | 0.26 @37.9 | 0.29 @5.2 | **1.34 @25.5** | 0.76 @36.5 | 0.68 @35.5 | 37.1 | 76 % | 0.17 |
-| c27 (61) | **0.81 @30.8** | **1.27 @32.5** | **0.80 @41.8** | **0.82 @44.7** | 0.66 @23.7 | 0.20 @2.5 | 23.4 | 69 % | 0.15 |
-| c22 (6339) | **1.03 @48.3** | 0.61 @45.3 | 0.42 @37.4 | **1.30 @38.2** | 0.69 @35.9 | 0.45 @8.4 | 34.1 | 85 % | 0.14 |
-| c25 (1768) | **1.06 @14.9** | 0.29 @38.5 | 0.22 @10.0 | **1.18 @33.5** | 0.52 @49.3 | 0.62 @32.4 | 1.9 | 79 % | 0.11 |
-| c36 (2372) | 0.54 @46.9 | **1.02 @21.5** | **0.93 @35.7** | 0.39 @13.1 | 0.47 @7.1 | 0.43 @15.9 | 8.7 | 70 % | 0.09 |
-| c61 (8343) | 0.59 @0.4 | **1.02 @8.1** | **0.91 @9.3** | 0.62 @12.5 | 0.45 @16.9 | 0.33 @48.4 | 17.0 | 68 % | 0.08 |
+| n12778 (c12) | **1.29 @2.1** | 0.33 @37.6 | 0.15 @39.2 | **1.67 @20.9** | 0.94 @23.5 | 0.77 @30.3 | 22.8 | 86 % | 0.25 |
+| n1448 (c21) | **1.34 @10.4** | 0.26 @37.9 | 0.29 @5.2 | **1.34 @25.5** | 0.76 @36.5 | 0.68 @35.5 | 37.1 | 76 % | 0.17 |
+| n61 (c27) | **0.81 @30.8** | **1.27 @32.5** | **0.80 @41.8** | **0.82 @44.7** | 0.66 @23.7 | 0.20 @2.5 | 23.4 | 69 % | 0.15 |
+| n6339 (c22) | **1.03 @48.3** | 0.61 @45.3 | 0.42 @37.4 | **1.30 @38.2** | 0.69 @35.9 | 0.45 @8.4 | 34.1 | 85 % | 0.14 |
+| n1768 (c25) | **1.06 @14.9** | 0.29 @38.5 | 0.22 @10.0 | **1.18 @33.5** | 0.52 @49.3 | 0.62 @32.4 | 1.9 | 79 % | 0.11 |
+| n2372 (c36) | 0.54 @46.9 | **1.02 @21.5** | **0.93 @35.7** | 0.39 @13.1 | 0.47 @7.1 | 0.43 @15.9 | 8.7 | 70 % | 0.09 |
+| n8343 (c61) | 0.59 @0.4 | **1.02 @8.1** | **0.91 @9.3** | 0.62 @12.5 | 0.45 @16.9 | 0.33 @48.4 | 17.0 | 68 % | 0.08 |
 
 Each read entry is "amplitude @ residue of the peak", in mod-50 residues: the period-50 wave of that
 pre-activation over the grid is `amplitude · cos(θ(q) − θ(peak))`. "Value" is the same for the neuron
@@ -773,12 +789,12 @@ result circle the write direction `w_n` points at. "Gate open" is the fraction o
 `g_n > 0`. The last column is the neuron's share of the MLP's whole period-50 `a + b` write; the
 seven sum to 0.98.
 
-Four neurons (c12, c21, c22, c25) **split the operands**: the gate reads `a` and up reads `b`. Two
-(c36, c61) split them the other way round. One (c27) reads both operands in both inputs.
+Four neurons (n12778, n1448, n6339, n1768) **split the operands**: the gate reads `a` and up reads `b`. Two
+(n2372, n8343) split them the other way round. One (n61) reads both operands in both inputs.
 
 #### Step 2: one neuron multiplies two waves and gets `a + b` and `a − b` alike
 
-Take c12. To a good approximation its gate is `g = g0 + α cos X` with `X = θ(a) − θ(2.1)`, and its
+Take n12778. To a good approximation its gate is `g = g0 + α cos X` with `X = θ(a) − θ(2.1)`, and its
 up is `u = u0 + δ cos Y` with `Y = θ(b) − θ(20.9)`. Here `g0` and `u0` are the means over prompts,
 and `α`, `δ` the amplitudes from the table. While the gate is open, `silu(g) ≈ g`, so the neuron
 value is roughly the product. The product-to-sum identity
@@ -802,7 +818,7 @@ The last two lines use `X + Y = θ(a) + θ(b) − θ(2.1) − θ(20.9) = θ(a + 
 `a + b` wave peaking at 23.5 and its `a − b` wave at 30.3, as predicted.
 
 **The `a − b` wave is not a small correction: the identity gives it the same amplitude as the `a + b`
-wave.** Measured, it is 0.77 against 0.94 for c12. Across all neurons, the `a − b` parts carry 69 %
+wave.** Measured, it is 0.77 against 0.94 for n12778. Across all neurons, the `a − b` parts carry 69 %
 as much power as the `a + b` parts (power is defined in step 5). No single neuron favours `a + b`
 much. The selection happens when the neurons' writes are added (steps 3-5).
 
@@ -813,12 +829,12 @@ much. The selection happens when the neurons' writes are added (steps 3-5).
 Four of the neurons on the full grid (a vertical, b horizontal). The gate pre-activation `g` is
 shown with its closed region hatched, then silu(g), up, and the neuron value.
 
-- **Split neurons (c12, c21).** The gate reads `a`, so it is a set of horizontal stripes. It is open
+- **Split neurons (n12778, n1448).** The gate reads `a`, so it is a set of horizontal stripes. It is open
   on 76-86 % of the prompts and closes only in a band of `a` residues half a period from the gate's
-  peak: for c12, `a mod 50` from about 20 to 33, around `2.1 + 25`. Up reads `b` (vertical stripes).
+  peak: for n12778, `a mod 50` from about 20 to 33, around `2.1 + 25`. Up reads `b` (vertical stripes).
   The product is a lattice of blobs. Each blob is the conjunction "`a` near 2 mod 50 **and** `b` near
   21 mod 50" (positive) or "`a` near 2 **and** `b` near 46" (negative).
-- **Both-operand neurons (c27, c36).** The gate reads a weighted mix of `a` and `b`, so its open
+- **Both-operand neurons (n61, n2372).** The gate reads a weighted mix of `a` and `b`, so its open
   region is a pattern of patches, and the value has blobs where both inputs are large.
 - **Effect of closing.** The gates are open on most prompts (68-86 %), so silu mostly acts as a
   smooth multiplier, not a switch. Closing removes the negative half of the gate's wave. That adds
@@ -903,11 +919,11 @@ peak of its own wave. Arrows are added head to tail; the dashed line is the tota
   the lengths, 1.33.
 - For `a − b`, the angles are −54°, 11°, 151°, −175°, 141°, −52° and 134°. The total is 0.10 out of
   1.03.
-- c21 and c22 show the textbook pair in the wild. They read `b` at 25.5 and 38.2, 12.7 residues
+- n1448 and n6339 show the textbook pair in the wild. They read `b` at 25.5 and 38.2, 12.7 residues
   apart: almost exactly a quarter period, a cosine and a sine of `b` relative to each other. Their
   `a + b` arrows agree (5°, −13°) and their `a − b` arrows are opposite (11°, −175°).
 
-**Cancellation inside one neuron.** c27 reads both operands in both inputs, at the same phase in
+**Cancellation inside one neuron.** n61 reads both operands in both inputs, at the same phase in
 each input: its gate peaks at about 31.6 for both `a` and `b`, its up at about 43. The two inputs
 are 11.6 residues apart, close to a quarter period. In textbook form, with equal weights for simplicity, its gate is
 `cos a + cos b` and its up is `sin a + sin b`, and
@@ -917,7 +933,7 @@ are 11.6 residues apart, close to a quarter period. In textbook form, with equal
 ```
 
 has no `a − b` term at all: the two cross terms `cos a sin b` and `cos b sin a` cancel each other's
-`a − b` parts. Measured, c27's `a − b` wave is 0.20 against 0.66 for `a + b`. (The leftover terms
+`a − b` parts. Measured, n61's `a − b` wave is 0.20 against 0.66 for `a + b`. (The leftover terms
 `½ sin 2a` and `½ sin 2b` are period-25 codes of each operand.)
 
 **In all 4,096 dimensions.** The figures show planes. In the full stream, measure a write by its
@@ -965,7 +981,7 @@ against 0.90), and its write along `a` is 0.55. This report does not follow thos
 - **Question 3.** Yes, the sine parts are needed, and the MLP has them. No neuron reads "only
   `cos a`". Each reads one phase, and the seven neurons read seven different phases of `a` and
   several of `b`. Their writes point at five different residues, enough to span the result plane.
-  One neuron (c27) holds a cosine and a sine of both operands in its two inputs.
+  One neuron (n61) holds a cosine and a sine of both operands in its two inputs.
 - **The gate.** Here it is mostly open and acts as a multiplier. Where it closes, it turns the
   neuron into a detector of a window of `a` (or of `a` and `b`), without changing the period-50
   phase.
@@ -995,9 +1011,10 @@ stream variance at `=`); colour is the dominant term. Code:
 `param_decomp/arith_repr/vectors/mlp_periods.py` (bookkeeping) and `periods_summary.py`
 (table, neurons, partners).
 
-**Addition, period by period.** Units are named by their down component. Gate, up and down share
-an index from the neuron-aligned init. Shares are of the layer's write at the period's main
-harmonic.
+**Addition, period by period.** Units are named by their down component, the alive down
+component that reads the neuron most. A gate or up component with the same index is usually the
+neuron's largest single feeder but not its only input (section 3.1). Shares are of the layer's
+write at the period's main harmonic.
 
 | period | made at | how | main units (share of the write) | what the unit reads |
 |---|---|---|---|---|
@@ -1022,8 +1039,10 @@ harmonic.
   squares their sum, which makes `(−1)^(a+b)`: an XOR computed inside the gate
   nonlinearity. Up only scales it.
 - **Built from components.** Neurons read by alive down components carry 97-100 % of every
-  creating write (82-97 % for the mixing ones). The inputs come from the unit's own gate/up
-  components (same index) plus a few shared read directions (e.g. gate c88, c18, c299).
+  creating write (82-97 % for the mixing ones). The largest single feeder of a neuron's input is
+  usually the gate/up component with the unit's index, but at L18 it carries only 8-42 % of the
+  period-50 input; the rest comes from shared read directions (e.g. gate c88, c18, c299 and the
+  other units' indices; section 3.1).
 - **Later layers re-derive the periods from each other (M, L21-L30).**
   - mod 5 ← k10 + k10 (0.62 at L21: the units-digit code squared);
   - mod 10 ← k20 − k10 (0.80 at L21);
@@ -1237,7 +1256,9 @@ Mode shares of the odd write: k2 B 0.94; k10 B 0.75 / A 0.25; k20 A 0.96.
   select exactly the component of b that must change sign under `b → −b`, and nothing else.
 - **What does the switching.** The components behind the whole mechanism are two op switches
   on the gate side (c72 sub-on, c9 add-on) and a signed op read on the up side (c117, c34).
-  Each unit is identified by one index across gate/up/down, from the neuron-aligned init.
+  The units are named by their down component. The gate and up components in the table are the
+  ones measured to feed each neuron; a shared index alone does not imply a shared neuron (section
+  3.1).
 - **Correction to the earlier version.** The "add-gated c21 vs sub-gated c72" example was
   mislabelled. c21 (mode B) is active on both ops with opposite signs; c72 (mode A) is the
   sub-on partner of c67.
