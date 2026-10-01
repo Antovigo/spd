@@ -74,6 +74,51 @@ def polar(M: np.ndarray) -> str:
     return f"rotation {phi:+.0f} deg, then stretch with eigenvalues {np.round(np.linalg.eigvalsh(S), 3)}"
 
 
+def who(act: np.ndarray, PW: np.ndarray, parts: dict[str, dict[str, np.ndarray]], top: np.ndarray,
+        out: dict[str, Any]) -> None:  # fmt: skip
+    """4. Per neuron n (all 14,336): its share of the circle, <S_n, S_w> / |S_w|^2, and its share of
+    the opposition to the stream's operand content, <A_n, A_in> / <A_w, A_in> (likewise B), where
+    A_n, B_n, S_n are the parts of neuron n's own write in the plane. Each set of shares sums to 1."""
+    n_neur = act.shape[1]
+    Ain, Bin, Sw = parts["in"]["A"], parts["in"]["B"], parts["write"]["S"]
+    a_in = cmeans(Ain, A_ - 1, 100)  # (100,) class means
+    b_in = cmeans(Bin, B_ - 1, 100)
+    s_w = cmeans(Sw, S_, T)
+    shS, shA, shB = (np.zeros(n_neur) for _ in range(3))
+    for c in range(0, n_neur, 1024):
+        zc = (
+            act[:, c : c + 1024] * PW[0, c : c + 1024]
+            + 1j * act[:, c : c + 1024] * PW[1, c : c + 1024]
+        )
+        zc = zc - zc.mean(0)
+        g = zc.reshape(100, 100, -1)
+        An = g.mean(1)  # (100 a values, n)
+        Bn = g.mean(0)  # (100 b values, n)
+        Sn = np.stack([zc[q == S_].mean(0) for q in range(T)])  # (50, n)
+        # balanced grid: <P_n, P_ref> over prompts = mean over class values of the class means
+        shA[c : c + 1024] = np.mean(np.real(An * np.conj(a_in)[:, None]), 0)
+        shB[c : c + 1024] = np.mean(np.real(Bn * np.conj(b_in)[:, None]), 0)
+        shS[c : c + 1024] = np.mean(np.real(Sn * np.conj(s_w)[:, None]), 0)
+    shA, shB, shS = shA / shA.sum(), shB / shB.sum(), shS / shS.sum()
+    print("\n4. who does what (shares sum to 1 over all 14,336 neurons)")
+    print(f"   the seven circle neurons {list(map(int, top))}:")
+    print(
+        f"      circle {shS[top].sum():.3f} | opposition to a {shA[top].sum():.3f} | to b {shB[top].sum():.3f}"
+    )
+    for n in top:
+        print(f"      n{n}: circle {shS[n]:+.3f}  a {shA[n]:+.3f}  b {shB[n]:+.3f}")
+    for nm, sh in (("a", shA), ("b", shB)):
+        order = np.argsort(-sh)
+        k = int(np.searchsorted(np.cumsum(sh[order]), 0.8)) + 1
+        print(f"   opposition to {nm}: top 10 {sh[order[:10]].sum():.3f}, {k} neurons reach 0.8; top 10 = "
+              + ", ".join(f"n{i} {sh[i]:.3f} (circle {shS[i]:+.3f})" for i in order[:10]))  # fmt: skip
+    others = np.setdiff1d(np.arange(n_neur), top)
+    print(
+        f"   all other neurons: circle {shS[others].sum():.3f}, a {shA[others].sum():.3f}, b {shB[others].sum():.3f}"
+    )
+    out.update(share_circle=shS, share_a=shA, share_b=shB)
+
+
 def main() -> None:
     assert ml_dtypes.bfloat16
     z7 = dict(np.load(K2))
@@ -153,6 +198,7 @@ def main() -> None:
             out[f"c_{k}_{qn}"] = np.array([cp, cm])
         print(f"   {k:7s} " + " | ".join(cells))
     print("   (scale: rms size of x_out in the plane =", f"{np.sqrt(tot_out):.3f})")
+    who(act, PW, parts, top, out)
     np.savez(OUT / "circle_math.npz", **out)
 
 
