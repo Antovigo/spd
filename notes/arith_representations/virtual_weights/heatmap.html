@@ -50,7 +50,8 @@
     <label><input type="checkbox" id="emb" checked> embedding</label></span>
   <span class="grp"><label class="h">readers</label>
     <span class="seg" id="rseg"><button data-v="attn">attn</button><button data-v="mlp">MLP</button><button data-v="both" class="on">both</button></span></span>
-  <span class="grp"><label><input type="checkbox" id="coact" checked> only co-active pairs</label></span>
+  <span class="grp"><label class="h">token position</label>
+    <select id="tpos"><option value="0">&lt;BOS&gt;</option><option value="1">a</option><option value="2">op</option><option value="3">b</option><option value="4" selected>=</option><option value="any">any (co-active pairs)</option></select></span>
   <span class="grp"><label class="h">colour saturates at |M| =</label>
     <input type="range" id="sat" min="-3" max="0" step="0.05" value="-1.3" style="width:140px">
     <span id="satval"></span></span>
@@ -67,12 +68,13 @@
       components only. Pixel = virtual weight M[w, r] = U<sub>w</sub> · (γ<sub>l</sub> ⊙ V<sub>r</sub>),
       in the gauge ‖V‖ = 1 for every component; γ<sub>l</sub> (4096-vector) is the gain of the
       RMSNorm reading residual-stream position l (l = 0 after the embedding, 2b+1 after block b's
-      attention, 2b+2 after its MLP; b = 0..31). Red &gt; 0, blue &lt; 0, grey: writer not upstream; white (with "only co-active pairs"): the two
-      components are never active at the same token position (active at position p = CI &gt; 0.01 somewhere on the
-      (a, b) grid at p, on the original model; an embedding token is active where it occurs), so the
-      residual stream cannot carry the write to the read.
-      Thin lines separate stream positions, thick lines blocks; within a position, components are
-      ordered by clustering their |M| profiles. Scroll to zoom, drag to pan, click a pixel.
+      attention, 2b+2 after its MLP; b = 0..31). Red &gt; 0, blue &lt; 0, grey: writer not upstream. The token-position selector (&lt;BOS&gt;, a, op,
+      b, =) keeps only the components active at that position: CI &gt; 0.01 somewhere on the (a, b)
+      grid at that position, on the original model (an embedding token: it occurs there). With "any",
+      all components are shown and pairs never active at a common position are white (the residual
+      stream cannot carry the write to the read).
+      Thin lines separate stream positions, thick lines blocks; within a stream position, components are
+      ordered by clustering their |M| profiles (re-clustered for each token position). Scroll to zoom, drag to pan, click a pixel.
     </div>
     <div class="legend" id="kinds"></div>
     <div id="sel" style="margin-top:12px"><div class="note">No pixel selected.</div></div>
@@ -108,13 +110,15 @@ const tokens = (() => { const b = atob(D.tokens), a = new Uint8Array(b.length);
   for (let i = 0; i < b.length; i++) a[i] = b.charCodeAt(i); return a; })();  // (N, 5) embed index
 
 // ---- visible rows / columns ----
-const state = { w: "both", r: "both", emb: true, coact: true, sat: 10 ** -1.3 };
+const state = { w: "both", r: "both", emb: true, tpos: 4, sat: 10 ** -1.3 };
 let rows = [], cols = [];
 function selectAxes() {
   const okW = k => k === "embed" ? state.emb : state.w === "both" || (state.w === "attn" ? ATTN : MLP).has(k);
   const okR = k => state.r === "both" || (state.r === "attn" ? ATTN : MLP).has(k);
-  rows = []; for (let i = 0; i < NW; i++) if (okW(W.kind[i])) rows.push(i);
-  cols = []; for (let j = 0; j < NR; j++) if (okR(R.kind[j])) cols.push(j);
+  const all = n => Array.from({ length: n }, (_, i) => i);
+  const bw = state.tpos === "any" ? all(NW) : D.by_pos[state.tpos].w;
+  const br = state.tpos === "any" ? all(NR) : D.by_pos[state.tpos].r;
+  rows = bw.filter(i => okW(W.kind[i])); cols = br.filter(j => okR(R.kind[j]));
 }
 const wBlock = p => p === 0 ? -1 : Math.floor((p - 1) / 2);
 const rBlock = p => Math.floor(p / 2);
@@ -166,7 +170,7 @@ function rebuild() {
     const wa = W.act[rows[y]];
     for (let x = 0; x < cols.length; x++) {
       const qq = Q[base + cols[x]];
-      d32[o + x] = state.coact && qq !== 0 && !(wa & R.act[cols[x]]) ? HIDDEN32 : l32[qq];
+      d32[o + x] = state.tpos === "any" && qq !== 0 && !(wa & R.act[cols[x]]) ? HIDDEN32 : l32[qq];
     }
   }
   g.putImageData(img, 0, 0);
@@ -274,7 +278,6 @@ function loadComp(col) {
     pending.get(col).push(() => res(comps.get(col)));
   });
 }
-let gpos = "auto";  // "auto" = each component at its own highest-CI position, else 0..4
 const CI_STOPS = [[255,255,255],[252,197,192],[221,52,151],[73,0,106]];
 function ciRamp(t) {
   t = Math.min(1, Math.max(0, t)); const x = t * 3, i = Math.min(2, Math.floor(x)), f = x - i;
@@ -311,7 +314,7 @@ function ciTable(X, i) {
 }
 function compBlock(role, X, i, data) {
   const name = X.name[i], kind = X.kind[i], emb = X.emb ? X.emb[i] : -1, bp = bestPos(X, i);
-  const pos = gpos === "auto" ? bp : gpos;
+  const pos = state.tpos === "any" ? bp : state.tpos;
   const div = document.createElement("div"); div.className = "comp";
   const best = emb >= 0 ? "" : ` · CI highest at <b>${POS_LABELS[bp]}</b> (max ${X.ci_max[i][bp].toFixed(3)}, mean ${X.ci_mean[i][bp].toFixed(3)})`;
   div.innerHTML = `<h4><span style="color:${KIND_COL[kind]}">■</span> ${role} ${name}</h4>
@@ -343,16 +346,13 @@ async function showSel() {
   const { w, r } = sel, m = qVal(Q[w * NR + r]);
   const box = $("sel"); box.innerHTML = "";
   const h = document.createElement("div");
-  const opts = [["auto", "auto (each component at its highest-CI position)"], ...POS_LABELS.map((p, i) => [String(i), `${i}: ${p}`])];
   h.innerHTML = `<h3>${W.name[w]} → ${R.name[r]}</h3>
     <div class="note">M = ${fmt(m)} · writer writes the stream point ${D.point_names[W.pos[w]]}, reader reads the stream point ${D.point_names[R.pos[r]]}
     (stream positions m = ${W.pos[w]}, l = ${R.pos[r]}) · co-active at: ${posList(W.act[w] & R.act[r])}</div>
-    <div style="margin-top:8px"><label class="h note">token position of the grids </label>
-    <select id="gpos">${opts.map(([v, t]) => `<option value="${v}" ${String(gpos) === v ? "selected" : ""}>${t}</option>`).join("")}</select></div>
-    <div class="note">Active at p: CI &gt; 0.01 somewhere on the grid at token position p (embedding: the token occurs at p). Grids: a = 1..100 down, b = 1..100 across; hover for values.</div>
+    <div class="note" style="margin-top:6px">Grids are drawn at the token position selected in the top bar
+    (with "any": each component at its own highest-CI position). Active at p: CI &gt; 0.01 somewhere on the grid at token position p (embedding: the token occurs at p). Grids: a = 1..100 down, b = 1..100 across; hover for values.</div>
     <div id="gread"></div>`;
   box.appendChild(h);
-  $("gpos").onchange = e => { gpos = e.target.value === "auto" ? "auto" : +e.target.value; showSel(); };
   const wd = W.emb[w] >= 0 ? null : await loadComp(W.col[w]);
   const rd = await loadComp(R.col[r]);
   if (sel.w !== w || sel.r !== r) return;
@@ -368,7 +368,11 @@ function seg(id, key) {
 }
 seg("wseg", "w"); seg("rseg", "r");
 $("emb").onchange = e => { state.emb = e.target.checked; rebuild(); fit(); };
-$("coact").onchange = e => { state.coact = e.target.checked; rebuild(); };
+$("tpos").onchange = e => {
+  state.tpos = e.target.value === "any" ? "any" : +e.target.value; rebuild(); fit();
+  if (sel && !(rows.includes(sel.w) && cols.includes(sel.r))) { sel = null; $("sel").innerHTML = '<div class="note">No pixel selected.</div>'; }
+  else showSel();
+};
 const setSat = () => { state.sat = 10 ** +$("sat").value; $("satval").textContent = state.sat.toPrecision(2); };
 $("sat").oninput = () => { setSat(); rebuild(); };
 $("fit").onclick = fit;

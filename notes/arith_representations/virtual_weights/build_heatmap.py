@@ -5,7 +5,8 @@ outputs). Both axes are grouped by residual-stream position (writers: m = 0 embe
 2b+2 down; readers: l = 2b q/k/v, 2b+1 gate/up) in stream order; within a group, components are
 ordered by average-linkage clustering (cosine distance, optimal leaf ordering) of their |M|
 profiles (a writer's row over all readers, a reader's column over all writers), restricted to
-co-active pairs.
+co-active pairs. For each token position p the applet can restrict both axes to the components
+active at p; those subsets are re-clustered on their pairs among themselves (`by_pos`).
 
 Activity: a component is active at token position p (0..4: <BOS>, a, op, b, =) if its output
 CI on the original model exceeds 0.01 somewhere on the (a, b) grid at p; an embedding token is
@@ -102,6 +103,18 @@ def main() -> None:
     absM = np.abs(np.nan_to_num(M)) * co
     w_ord, w_starts = grouped_order(ix["w_pos"], absM)
     r_ord, r_starts = grouped_order(ix["r_pos"], absM.T)
+    # per token position p: the writers / readers active at p (indices into the canonical order
+    # above), re-clustered within each stream-position group on their pairs among themselves
+    absC = np.abs(np.nan_to_num(M[np.ix_(w_ord, r_ord)]))
+    wa, ra = w_act[w_ord], r_act[r_ord]
+    by_pos = []
+    for t in range(T):
+        sw, sr = np.flatnonzero(wa >> t & 1), np.flatnonzero(ra >> t & 1)
+        sub = absC[np.ix_(sw, sr)]
+        ow, _ = grouped_order(ix["w_pos"][w_ord][sw], sub)
+        orr, _ = grouped_order(ix["r_pos"][r_ord][sr], sub.T)
+        by_pos.append({"w": sw[ow].tolist(), "r": sr[orr].tolist()})
+        print(f"position {t}: {len(sw)} writers, {len(sr)} readers", flush=True)
     print("clustered", flush=True)
 
     Ms = M[np.ix_(w_ord, r_ord)]
@@ -142,6 +155,7 @@ def main() -> None:
             **ci_lists(ix["r_col"][r_ord]),
             "starts": r_starts,
         },
+        "by_pos": by_pos,
         "tokens": b64(tok_idx),
         "png": base64.b64encode(buf.getvalue()).decode(),
     }  # fmt: skip
