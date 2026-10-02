@@ -4,7 +4,14 @@ Rows are writers, columns readers, one pixel per virtual weight M[w, r] (README.
 outputs). Both axes are grouped by residual-stream position (writers: m = 0 embedding, 2b+1 o,
 2b+2 down; readers: l = 2b q/k/v, 2b+1 gate/up) in stream order; within a group, components are
 ordered by average-linkage clustering (cosine distance, optimal leaf ordering) of their |M|
-profiles (a writer's row over all readers, a reader's column over all writers).
+profiles (a writer's row over all readers, a reader's column over all writers), restricted to
+co-active pairs.
+
+Activity: a component is active at token position p (0..4: <BOS>, a, op, b, =) if its output
+CI on the original model exceeds 0.01 somewhere on the (a, b) grid at p; an embedding token is
+active where it occurs. A pair (w, r) is co-active if they share an active position (the
+residual stream only carries a write to reads at the same position). Per-position max / mean CI
+also go to VW/ci_positions.npz.
 
 Files written to OUT/heatmap:
 * `index.html`  - the applet (copied from heatmap.html).
@@ -21,6 +28,7 @@ import base64
 import io
 import json
 import shutil
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -34,6 +42,8 @@ VW = RUN / "analysis/virtual_weights"
 OUT = VW / "heatmap"
 HERE = Path(__file__).parent
 N, T = 20000, 5
+ALIVE = 0.01
+POS_SHORT = ("B", "a", "o", "b", "=")  # <BOS>, a, op, b, =
 
 
 def b64(a: np.ndarray) -> str:
@@ -64,9 +74,32 @@ def main() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
     (OUT / "comps").mkdir(exist_ok=True)
     ix = np.load(VW / "index.npz")
-    absM = np.abs(np.nan_to_num(np.load(VW / "M.npy")))
     M = np.load(VW / "M.npy")
+    tokens = np.load(DATASET / "index.npz")["tokens"]
+    emb_ids = [int(t) for k, t in zip(ix["w_kind"], ix["w_cidx"], strict=True) if k == "embed"]
+    tok_idx = np.searchsorted(np.asarray(emb_ids), tokens).astype(np.uint8)  # (N, T) -> embed index
 
+    # per-position CI summaries and activity: a component is active at token position p if its
+    # CI exceeds ALIVE somewhere on the grid at p; an embedding token is active where it occurs
+    ci = np.load(DATASET / "original/ci.npy")  # (N, T, A) float16
+    ci_max = ci.max(0).astype(np.float32).T  # (A, T)
+    ci_mean = ci.mean(0, dtype=np.float32).T  # (A, T)
+    np.savez(VW / "ci_positions.npz", ci_max=ci_max, ci_mean=ci_mean)
+    bits = 1 << np.arange(T)
+    comp_act = ((ci_max > ALIVE) * bits).sum(1)  # (A,) bitmask over positions
+    emb_act = np.array([((tok_idx == e).any(0) * bits).sum() for e in range(len(emb_ids))])
+    w_act = np.where(ix["w_kind"] == "embed", emb_act[np.clip(np.searchsorted(emb_ids, ix["w_cidx"]), 0, len(emb_ids) - 1)],
+                     comp_act[ix["w_col"]])  # fmt: skip
+    r_act = comp_act[ix["r_col"]]
+    co = (w_act[:, None] & r_act[None, :]) != 0
+    up = np.isfinite(M)
+    print(f"upstream pairs {up.sum()}, co-active {(up & co).sum()}", flush=True)
+    for name_, act in (("writers", w_act), ("readers", r_act)):
+        vals, cnt = np.unique(act, return_counts=True)
+        print(name_, {"".join(POS_SHORT[p] for p in range(T) if v >> p & 1) or "none": int(c)
+                      for v, c in zip(vals, cnt, strict=True)}, flush=True)  # fmt: skip
+
+    absM = np.abs(np.nan_to_num(M)) * co
     w_ord, w_starts = grouped_order(ix["w_pos"], absM)
     r_ord, r_starts = grouped_order(ix["r_pos"], absM.T)
     print("clustered", flush=True)
@@ -81,9 +114,12 @@ def main() -> None:
     def name(kind: str, layer: int, cidx: int, token: str = "") -> str:
         return f"tok {token!r}" if kind == "embed" else f"L{layer}.{kind}.c{cidx}"
 
-    tokens = np.load(DATASET / "index.npz")["tokens"]
-    emb_ids = [int(t) for k, t in zip(ix["w_kind"], ix["w_cidx"], strict=True) if k == "embed"]
-    tok_idx = np.searchsorted(np.asarray(emb_ids), tokens).astype(np.uint8)  # (N, T) -> embed index
+    def ci_lists(cols: np.ndarray) -> dict[str, list]:
+        ok = cols >= 0
+        mx = np.where(ok[:, None], ci_max[np.maximum(cols, 0)], np.nan)
+        mn = np.where(ok[:, None], ci_mean[np.maximum(cols, 0)], np.nan)
+        r = lambda a: [[None if np.isnan(v) else round(float(v), 4) for v in row] for row in a]  # noqa: E731
+        return {"ci_max": r(mx), "ci_mean": r(mn)}
 
     data = {
         "point_names": [str(p) for p in ix["point_names"]],
@@ -93,6 +129,8 @@ def main() -> None:
             "pos": [int(ix["w_pos"][j]) for j in w_ord],
             "col": [int(ix["w_col"][j]) for j in w_ord],
             "emb": [emb_ids.index(int(ix["w_cidx"][j])) if ix["w_kind"][j] == "embed" else -1 for j in w_ord],
+            "act": [int(w_act[j]) for j in w_ord],
+            **ci_lists(ix["w_col"][w_ord]),
             "starts": w_starts,
         },
         "readers": {
@@ -100,6 +138,8 @@ def main() -> None:
             "kind": [str(ix["r_kind"][j]) for j in r_ord],
             "pos": [int(ix["r_pos"][j]) for j in r_ord],
             "col": [int(ix["r_col"][j]) for j in r_ord],
+            "act": [int(r_act[j]) for j in r_ord],
+            **ci_lists(ix["r_col"][r_ord]),
             "starts": r_starts,
         },
         "tokens": b64(tok_idx),
@@ -108,10 +148,11 @@ def main() -> None:
     (OUT / "data.js").write_text("window.VW = " + json.dumps(data) + ";\n")
     shutil.copy(HERE / "heatmap.html", OUT / "index.html")
     print("data.js written", flush=True)
+    if "--no-comps" in sys.argv:
+        return
 
     vnorm = np.load(DATASET / "index.npz")["comp_v_norm"]
     inner = np.load(VW / "alive_only/inner.npy")  # (N, T, A)
-    ci = np.load(DATASET / "original/ci.npy")  # (N, T, A) float16
     print("activations loaded", flush=True)
     for c in range(inner.shape[2]):
         x = inner[:, :, c].T / vnorm[c]  # (T, N): prompt i = op * 10000 + (a-1) * 100 + (b-1)
