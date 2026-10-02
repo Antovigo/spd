@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Virtual weight map</title>
+<style>
+  :root { --fg: #1c1c28; --muted: #6b6b80; --line: #e3e3ec; --card: #fafafd; --acc: #7b5cd6; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body { font: 13px/1.45 system-ui, sans-serif; color: var(--fg); background: #fff;
+         display: flex; flex-direction: column; }
+  header { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; padding: 8px 14px;
+           border-bottom: 1px solid var(--line); }
+  header .grp { display: flex; gap: 6px; align-items: center; }
+  header label.h { color: var(--muted); }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+  .seg button { border: 0; background: #fff; padding: 3px 9px; cursor: pointer; font: inherit; }
+  .seg button.on { background: var(--acc); color: #fff; }
+  button.plain { border: 1px solid var(--line); background: #fff; border-radius: 6px; padding: 3px 9px;
+                 cursor: pointer; font: inherit; }
+  #title { font-weight: 600; }
+  #satval { font-family: ui-monospace, monospace; min-width: 52px; display: inline-block; }
+  main { flex: 1; display: flex; min-height: 0; }
+  #left { flex: 1; position: relative; min-width: 0; display: flex; flex-direction: column; }
+  #view { flex: 1; min-height: 0; position: relative; }
+  #cv { position: absolute; inset: 0; width: 100%; height: 100%; cursor: crosshair; }
+  #hover { font-family: ui-monospace, monospace; font-size: 12px; padding: 4px 14px; min-height: 1.6em;
+           border-top: 1px solid var(--line); color: var(--muted); white-space: nowrap; overflow: hidden; }
+  #right { width: 460px; border-left: 1px solid var(--line); background: var(--card); overflow: auto;
+           padding: 12px 14px; }
+  #right h3 { margin: 0 0 4px; font-size: 14px; }
+  #right .comp { margin-top: 14px; }
+  #right .comp h4 { margin: 0 0 6px; font-size: 13px; font-family: ui-monospace, monospace; }
+  .gridrow { display: flex; gap: 10px; margin-bottom: 4px; }
+  .gridrow .pane { text-align: center; }
+  .gridrow .cap { color: var(--muted); font-size: 11px; }
+  .rowlbl { color: var(--muted); font-size: 11px; margin: 6px 0 2px; }
+  canvas.g { image-rendering: pixelated; display: block; border: 1px solid var(--line); }
+  #gread { font-family: ui-monospace, monospace; font-size: 12px; min-height: 1.4em; margin-top: 8px; }
+  .note { color: var(--muted); font-size: 11.5px; }
+  .legend { display: flex; gap: 10px; flex-wrap: wrap; font-size: 11px; color: var(--muted); }
+  .legend i { display: inline-block; width: 10px; height: 10px; margin-right: 3px; vertical-align: -1px; }
+</style>
+</head>
+<body>
+<header>
+  <span id="title">Virtual weights · p-ba5a0c05 · alive components</span>
+  <span class="grp"><label class="h">writers</label>
+    <span class="seg" id="wseg"><button data-v="attn">attn</button><button data-v="mlp">MLP</button><button data-v="both" class="on">both</button></span>
+    <label><input type="checkbox" id="emb" checked> embedding</label></span>
+  <span class="grp"><label class="h">readers</label>
+    <span class="seg" id="rseg"><button data-v="attn">attn</button><button data-v="mlp">MLP</button><button data-v="both" class="on">both</button></span></span>
+  <span class="grp"><label class="h">colour saturates at |M| =</label>
+    <input type="range" id="sat" min="-3" max="0" step="0.05" value="-1.3" style="width:140px">
+    <span id="satval"></span></span>
+  <span class="grp"><button class="plain" id="fit">fit</button><button class="plain" id="one">1 px</button></span>
+</header>
+<main>
+  <div id="left">
+    <div id="view"><canvas id="cv"></canvas></div>
+    <div id="hover">loading…</div>
+  </div>
+  <div id="right">
+    <div class="note">
+      Rows: writers w (embedding tokens, o, down); columns: readers r (q, k, v, gate, up); alive
+      components only. Pixel = virtual weight M[w, r] = U<sub>w</sub> · (γ<sub>l</sub> ⊙ V<sub>r</sub>),
+      in the gauge ‖V‖ = 1 for every component; γ<sub>l</sub> (4096-vector) is the gain of the
+      RMSNorm reading residual-stream position l (l = 0 after the embedding, 2b+1 after block b's
+      attention, 2b+2 after its MLP; b = 0..31). Red &gt; 0, blue &lt; 0, grey: writer not upstream.
+      Thin lines separate stream positions, thick lines blocks; within a position, components are
+      ordered by clustering their |M| profiles. Scroll to zoom, drag to pan, click a pixel.
+    </div>
+    <div class="legend" id="kinds"></div>
+    <div id="sel" style="margin-top:12px"><div class="note">No pixel selected.</div></div>
+  </div>
+</main>
+<script src="data.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const D = window.VW, W = D.writers, R = D.readers;
+const NW = W.name.length, NR = R.name.length;
+const POS_LABELS = ["<BOS>", "a", "op", "b", "="], OPS = ["+", "−"], NP = 20000;
+const KIND_COL = { embed: "#9a9aa8", o: "#2b7bba", down: "#e07b28", q: "#5aa3d8", k: "#1f5f8f",
+                   v: "#7ac4a8", gate: "#e8a15c", up: "#b85d1a" };
+const ATTN = new Set(["o", "q", "k", "v"]), MLP = new Set(["down", "gate", "up"]);
+
+$("kinds").innerHTML = Object.entries(KIND_COL).map(([k, c]) => `<span><i style="background:${c}"></i>${k}</span>`).join("");
+
+// ---- decode the PNG matrix (q: 0 = not upstream; M = sign(q-128) ((q-128)/127)^2) ----
+let Q = null;  // Uint8Array NW*NR, row-major (writer, reader)
+async function decodeMatrix() {
+  const bin = atob(D.png), bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  const bmp = await createImageBitmap(new Blob([bytes], { type: "image/png" }),
+    { colorSpaceConversion: "none", premultiplyAlpha: "none" });
+  const c = document.createElement("canvas"); c.width = NR; c.height = NW;
+  const g = c.getContext("2d", { willReadFrequently: true }); g.drawImage(bmp, 0, 0);
+  const px = g.getImageData(0, 0, NR, NW).data;
+  Q = new Uint8Array(NW * NR);
+  for (let i = 0; i < Q.length; i++) Q[i] = px[4 * i];
+}
+const qVal = q => q === 0 ? NaN : Math.sign(q - 128) * ((q - 128) / 127) ** 2;
+const tokens = (() => { const b = atob(D.tokens), a = new Uint8Array(b.length);
+  for (let i = 0; i < b.length; i++) a[i] = b.charCodeAt(i); return a; })();  // (N, 5) embed index
+
+// ---- visible rows / columns ----
+const state = { w: "both", r: "both", emb: true, sat: 10 ** -1.3 };
+let rows = [], cols = [];
+function selectAxes() {
+  const okW = k => k === "embed" ? state.emb : state.w === "both" || (state.w === "attn" ? ATTN : MLP).has(k);
+  const okR = k => state.r === "both" || (state.r === "attn" ? ATTN : MLP).has(k);
+  rows = []; for (let i = 0; i < NW; i++) if (okW(W.kind[i])) rows.push(i);
+  cols = []; for (let j = 0; j < NR; j++) if (okR(R.kind[j])) cols.push(j);
+}
+const wBlock = p => p === 0 ? -1 : Math.floor((p - 1) / 2);
+const rBlock = p => Math.floor(p / 2);
+function boundaries(idx, posArr, blockOf) {  // [{at, thick}] where the stream position changes
+  const out = [];
+  for (let n = 1; n < idx.length; n++) {
+    const a = posArr[idx[n - 1]], b = posArr[idx[n]];
+    if (a !== b) out.push({ at: n, thick: blockOf(a) !== blockOf(b) });
+  }
+  return out;
+}
+function blockSpans(idx, posArr, blockOf) {  // [{block, from, to}]
+  const out = [];
+  for (let n = 0; n < idx.length; n++) {
+    const b = blockOf(posArr[idx[n]]);
+    if (!out.length || out[out.length - 1].block !== b) out.push({ block: b, from: n, to: n + 1 });
+    else out[out.length - 1].to = n + 1;
+  }
+  return out;
+}
+
+// ---- colour LUT over q ----
+const DIV = [[5,48,97],[67,147,195],[247,247,247],[214,96,77],[103,0,31]];
+function ramp(t) {
+  t = Math.min(1, Math.max(0, t)); const x = t * 4, i = Math.min(3, Math.floor(x)), f = x - i;
+  return [0, 1, 2].map(c => Math.round(DIV[i][c] + (DIV[i + 1][c] - DIV[i][c]) * f));
+}
+function lut() {
+  const L = new Uint8Array(256 * 4);
+  for (let q = 0; q < 256; q++) {
+    const rgb = q === 0 ? [214, 214, 222] : ramp(0.5 + 0.5 * qVal(q) / state.sat);
+    L.set([...rgb, 255], 4 * q);
+  }
+  return L;
+}
+
+// ---- full-resolution image of the visible submatrix ----
+const full = document.createElement("canvas");
+let bW = [], bR = [], sW = [], sR = [];
+function rebuild() {
+  selectAxes();
+  full.width = Math.max(1, cols.length); full.height = Math.max(1, rows.length);
+  const g = full.getContext("2d"), img = g.createImageData(full.width, full.height), L = lut();
+  const d32 = new Uint32Array(img.data.buffer), l32 = new Uint32Array(L.buffer);
+  for (let y = 0; y < rows.length; y++) {
+    const base = rows[y] * NR, o = y * cols.length;
+    for (let x = 0; x < cols.length; x++) d32[o + x] = l32[Q[base + cols[x]]];
+  }
+  g.putImageData(img, 0, 0);
+  bW = boundaries(rows, W.pos, wBlock); bR = boundaries(cols, R.pos, rBlock);
+  sW = blockSpans(rows, W.pos, wBlock); sR = blockSpans(cols, R.pos, rBlock);
+  draw();
+}
+
+// ---- view (pan / zoom) ----
+const cv = $("cv"), MX = 46, MY = 26, STRIP = 6;  // margins for labels and kind strips
+let k = 1, ox = MX + STRIP, oy = MY + STRIP, sel = null;
+function size() {
+  const r = $("view").getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+  cv.width = r.width * dpr; cv.height = r.height * dpr; return [r.width, r.height, dpr];
+}
+function fit() {
+  const [w, h] = size();
+  k = Math.min((w - MX - STRIP - 8) / full.width, (h - MY - STRIP - 8) / full.height);
+  ox = MX + STRIP; oy = MY + STRIP; draw();
+}
+function draw() {
+  const [w, h, dpr] = size(), g = cv.getContext("2d");
+  g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, w, h);
+  g.imageSmoothingEnabled = false;
+  g.save(); g.beginPath(); g.rect(MX + STRIP, MY + STRIP, w, h); g.clip();
+  g.drawImage(full, ox, oy, full.width * k, full.height * k);
+  // demarcations
+  const x0 = Math.max(ox, MX + STRIP), x1 = Math.min(w, ox + full.width * k);
+  const y0 = Math.max(oy, MY + STRIP), y1 = Math.min(h, oy + full.height * k);
+  for (const b of bW) { const y = oy + b.at * k; if (y < y0 || y > y1) continue;
+    if (!b.thick && k < 0.35) continue;
+    g.strokeStyle = b.thick ? "rgba(20,20,30,0.85)" : "rgba(20,20,30,0.25)"; g.lineWidth = b.thick ? 1.2 : 0.6;
+    g.beginPath(); g.moveTo(x0, y); g.lineTo(x1, y); g.stroke(); }
+  for (const b of bR) { const x = ox + b.at * k; if (x < x0 || x > x1) continue;
+    if (!b.thick && k < 0.35) continue;
+    g.strokeStyle = b.thick ? "rgba(20,20,30,0.85)" : "rgba(20,20,30,0.25)"; g.lineWidth = b.thick ? 1.2 : 0.6;
+    g.beginPath(); g.moveTo(x, y0); g.lineTo(x, y1); g.stroke(); }
+  if (sel) {
+    const y = rows.indexOf(sel.w), x = cols.indexOf(sel.r);
+    if (x >= 0 && y >= 0) { g.strokeStyle = "#7b5cd6"; g.lineWidth = 2;
+      const s = Math.max(k, 6); g.strokeRect(ox + (x + 0.5) * k - s / 2, oy + (y + 0.5) * k - s / 2, s, s); }
+  }
+  g.restore();
+  // kind strips + block labels
+  g.save(); g.beginPath(); g.rect(0, MY + STRIP, MX + STRIP, h); g.clip();
+  for (let y = 0; y < rows.length; y++) { const sy = oy + y * k; if (sy + k < MY || sy > h) continue;
+    g.fillStyle = KIND_COL[W.kind[rows[y]]]; g.fillRect(MX, sy, STRIP, Math.max(k, 0.5)); }
+  g.fillStyle = "#6b6b80"; g.font = "10px system-ui"; g.textAlign = "right"; g.textBaseline = "middle";
+  let lastY = -1e9;
+  for (const s of sW) { const cy = oy + (s.from + s.to) / 2 * k; if (cy - lastY < 12) continue;
+    g.fillText(s.block < 0 ? "emb" : "L" + s.block, MX - 3, cy); lastY = cy; }
+  g.restore();
+  g.save(); g.beginPath(); g.rect(MX + STRIP, 0, w, MY + STRIP); g.clip();
+  for (let x = 0; x < cols.length; x++) { const sx = ox + x * k; if (sx + k < MX || sx > w) continue;
+    g.fillStyle = KIND_COL[R.kind[cols[x]]]; g.fillRect(sx, MY, Math.max(k, 0.5), STRIP); }
+  g.fillStyle = "#6b6b80"; g.font = "10px system-ui"; g.textAlign = "center"; g.textBaseline = "bottom";
+  let lastX = -1e9;
+  for (const s of sR) { const cx = ox + (s.from + s.to) / 2 * k; if (cx - lastX < 22) continue;
+    g.fillText("L" + s.block, cx, MY - 3); lastX = cx; }
+  g.restore();
+  g.fillStyle = "#6b6b80"; g.font = "10px system-ui"; g.textAlign = "left"; g.textBaseline = "top";
+  g.fillText("writers ↓ / readers →", 4, 4);
+}
+function cellAt(ev) {
+  const r = cv.getBoundingClientRect(), x = Math.floor((ev.clientX - r.left - ox) / k),
+        y = Math.floor((ev.clientY - r.top - oy) / k);
+  if (ev.clientX - r.left < MX + STRIP || ev.clientY - r.top < MY + STRIP) return null;
+  return x >= 0 && y >= 0 && x < cols.length && y < rows.length ? { w: rows[y], r: cols[x] } : null;
+}
+const fmt = v => Number.isNaN(v) ? "— (not upstream)" : (v >= 0 ? "+" : "") + v.toFixed(4);
+let drag = null;
+cv.addEventListener("wheel", ev => { ev.preventDefault();
+  const r = cv.getBoundingClientRect(), mx = ev.clientX - r.left, my = ev.clientY - r.top;
+  const f = Math.exp(-ev.deltaY * 0.0015), nk = Math.min(40, Math.max(0.02, k * f));
+  ox = mx - (mx - ox) * nk / k; oy = my - (my - oy) * nk / k; k = nk; draw(); }, { passive: false });
+cv.addEventListener("mousedown", ev => { drag = { x: ev.clientX, y: ev.clientY, ox, oy, moved: false }; });
+window.addEventListener("mousemove", ev => {
+  if (drag) { const dx = ev.clientX - drag.x, dy = ev.clientY - drag.y;
+    if (Math.abs(dx) + Math.abs(dy) > 3) drag.moved = true;
+    if (drag.moved) { ox = drag.ox + dx; oy = drag.oy + dy; draw(); } }
+  if (ev.target !== cv) return;
+  const c = cellAt(ev);
+  $("hover").textContent = c ? `${W.name[c.w]} → ${R.name[c.r]}   M = ${fmt(qVal(Q[c.w * NR + c.r]))}` : "";
+});
+window.addEventListener("mouseup", ev => {
+  if (drag && !drag.moved && ev.target === cv) { const c = cellAt(ev); if (c) { sel = c; draw(); showSel(); } }
+  drag = null;
+});
+
+// ---- side panel: (a, b) grids of the two selected components ----
+const comps = new Map(), pending = new Map();
+window.vwComp = (col, p) => {
+  const b = atob(p.inner), inner = new Int8Array(b.length);
+  for (let i = 0; i < b.length; i++) inner[i] = (b.charCodeAt(i) << 24) >> 24;
+  const c = atob(p.ci), ci = new Uint8Array(c.length);
+  for (let i = 0; i < c.length; i++) ci[i] = c.charCodeAt(i);
+  comps.set(col, { scale: p.scale, inner, ci });
+  (pending.get(col) || []).forEach(f => f()); pending.delete(col);
+};
+function loadComp(col) {
+  return new Promise(res => {
+    if (comps.has(col)) return res(comps.get(col));
+    if (!pending.has(col)) { pending.set(col, []);
+      const s = document.createElement("script"); s.src = `comps/c${col}.js`; document.body.appendChild(s); }
+    pending.get(col).push(() => res(comps.get(col)));
+  });
+}
+let gpos = 4;
+const CI_STOPS = [[255,255,255],[252,197,192],[221,52,151],[73,0,106]];
+function ciRamp(t) {
+  t = Math.min(1, Math.max(0, t)); const x = t * 3, i = Math.min(2, Math.floor(x)), f = x - i;
+  return [0, 1, 2].map(c => Math.round(CI_STOPS[i][c] + (CI_STOPS[i + 1][c] - CI_STOPS[i][c]) * f));
+}
+function gridCanvas(val, colour, label, unit) {  // val(a0, b0) for a0, b0 in 0..99
+  const c = document.createElement("canvas"); c.className = "g"; c.width = 100; c.height = 100;
+  c.style.width = "200px"; c.style.height = "200px";
+  const g = c.getContext("2d"), img = g.createImageData(100, 100);
+  for (let a = 0; a < 100; a++) for (let b = 0; b < 100; b++) {
+    const rgb = colour(val(a, b)), o = 4 * (a * 100 + b);
+    img.data[o] = rgb[0]; img.data[o + 1] = rgb[1]; img.data[o + 2] = rgb[2]; img.data[o + 3] = 255;
+  }
+  g.putImageData(img, 0, 0);
+  c.addEventListener("mousemove", ev => { const r = c.getBoundingClientRect();
+    const b = Math.floor((ev.clientX - r.left) / 2), a = Math.floor((ev.clientY - r.top) / 2);
+    if (a >= 0 && a < 100 && b >= 0 && b < 100)
+      $("gread").textContent = `${label}: a=${a + 1}, b=${b + 1}, ${unit} = ${val(a, b).toFixed(4)}`; });
+  return c;
+}
+const pIdx = (op, a, b) => op * 10000 + a * 100 + b;  // prompt index; a, b zero-based
+function compBlock(name, kind, col, emb, data) {
+  const div = document.createElement("div"); div.className = "comp";
+  div.innerHTML = `<h4><span style="color:${KIND_COL[kind]}">■</span> ${name}</h4>`;
+  const addRow = (title, mk) => {
+    const t = document.createElement("div"); t.className = "rowlbl"; t.innerHTML = title; div.appendChild(t);
+    const row = document.createElement("div"); row.className = "gridrow";
+    for (let op = 0; op < 2; op++) { const p = document.createElement("div"); p.className = "pane";
+      p.appendChild(mk(op)); const cap = document.createElement("div"); cap.className = "cap";
+      cap.textContent = `a ${OPS[op]} b`; p.appendChild(cap); row.appendChild(p); }
+    div.appendChild(row);
+  };
+  if (emb >= 0) {
+    addRow(`token indicator at position ${POS_LABELS[gpos]} (1 if the token there is this one)`, op =>
+      gridCanvas((a, b) => tokens[pIdx(op, a, b) * 5 + gpos] === emb ? 1 : 0, v => ciRamp(v), `${name} ${OPS[op]}`, "on"));
+    return div;
+  }
+  const sc = data.scale[gpos];
+  addRow(`inner activation, alive-only model, ‖V‖ = 1 gauge (colour ±${sc.toPrecision(3)})`, op =>
+    gridCanvas((a, b) => data.inner[gpos * NP + pIdx(op, a, b)] / 127 * sc, v => ramp(0.5 + 0.5 * v / sc),
+               `${name} ${OPS[op]} inner`, "A"));
+  addRow("output CI on the original model (0 white … 1 dark)", op =>
+    gridCanvas((a, b) => data.ci[gpos * NP + pIdx(op, a, b)] / 255, v => ciRamp(v), `${name} ${OPS[op]} CI`, "CI"));
+  return div;
+}
+async function showSel() {
+  if (!sel) return;
+  const { w, r } = sel, m = qVal(Q[w * NR + r]);
+  const box = $("sel"); box.innerHTML = "";
+  const h = document.createElement("div");
+  h.innerHTML = `<h3>${W.name[w]} → ${R.name[r]}</h3>
+    <div class="note">M = ${fmt(m)} · writer writes the stream point ${D.point_names[W.pos[w]]}, reader reads the stream point ${D.point_names[R.pos[r]]}
+    (stream positions m = ${W.pos[w]}, l = ${R.pos[r]})</div>
+    <div style="margin-top:8px"><label class="h note">token position of the grids </label>
+    <select id="gpos">${POS_LABELS.map((p, i) => `<option value="${i}" ${i === gpos ? "selected" : ""}>${i}: ${p}</option>`).join("")}</select></div>
+    <div class="note">Grids: a = 1..100 down, b = 1..100 across; hover for values.</div>
+    <div id="gread"></div>`;
+  box.appendChild(h);
+  $("gpos").onchange = e => { gpos = +e.target.value; showSel(); };
+  const wd = W.emb[w] >= 0 ? null : await loadComp(W.col[w]);
+  const rd = await loadComp(R.col[r]);
+  if (sel.w !== w || sel.r !== r) return;
+  box.appendChild(compBlock("writer " + W.name[w], W.kind[w], W.col[w], W.emb[w], wd));
+  box.appendChild(compBlock("reader " + R.name[r], R.kind[r], R.col[r], -1, rd));
+}
+
+// ---- controls ----
+function seg(id, key) {
+  $(id).querySelectorAll("button").forEach(b => b.onclick = () => {
+    $(id).querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b));
+    state[key] = b.dataset.v; rebuild(); fit(); });
+}
+seg("wseg", "w"); seg("rseg", "r");
+$("emb").onchange = e => { state.emb = e.target.checked; rebuild(); fit(); };
+const setSat = () => { state.sat = 10 ** +$("sat").value; $("satval").textContent = state.sat.toPrecision(2); };
+$("sat").oninput = () => { setSat(); rebuild(); };
+$("fit").onclick = fit;
+$("one").onclick = () => { k = 1; draw(); };
+window.addEventListener("resize", draw);
+setSat();
+decodeMatrix().then(() => { rebuild(); fit(); $("hover").textContent = "hover a pixel"; });
+</script>
+</body>
+</html>
