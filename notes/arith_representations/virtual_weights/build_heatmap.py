@@ -6,7 +6,9 @@ outputs). Both axes are grouped by residual-stream position (writers: m = 0 embe
 ordered by average-linkage clustering (cosine distance, optimal leaf ordering) of their |M|
 profiles (a writer's row over all readers, a reader's column over all writers), restricted to
 co-active pairs. For each token position p the applet can restrict both axes to the components
-active at p; those subsets are re-clustered on their pairs among themselves (`by_pos`).
+active at p; those subsets are re-clustered on their pairs among themselves. A second ordering
+("direction") clusters each group on the vectors themselves instead: writers on U_hat, readers on
+gamma_l * V_hat, distance 1 - |cos| (`orders[metric][position]`, indices into the PNG order).
 
 Activity: a component is active at token position p (0..4: <BOS>, a, op, b, =) if its output
 CI on the original model exceeds 0.01 somewhere on the (a, b) grid at p; an embedding token is
@@ -51,23 +53,29 @@ def b64(a: np.ndarray) -> str:
     return base64.b64encode(np.ascontiguousarray(a).tobytes()).decode()
 
 
-def cluster_order(profiles: np.ndarray) -> np.ndarray:
-    """Leaf order of average-linkage clustering of the rows of `profiles` (cosine distance)."""
-    if len(profiles) < 3:
-        return np.arange(len(profiles))
-    p = profiles + 1e-12  # all-zero rows have undefined cosine distance
-    d = pdist(p, "cosine")
+def cluster_order(x: np.ndarray, metric: str) -> np.ndarray:
+    """Leaf order of average-linkage clustering of the rows of `x` (optimal leaf ordering).
+    metric "profile": cosine distance; "direction": 1 - |cos| (a component's sign is a gauge)."""
+    if len(x) < 3:
+        return np.arange(len(x))
+    if metric == "profile":
+        d = pdist(x + 1e-12, "cosine")  # all-zero rows have undefined cosine distance
+    else:
+        y = x / np.linalg.norm(x, axis=1, keepdims=True)
+        d = np.clip(1 - np.abs(y @ y.T), 0, None)[np.triu_indices(len(y), 1)]
     z = optimal_leaf_ordering(linkage(d, "average"), d)
     return leaves_list(z)
 
 
-def grouped_order(pos: np.ndarray, profiles: np.ndarray) -> tuple[np.ndarray, list[int]]:
+def grouped_order(
+    pos: np.ndarray, x: np.ndarray, metric: str = "profile"
+) -> tuple[np.ndarray, list[int]]:
     """Order: by stream position, clustered within; and the start index of every group."""
     order, starts = [], []
     for g in np.unique(pos):
         idx = np.flatnonzero(pos == g)
         starts.append(len(order))
-        order.extend(idx[cluster_order(profiles[idx])])
+        order.extend(idx[cluster_order(x[idx], metric)])
     return np.asarray(order), starts
 
 
@@ -105,15 +113,24 @@ def main() -> None:
     r_ord, r_starts = grouped_order(ix["r_pos"], absM.T)
     # per token position p: the writers / readers active at p (indices into the canonical order
     # above), re-clustered within each stream-position group on their pairs among themselves
+    # "direction" orders cluster on the vectors themselves: writers on U_hat, readers on
+    # gamma_l * V_hat (1 - |cos|), for all components ("any") and per token position
     absC = np.abs(np.nan_to_num(M[np.ix_(w_ord, r_ord)]))
+    vec = np.load(VW / "vectors.npz")
+    Uc, Vc = vec["U_hat"][w_ord], vec["V_til"][r_ord]
+    wp, rp = ix["w_pos"][w_ord], ix["r_pos"][r_ord]
     wa, ra = w_act[w_ord], r_act[r_ord]
-    by_pos = []
+    orders: dict[str, dict[str, dict[str, list[int]]]] = {"profile": {}, "direction": {}}
+    orders["profile"]["any"] = {"w": list(range(len(w_ord))), "r": list(range(len(r_ord)))}
+    orders["direction"]["any"] = {"w": grouped_order(wp, Uc, "direction")[0].tolist(),
+                                  "r": grouped_order(rp, Vc, "direction")[0].tolist()}  # fmt: skip
     for t in range(T):
         sw, sr = np.flatnonzero(wa >> t & 1), np.flatnonzero(ra >> t & 1)
         sub = absC[np.ix_(sw, sr)]
-        ow, _ = grouped_order(ix["w_pos"][w_ord][sw], sub)
-        orr, _ = grouped_order(ix["r_pos"][r_ord][sr], sub.T)
-        by_pos.append({"w": sw[ow].tolist(), "r": sr[orr].tolist()})
+        orders["profile"][str(t)] = {"w": sw[grouped_order(wp[sw], sub)[0]].tolist(),
+                                     "r": sr[grouped_order(rp[sr], sub.T)[0]].tolist()}  # fmt: skip
+        orders["direction"][str(t)] = {"w": sw[grouped_order(wp[sw], Uc[sw], "direction")[0]].tolist(),
+                                       "r": sr[grouped_order(rp[sr], Vc[sr], "direction")[0]].tolist()}  # fmt: skip
         print(f"position {t}: {len(sw)} writers, {len(sr)} readers", flush=True)
     print("clustered", flush=True)
 
@@ -155,7 +172,7 @@ def main() -> None:
             **ci_lists(ix["r_col"][r_ord]),
             "starts": r_starts,
         },
-        "by_pos": by_pos,
+        "orders": orders,
         "tokens": b64(tok_idx),
         "png": base64.b64encode(buf.getvalue()).decode(),
     }  # fmt: skip

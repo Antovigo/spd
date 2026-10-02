@@ -52,6 +52,8 @@
     <span class="seg" id="rseg"><button data-v="attn">attn</button><button data-v="mlp">MLP</button><button data-v="both" class="on">both</button></span></span>
   <span class="grp"><label class="h">token position</label>
     <select id="tpos"><option value="0">&lt;BOS&gt;</option><option value="1">a</option><option value="2">op</option><option value="3">b</option><option value="4" selected>=</option><option value="any">any (co-active pairs)</option></select></span>
+  <span class="grp"><label class="h">order within stream position by</label>
+    <span class="seg" id="oseg"><button data-v="profile" class="on">|M| profiles</button><button data-v="direction">directions</button></span></span>
   <span class="grp"><label class="h">colour saturates at |M| =</label>
     <input type="range" id="sat" min="-3" max="0" step="0.05" value="-1.3" style="width:140px">
     <span id="satval"></span></span>
@@ -74,7 +76,11 @@
       all components are shown and pairs never active at a common position are white (the residual
       stream cannot carry the write to the read).
       Thin lines separate stream positions, thick lines blocks; within a stream position, components are
-      ordered by clustering their |M| profiles (re-clustered for each token position). Scroll to zoom, drag to pan, click a pixel.
+      ordered by clustering (re-clustered for each token position), either on their |M| profiles
+      (a writer's row over the readers shown, a reader's column over the writers shown; components
+      that talk to the same partners end up together) or on their directions (writers: U<sub>w</sub>;
+      readers: γ<sub>l</sub> ⊙ V<sub>r</sub>; distance 1 − |cos|, so components writing or reading
+      overlapping directions of the stream end up together). Scroll to zoom, drag to pan, click a pixel.
     </div>
     <div class="legend" id="kinds"></div>
     <div id="sel" style="margin-top:12px"><div class="note">No pixel selected.</div></div>
@@ -110,14 +116,12 @@ const tokens = (() => { const b = atob(D.tokens), a = new Uint8Array(b.length);
   for (let i = 0; i < b.length; i++) a[i] = b.charCodeAt(i); return a; })();  // (N, 5) embed index
 
 // ---- visible rows / columns ----
-const state = { w: "both", r: "both", emb: true, tpos: 4, sat: 10 ** -1.3 };
+const state = { w: "both", r: "both", emb: true, tpos: 4, order: "profile", sat: 10 ** -1.3 };
 let rows = [], cols = [];
 function selectAxes() {
   const okW = k => k === "embed" ? state.emb : state.w === "both" || (state.w === "attn" ? ATTN : MLP).has(k);
   const okR = k => state.r === "both" || (state.r === "attn" ? ATTN : MLP).has(k);
-  const all = n => Array.from({ length: n }, (_, i) => i);
-  const bw = state.tpos === "any" ? all(NW) : D.by_pos[state.tpos].w;
-  const br = state.tpos === "any" ? all(NR) : D.by_pos[state.tpos].r;
+  const o = D.orders[state.order][String(state.tpos)], bw = o.w, br = o.r;
   rows = bw.filter(i => okW(W.kind[i])); cols = br.filter(j => okR(R.kind[j]));
 }
 const wBlock = p => p === 0 ? -1 : Math.floor((p - 1) / 2);
@@ -366,7 +370,7 @@ function seg(id, key) {
     $(id).querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b));
     state[key] = b.dataset.v; rebuild(); fit(); });
 }
-seg("wseg", "w"); seg("rseg", "r");
+seg("wseg", "w"); seg("rseg", "r"); seg("oseg", "order");
 $("emb").onchange = e => { state.emb = e.target.checked; rebuild(); fit(); };
 $("tpos").onchange = e => {
   state.tpos = e.target.value === "any" ? "any" : +e.target.value; rebuild(); fit();
