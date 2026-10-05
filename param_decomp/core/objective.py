@@ -36,6 +36,7 @@ from param_decomp.core.configs import (
     PersistentPGDReconLossConfig,
     PGDReconLossConfig,
     PGDReconSubsetLossConfig,
+    SingleSiteRoutingConfig,
     StaticProbabilityRoutingConfig,
     StochasticReconLossConfig,
     StochasticReconSubsetLossConfig,
@@ -60,6 +61,7 @@ from param_decomp.core.recon import (
     UnmaskedNoDeltaSources,
     layer_probability_routing,
     route_all_n,
+    single_site_routing,
     static_probability_routing,
     uniform_k_routing,
 )
@@ -78,6 +80,8 @@ def routing_sampler_from_config(
             return layer_probability_routing(
                 sites, lambda train_frac: scheduled_value_at(train_frac, p_schedule), n_draws
             )
+        case SingleSiteRoutingConfig():
+            return single_site_routing(sites, n_draws)
         case AllRoutingConfig():
             return route_all_n(n_draws)
 

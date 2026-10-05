@@ -1,4 +1,4 @@
-"""SPEC S11': per-layer Bernoulli routing with a scheduled probability."""
+"""SPEC S11': per-layer Bernoulli routing with a scheduled probability, and single-site routing."""
 
 import jax
 import jax.numpy as jnp
@@ -71,3 +71,17 @@ def test_routing_rate_follows_the_schedule_under_jit():
     for train_frac, expected in ((0.0, 0.09), (0.5, 0.495), (1.0, 0.9)):
         observed = float(jax.jit(rate)(jnp.asarray(train_frac, jnp.float32)))
         assert abs(observed - expected) < 0.01, (train_frac, observed)
+
+
+def test_single_site_routes_exactly_one_site_per_sequence():
+    routing = TypeAdapter(SubsetRoutingType).validate_python({"type": "single_site"})
+    sample = routing_sampler_from_config(routing, SITES, n_draws=2)
+    leading = (512, 7)
+    for routes in sample(jax.random.PRNGKey(2), leading, jnp.zeros(())):
+        assert routes is not None
+        stacked = jnp.stack([routes[s] for s in SITES]).astype(jnp.int32)
+        assert stacked.shape == (len(SITES), *leading)
+        assert jnp.all(stacked.sum(0) == 1)
+        assert jnp.all(stacked == stacked[:, :, :1])
+        per_site = stacked[:, :, 0].mean(1)
+        assert jnp.all(jnp.abs(per_site - 1 / len(SITES)) < 0.06), per_site

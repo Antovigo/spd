@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Any, NamedTuple
 
 import jax
+import jax.numpy as jnp
 from jax import random
 from jax.sharding import Mesh
 from jaxtyping import Array, Float, PRNGKeyArray
@@ -353,6 +354,26 @@ def route_all_n(n_draws: int) -> RoutingSampler:
         _key: PRNGKeyArray, _leading_shape: tuple[int, ...], _train_frac: Array
     ) -> tuple[Routes, ...]:
         return (None,) * n_draws
+
+    return sample
+
+
+def single_site_routing(sites: tuple[str, ...], n_draws: int) -> RoutingSampler:
+    """`n_draws` independent draws routing each SEQUENCE (leading axis 0) to exactly one
+    site, uniform over `sites`; the choice is shared by every position of the sequence."""
+
+    def sample(
+        key: PRNGKeyArray, leading_shape: tuple[int, ...], _train_frac: Array
+    ) -> tuple[Routes, ...]:
+        n_seq, positions = leading_shape[0], leading_shape[1:]
+        draws: list[Routes] = []
+        for draw_key in random.split(key, n_draws):
+            chosen = random.randint(draw_key, (n_seq,), 0, len(sites))
+            chosen = chosen.reshape((n_seq,) + (1,) * len(positions))
+            draws.append(
+                {name: jnp.broadcast_to(chosen == j, leading_shape) for j, name in enumerate(sites)}
+            )
+        return tuple(draws)
 
     return sample
 

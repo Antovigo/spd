@@ -70,6 +70,15 @@ class LayerProbabilityRoutingConfig(BaseConfig):
         return self
 
 
+class SingleSiteRoutingConfig(BaseConfig):
+    """Each SEQUENCE routes exactly one site, drawn uniformly from the model's sites; every
+    other site runs the target's own weights at every position of that sequence. The
+    extreme of subset routing: every forward decomposes one matrix in an otherwise clean
+    model, as if each site were decomposed on its own."""
+
+    type: Literal["single_site"] = "single_site"
+
+
 class AllRoutingConfig(BaseConfig):
     """Route every position to every module (the `"all"` fast path)."""
 
@@ -81,6 +90,7 @@ SubsetRoutingType = (
     UniformKSubsetRoutingConfig
     | StaticProbabilityRoutingConfig
     | LayerProbabilityRoutingConfig
+    | SingleSiteRoutingConfig
     | AllRoutingConfig
 )
 
