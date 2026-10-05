@@ -25,6 +25,7 @@ from param_decomp.core.configs import (
     HiddenActsNormalization,
     HiddenPassConfig,
     ImportanceMinimalityLossConfig,
+    LayerProbabilityRoutingConfig,
     LossCoeff,
     MergedStochasticSubsetPPGDReconLossConfig,
     NonlinearityLocalityLossConfig,
@@ -35,10 +36,12 @@ from param_decomp.core.configs import (
     PersistentPGDReconLossConfig,
     PGDReconLossConfig,
     PGDReconSubsetLossConfig,
+    StaticProbabilityRoutingConfig,
     StochasticReconLossConfig,
     StochasticReconSubsetLossConfig,
     SubsetRoutingType,
     TargetedLossMetricConfig,
+    UniformKSubsetRoutingConfig,
     UnmaskedNoDeltaReconLossConfig,
     UnmaskedReconLossConfig,
 )
@@ -52,10 +55,31 @@ from param_decomp.core.recon import (
     MixedPersistentStochasticSources,
     PersistentSources,
     ReconLossTerm,
+    RoutingSampler,
     StochasticSources,
     UnmaskedNoDeltaSources,
-    routing_sampler_from_config,
+    layer_probability_routing,
+    route_all_n,
+    static_probability_routing,
+    uniform_k_routing,
 )
+
+
+def routing_sampler_from_config(
+    routing: SubsetRoutingType, sites: tuple[str, ...], n_draws: int
+) -> RoutingSampler:
+    match routing:
+        case UniformKSubsetRoutingConfig():
+            return uniform_k_routing(sites, n_draws)
+        case StaticProbabilityRoutingConfig():
+            return static_probability_routing(sites, routing.p, n_draws)
+        case LayerProbabilityRoutingConfig():
+            p_schedule = routing.p
+            return layer_probability_routing(
+                sites, lambda train_frac: scheduled_value_at(train_frac, p_schedule), n_draws
+            )
+        case AllRoutingConfig():
+            return route_all_n(n_draws)
 
 
 @dataclass(frozen=True)

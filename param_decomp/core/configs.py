@@ -55,6 +55,21 @@ class StaticProbabilityRoutingConfig(BaseConfig):
     p: Probability
 
 
+class LayerProbabilityRoutingConfig(BaseConfig):
+    """Each position independently routes each LAYER with probability `p`: all sites of one
+    block share one Bernoulli draw, and unrouted sites run the target's own weights. `p` is a
+    schedule over the run (a bare float parses as the constant), so a run can start with few
+    layers decomposed and ramp towards all of them."""
+
+    type: Literal["layer_probability"] = "layer_probability"
+    p: ScheduleConfig
+
+    @model_validator(mode="after")
+    def _p_is_a_probability(self) -> Self:
+        assert self.p.max_val <= 1.0, f"routing probability peaks at {self.p.max_val} > 1"
+        return self
+
+
 class AllRoutingConfig(BaseConfig):
     """Route every position to every module (the `"all"` fast path)."""
 
@@ -62,7 +77,12 @@ class AllRoutingConfig(BaseConfig):
 
 
 # Discriminated union over the subset-routing configs (keyed by ``type``).
-SubsetRoutingType = UniformKSubsetRoutingConfig | StaticProbabilityRoutingConfig | AllRoutingConfig
+SubsetRoutingType = (
+    UniformKSubsetRoutingConfig
+    | StaticProbabilityRoutingConfig
+    | LayerProbabilityRoutingConfig
+    | AllRoutingConfig
+)
 
 
 # ---------------------------------------------------------------------------

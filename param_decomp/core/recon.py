@@ -17,7 +17,6 @@ from jaxtyping import Array, Float, PRNGKeyArray
 
 from param_decomp.core.configs import (
     BATCH_HIDDEN_ACTS_NORMALIZATION,
-    AllRoutingConfig,
     HiddenActsNormalization,
     HiddenActsReconstruction,
     LossCoeff,
@@ -25,9 +24,6 @@ from param_decomp.core.configs import (
     PersistentPGDReconLossConfig,
     PGDInitStrategy,
     SourceShape,
-    StaticProbabilityRoutingConfig,
-    SubsetRoutingType,
-    UniformKSubsetRoutingConfig,
 )
 from param_decomp.core.model import (
     CaptureKeys,
@@ -37,15 +33,16 @@ from param_decomp.core.model import (
 from param_decomp.core.sharding import batch_shard_leading
 
 Routes = dict[str, Array] | None
-RoutingSampler = Callable[[PRNGKeyArray, tuple[int, ...]], tuple[Routes, ...]]
-"""`(key, leading_shape) -> (routes, ...)` — a STATICALLY-sized family of routing draws,
-each `{site: bool[*leading]}` (or None = route everywhere) becoming ONE forward. The torch
-`Router.get_masks` made pure: fresh draws per step require the key threaded in —
+RoutingSampler = Callable[[PRNGKeyArray, tuple[int, ...], Array], tuple[Routes, ...]]
+"""`(key, leading_shape, train_frac) -> (routes, ...)` — a STATICALLY-sized family of routing
+draws, each `{site: bool[*leading]}` (or None = route everywhere) becoming ONE forward. The
+torch `Router.get_masks` made pure: fresh draws per step require the key threaded in —
 samplers run INSIDE the jitted step, so they must be traceable (SPEC R1). Returning
 several draws from one invocation enables JOINTLY-sampled families (independent
 repeats, antithetic/complementary subsets, per-step random covers) that independent
 per-draw keys alone cannot express. The term's structure — sampler identity, family
-size, strategy kind — is static; only the key varies per step."""
+size, strategy kind — is static; only the key and the traced fraction-time `train_frac`
+(SPEC S20; read only by scheduled samplers) vary per step."""
 
 
 # ───────────────────────────── mask-source strategies ─────────────────────────────
@@ -320,7 +317,9 @@ def uniform_k_subset_routes(
 def uniform_k_routing(sites: tuple[str, ...], n_draws: int) -> RoutingSampler:
     """`n_draws` independent per-position uniform-k-subset draws over `sites`."""
 
-    def sample(key: PRNGKeyArray, leading_shape: tuple[int, ...]) -> tuple[Routes, ...]:
+    def sample(
+        key: PRNGKeyArray, leading_shape: tuple[int, ...], _train_frac: Array
+    ) -> tuple[Routes, ...]:
         return tuple(
             uniform_k_subset_routes(draw_key, sites, leading_shape)
             for draw_key in random.split(key, n_draws)
@@ -333,7 +332,9 @@ def static_probability_routing(sites: tuple[str, ...], p: float, n_draws: int) -
     """`n_draws` independent draws routing each position to each site with
     probability `p` (torch `StaticProbabilityRouter`)."""
 
-    def sample(key: PRNGKeyArray, leading_shape: tuple[int, ...]) -> tuple[Routes, ...]:
+    def sample(
+        key: PRNGKeyArray, leading_shape: tuple[int, ...], _train_frac: Array
+    ) -> tuple[Routes, ...]:
         return tuple(
             {
                 name: random.bernoulli(random.fold_in(draw_key, j), p, leading_shape)
@@ -348,22 +349,44 @@ def static_probability_routing(sites: tuple[str, ...], p: float, n_draws: int) -
 def route_all_n(n_draws: int) -> RoutingSampler:
     """`n_draws` forwards, each routing every position to every site (`AllRoutingConfig`)."""
 
-    def sample(_key: PRNGKeyArray, _leading_shape: tuple[int, ...]) -> tuple[Routes, ...]:
+    def sample(
+        _key: PRNGKeyArray, _leading_shape: tuple[int, ...], _train_frac: Array
+    ) -> tuple[Routes, ...]:
         return (None,) * n_draws
 
     return sample
 
 
-def routing_sampler_from_config(
-    routing: SubsetRoutingType, sites: tuple[str, ...], n_draws: int
+def site_layer_index(site: str) -> int:
+    """The block index of a site path: its first all-digit segment (`layers.30.mlp.up_proj`
+    -> 30, `h.2.attn.c_attn` -> 2). Fails closed on a site outside any numbered block."""
+    digits = [segment for segment in site.split(".") if segment.isdigit()]
+    assert digits, f"site {site!r} names no numbered block; layer routing cannot group it"
+    return int(digits[0])
+
+
+def layer_probability_routing(
+    sites: tuple[str, ...], p_at: Callable[[Array], Array], n_draws: int
 ) -> RoutingSampler:
-    match routing:
-        case UniformKSubsetRoutingConfig():
-            return uniform_k_routing(sites, n_draws)
-        case StaticProbabilityRoutingConfig():
-            return static_probability_routing(sites, routing.p, n_draws)
-        case AllRoutingConfig():
-            return route_all_n(n_draws)
+    """`n_draws` independent draws routing each position to each LAYER with probability
+    `p_at(train_frac)`: every site of one block shares the block's Bernoulli draw, so a
+    position runs whole blocks decomposed or whole blocks on the target's weights."""
+    layer_of = {name: site_layer_index(name) for name in sites}
+
+    def sample(
+        key: PRNGKeyArray, leading_shape: tuple[int, ...], train_frac: Array
+    ) -> tuple[Routes, ...]:
+        p = p_at(train_frac)
+        draws: list[Routes] = []
+        for draw_key in random.split(key, n_draws):
+            by_layer = {
+                layer: random.bernoulli(random.fold_in(draw_key, layer), p, leading_shape)
+                for layer in sorted(set(layer_of.values()))
+            }
+            draws.append({name: by_layer[layer_of[name]] for name in sites})
+        return tuple(draws)
+
+    return sample
 
 
 # ───────────────────────────── shared-config -> flat terms ─────────────────────────────

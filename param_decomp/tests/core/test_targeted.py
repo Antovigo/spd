@@ -337,7 +337,7 @@ def test_targeted_objective_admits_unmasked_no_delta_for_nontarget():
     )
     # A single all-routed draw — the term is fully determined.
     assert isinstance(unmasked_term.sources, UnmaskedNoDeltaSources)
-    assert unmasked_term.sample_routing(jax.random.PRNGKey(0), (4,)) == (None,)
+    assert unmasked_term.sample_routing(jax.random.PRNGKey(0), (4,), jnp.zeros(())) == (None,)
 
 
 def test_target_pass_and_plain_unions_refuse_unmasked_no_delta():

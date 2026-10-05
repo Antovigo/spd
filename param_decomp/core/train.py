@@ -453,6 +453,7 @@ class ReconGrid[S: MaskSourceStrategy]:
         key: PRNGKeyArray,
         fixed_routes: dict[int, tuple[Routes, ...]],
         leading: tuple[int, ...],
+        train_frac: Array,
     ) -> list[TermDraws]:
         """Materialize every term/draw key chain (SPEC R1)."""
         draws_per_term: list[TermDraws] = []
@@ -462,7 +463,7 @@ class ReconGrid[S: MaskSourceStrategy]:
                 case FreshPGDSources():
                     routes_per_draw = fixed_routes[term_idx]
                 case _:
-                    routes_per_draw = term.sample_routing(routing_key, leading)
+                    routes_per_draw = term.sample_routing(routing_key, leading, train_frac)
             assert routes_per_draw, f"term {term.name!r} produced no forwards"
             draws_per_term.append(
                 [
@@ -764,7 +765,7 @@ def ascend_adversaries[PreparedT](
             continue
         fresh_cfg = term.sources
         routing_key, init_key = random.split(random.fold_in(key, grid.key_offset + term_idx))
-        routes_per_draw = term.sample_routing(routing_key, stream.leading)
+        routes_per_draw = term.sample_routing(routing_key, stream.leading, train_frac)
         fixed_routes[term_idx] = routes_per_draw
         init = init_fresh_pgd_sources(
             sites=model.sites,
@@ -1183,7 +1184,7 @@ def make_train_step[PreparedT](
         # are NOT detached here, but components/ci grads through them are what torch
         # gets too (sources are leaves). ──
         warmed_sources = {k: a.sources for k, a in ascended.warmed.items()}
-        draws_per_term = grid.draws(key, ascended.fixed_routes, stream.leading)
+        draws_per_term = grid.draws(key, ascended.fixed_routes, stream.leading, train_frac)
 
         def loss_fn(
             trainable: tuple[PreparedT, ComponentStacks, CI, dict[str, Sources]],
@@ -1920,6 +1921,7 @@ def make_targeted_train_step[PreparedT](
                 if plan.label in ascended_by_label
                 else {},
                 stream_for(plan).leading,
+                train_frac,
             )
             for plan in passes
         }

@@ -9,7 +9,7 @@ from param_decomp.core.train import ReconGrid
 
 
 def _key_routes(
-    key: PRNGKeyArray, _leading: tuple[int, ...]
+    key: PRNGKeyArray, _leading: tuple[int, ...], _train_frac: Array
 ) -> tuple[dict[str, Array], dict[str, Array]]:
     """Expose the routing key through each of two draws so the whole chain is pinned."""
     routes = {"site": key}
@@ -35,7 +35,7 @@ def test_recon_grid_fold_in_chain_pins_term_and_draw_offsets():
         ReconGrid.of((_term("nontarget-0"),), key_offset=1 + len(target_terms)),
     )
     for grid in grids:
-        draws_per_term = grid.draws(key, {}, (3,))
+        draws_per_term = grid.draws(key, {}, (3,), jnp.zeros(()))
         for term_idx, draws in enumerate(draws_per_term):
             term_key = jax.random.fold_in(key, grid.key_offset + term_idx)
             term_draw_key, routing_key = jax.random.split(term_key)
