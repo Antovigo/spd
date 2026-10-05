@@ -65,7 +65,8 @@
     <div id="hover">loading…</div>
   </div>
   <div id="right">
-    <div class="note">
+    <div id="sel" ><div class="note">No pixel selected.</div></div>
+    <div class="note" style="margin-top:18px;border-top:1px solid var(--line);padding-top:10px">
       Rows: writers w (embedding tokens, o, down); columns: readers r (q, k, v, gate, up); alive
       components only. Pixel = virtual weight M[w, r] = U<sub>w</sub> · (γ<sub>l</sub> ⊙ V<sub>r</sub>),
       in the gauge ‖V‖ = 1 for every component; γ<sub>l</sub> (4096-vector) is the gain of the
@@ -76,14 +77,17 @@
       all components are shown and pairs never active at a common position are white (the residual
       stream cannot carry the write to the read).
       Thin lines separate stream positions, thick lines blocks; within a stream position, components are
-      ordered by clustering (re-clustered for each token position), either on their |M| profiles
+      ordered by clustering (re-clustered for each token position; the embedding tokens are instead in value order: &lt;BOS&gt;, 1..100, +, −, =), either on their |M| profiles
       (a writer's row over the readers shown, a reader's column over the writers shown; components
       that talk to the same partners end up together) or on their directions (writers: U<sub>w</sub>;
       readers: γ<sub>l</sub> ⊙ V<sub>r</sub>; distance 1 − |cos|, so components writing or reading
       overlapping directions of the stream end up together). Scroll to zoom, drag to pan, click a pixel.
+      Side panel: grids are drawn at the token position selected in the top bar (with "any": each
+      component at its own highest-CI position); a = 1..100 down, b = 1..100 across, hover for
+      values. Active at p: CI &gt; 0.01 somewhere on the grid at token position p (embedding: the
+      token occurs at p).
     </div>
     <div class="legend" id="kinds"></div>
-    <div id="sel" style="margin-top:12px"><div class="note">No pixel selected.</div></div>
   </div>
 </main>
 <script src="data.js"></script>
@@ -353,8 +357,7 @@ async function showSel() {
   h.innerHTML = `<h3>${W.name[w]} → ${R.name[r]}</h3>
     <div class="note">M = ${fmt(m)} · writer writes the stream point ${D.point_names[W.pos[w]]}, reader reads the stream point ${D.point_names[R.pos[r]]}
     (stream positions m = ${W.pos[w]}, l = ${R.pos[r]}) · co-active at: ${posList(W.act[w] & R.act[r])}</div>
-    <div class="note" style="margin-top:6px">Grids are drawn at the token position selected in the top bar
-    (with "any": each component at its own highest-CI position). Active at p: CI &gt; 0.01 somewhere on the grid at token position p (embedding: the token occurs at p). Grids: a = 1..100 down, b = 1..100 across; hover for values.</div>
+
     <div id="gread"></div>`;
   box.appendChild(h);
   const wd = W.emb[w] >= 0 ? null : await loadComp(W.col[w]);

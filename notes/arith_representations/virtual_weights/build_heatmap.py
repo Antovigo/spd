@@ -68,14 +68,18 @@ def cluster_order(x: np.ndarray, metric: str) -> np.ndarray:
 
 
 def grouped_order(
-    pos: np.ndarray, x: np.ndarray, metric: str = "profile"
+    pos: np.ndarray, x: np.ndarray, metric: str = "profile", emb_key: np.ndarray | None = None
 ) -> tuple[np.ndarray, list[int]]:
-    """Order: by stream position, clustered within; and the start index of every group."""
+    """Order: by stream position, clustered within; and the start index of every group. With
+    `emb_key` (writers), the embedding group (position 0) is sorted by it instead of clustered."""
     order, starts = [], []
     for g in np.unique(pos):
         idx = np.flatnonzero(pos == g)
         starts.append(len(order))
-        order.extend(idx[cluster_order(x[idx], metric)])
+        if emb_key is not None and g == 0:
+            order.extend(idx[np.argsort(emb_key[idx], kind="stable")])
+        else:
+            order.extend(idx[cluster_order(x[idx], metric)])
     return np.asarray(order), starts
 
 
@@ -109,7 +113,11 @@ def main() -> None:
                       for v, c in zip(vals, cnt, strict=True)}, flush=True)  # fmt: skip
 
     absM = np.abs(np.nan_to_num(M)) * co
-    w_ord, w_starts = grouped_order(ix["w_pos"], absM)
+    # embedding tokens in value order: <BOS>, "1".."100", "+", "-", "="
+    special = {"<|begin_of_text|>": 0, "+": 101, "-": 102, "=": 103}
+    emb_key = np.array([special[t] if t in special else int(t) if t.isdigit() else 0
+                        for t in ix["w_token"].astype(str)])  # fmt: skip
+    w_ord, w_starts = grouped_order(ix["w_pos"], absM, emb_key=emb_key)
     r_ord, r_starts = grouped_order(ix["r_pos"], absM.T)
     # per token position p: the writers / readers active at p (indices into the canonical order
     # above), re-clustered within each stream-position group on their pairs among themselves
@@ -120,16 +128,17 @@ def main() -> None:
     Uc, Vc = vec["U_hat"][w_ord], vec["V_til"][r_ord]
     wp, rp = ix["w_pos"][w_ord], ix["r_pos"][r_ord]
     wa, ra = w_act[w_ord], r_act[r_ord]
+    ek = emb_key[w_ord]
     orders: dict[str, dict[str, dict[str, list[int]]]] = {"profile": {}, "direction": {}}
     orders["profile"]["any"] = {"w": list(range(len(w_ord))), "r": list(range(len(r_ord)))}
-    orders["direction"]["any"] = {"w": grouped_order(wp, Uc, "direction")[0].tolist(),
+    orders["direction"]["any"] = {"w": grouped_order(wp, Uc, "direction", ek)[0].tolist(),
                                   "r": grouped_order(rp, Vc, "direction")[0].tolist()}  # fmt: skip
     for t in range(T):
         sw, sr = np.flatnonzero(wa >> t & 1), np.flatnonzero(ra >> t & 1)
         sub = absC[np.ix_(sw, sr)]
-        orders["profile"][str(t)] = {"w": sw[grouped_order(wp[sw], sub)[0]].tolist(),
+        orders["profile"][str(t)] = {"w": sw[grouped_order(wp[sw], sub, emb_key=ek[sw])[0]].tolist(),
                                      "r": sr[grouped_order(rp[sr], sub.T)[0]].tolist()}  # fmt: skip
-        orders["direction"][str(t)] = {"w": sw[grouped_order(wp[sw], Uc[sw], "direction")[0]].tolist(),
+        orders["direction"][str(t)] = {"w": sw[grouped_order(wp[sw], Uc[sw], "direction", ek[sw])[0]].tolist(),
                                        "r": sr[grouped_order(rp[sr], Vc[sr], "direction")[0]].tolist()}  # fmt: skip
         print(f"position {t}: {len(sw)} writers, {len(sr)} readers", flush=True)
     print("clustered", flush=True)
