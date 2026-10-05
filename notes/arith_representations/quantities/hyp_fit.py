@@ -22,7 +22,7 @@ Diagnostics on the residuals (what the next hypothesis should explain):
 """
 
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -62,6 +62,7 @@ class ReaderFit:
     fitted: np.ndarray
     r2: float
     unique: dict[str, float]  # variance fraction lost when dropping each quantity
+    contrib: dict[str, np.ndarray] = field(default_factory=dict)  # each quantity's part of the fit
 
 
 def _label(q: Quantity, j: int) -> str:
@@ -118,14 +119,20 @@ def fit_reader(x: np.ndarray, H: list[Quantity], used: Counter, max_moves: int =
             cols.append(H[qi].Phi[:, c])
             owner.append((qi, c))
     B = np.stack(cols, 1)
-    rss, fit, _ = _rss(B, x)
+    rss, fit, coef = _rss(B, x)
     tot = float(((x - x.mean()) ** 2).sum()) or 1e-12
+    contrib: dict[str, np.ndarray] = {}
+    for k, (o, _) in enumerate(owner):
+        if o >= 0:
+            contrib[H[o].name] = contrib.get(H[o].name, np.zeros(N)) + coef[k] * B[:, k]
     unique = {}
     for qi in sorted(in_use):
         keep = [k for k, (o, _) in enumerate(owner) if o != qi]
         unique[H[qi].name] = round((_rss(B[:, keep], x)[0] - rss) / tot, 4)
     items = [f"{H[o].name}: {_label(H[o], c)}" for (o, c) in owner if o >= 0 and c >= 0]
-    return ReaderFit([H[qi].name for qi in sorted(in_use)], items, fit, 1 - rss / tot, unique)
+    return ReaderFit(
+        [H[qi].name for qi in sorted(in_use)], items, fit, 1 - rss / tot, unique, contrib
+    )
 
 
 def fit_site(X: np.ndarray, H: list[Quantity], passes: int = 2) -> list[ReaderFit]:
