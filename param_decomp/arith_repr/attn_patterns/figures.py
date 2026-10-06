@@ -271,6 +271,57 @@ def patch() -> None:
     plt.close(fig)
 
 
+def copy_tests() -> None:
+    """The L15-16 split tests (`copy_tests.py`): KL change per variant, both models."""
+    R = dict(np.load(OUT / "copy_patch.npz"))
+    base = R["dec/none"].mean()
+    fig, axes = plt.subplots(1, 2, figsize=(14, 3.9), gridspec_kw={"width_ratios": [1.5, 1]})
+    fig.subplots_adjust(wspace=0.6)
+    ax = axes[0]
+    subs = [
+        ("all", "all\nkeys"),
+        ("focus", "focus\nkey"),
+        ("other", "other\nkeys"),
+        ("bos", "<BOS>\nonly"),
+        ("rest", "other keys\nexcept <BOS>"),
+    ]
+    x = np.arange(len(subs))
+    for i, (src, col, lab) in enumerate(
+        (
+            ("dec_values", C_DEC, "decomposed values u_d"),
+            ("orig_values", C_ORIG, "original values u_o"),
+        )
+    ):
+        ax.bar(
+            x + (i - 0.5) * 0.36,
+            [R[f"dec/{k}/{src}"].mean() - base for k, _ in subs],
+            width=0.34,
+            color=col,
+            label=lab,
+        )
+    ax.set_xticks(x, [lab for _, lab in subs])
+    ax.axhline(0, color=INK, lw=0.8)
+    ax.set_ylabel(f"KL change vs. unpatched decomposed ({base:.4f})")
+    ax.set_title(
+        "decomposed model + the original pattern's change on the keys S (4 heads, '=' row)",
+        fontsize=8,
+    )
+    ax.legend(frameon=False, fontsize=7.5, loc="center right")
+    ax = axes[1]
+    names = [("orig/swap_all_rows", "decomposed pattern, all rows"), ("orig/dec_row", "decomposed '=' row"),
+             ("orig/focus_amp", "focus weight -> decomposed"), ("orig/drop_other", "drop other keys"),
+             ("orig/drop_rest", "drop other non-<BOS> keys")]  # fmt: skip
+    ax.barh(np.arange(len(names)), [R[k].mean() for k, _ in names], color=C_LOC, height=0.6)
+    ax.set_yticks(np.arange(len(names)), [lab for _, lab in names], fontsize=8)
+    ax.invert_yaxis()
+    ax.axvline(base, color=INK, lw=0.8, ls="--")
+    ax.text(base, len(names) - 0.4, " decomposed model", fontsize=7, color=INK)
+    ax.set_xlabel("KL(original || modified original)")
+    ax.set_title("original model, 4 heads modified", fontsize=8)
+    fig.savefig(FIG / "fig11_copy_tests.png")
+    plt.close(fig)
+
+
 def active(S: dict[str, np.ndarray]) -> None:
     fig, axes = plt.subplots(1, 4, figsize=(13, 3.2), sharey=True)
     cols = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4"]
@@ -335,6 +386,8 @@ def main() -> None:
         grid(args["grid"].split(","), P)
     if (OUT / "patch.npz").exists():
         patch()
+    if (OUT / "copy_patch.npz").exists():
+        copy_tests()
 
 
 if __name__ == "__main__":

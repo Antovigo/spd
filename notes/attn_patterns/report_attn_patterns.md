@@ -25,6 +25,12 @@ Run `p-ba5a0c05` (addsub-all-layers-05, step 40000). Date 2026-10-06.
   18, and there it hurts. So the decomposed model's downstream components are fitted to its own
   patterns. Removing the decomposed model's remaining prompt dependence (each pattern replaced by
   its prompt mean) costs +0.0029.
+- **At layers 15-16 the harm is the weight on the copied operand, not the other keys' values.**
+  The decomposed model does not reconstruct the values at the keys its heads ignore. But putting
+  the original's weight back on those keys changes KL by at most +0.0001, with decomposed or
+  original values. Lowering the weight on the focus operand to the original's alone costs +0.0059.
+  In the original model, removing those other keys costs 0.0043, while raising the focus weight
+  to the decomposed value costs 0.050 (section 6).
 
 ## Setup
 
@@ -248,6 +254,98 @@ components and everything else stay decomposed.
   prompt-to-prompt variation is worth 0.0022 when patched into the decomposed model (0.0632 with
   prompt means vs 0.0610 per prompt).
 
+## 6. Why the original patterns hurt at layers 15-16
+
+One account of section 5: the original heads also copy information that doesn't matter for the
+output; the decomposition skips it and doesn't reconstruct the values at those keys; patching
+the original pattern back copies those badly reconstructed values. A second account: the original
+pattern puts less weight on the operand the head copies, and the decomposed model's later layers
+expect the stronger copy. The tests below separate the two on the four heads L15H13, L15H3,
+L16H21 and L16H3.
+
+**Notation** (per head and prompt, at the `=` query; j is a key position from 0 to 4):
+- the *focus key* f is the non-`<BOS>` key the decomposed `=` row weighs most: `b` (j = 3) for
+  L15H13 and L15H3, `a` (j = 1) for L16H21 and L16H3;
+- P_o(j), P_d(j) ∈ [0, 1] are the original / decomposed weights on key j, and
+  dP(j) = P_o(j) − P_d(j);
+- u_o(j), u_d(j) are the vectors (d_model = 4096 dimensions) the head would add to the residual
+  stream at `=` if it attended only to key j: its value at j through its o-projection, original or
+  decomposed (masked v components at j, masked o components at `=`).
+
+The head's write is Σ_j P(j) u(j). It is linear in the weights, so a pattern change splits
+exactly into per-key pieces dP(j) u(j). KL is KL(original || variant) at `=`, on the same 2000
+prompts as section 5. Code: `copy_tests.py`. Two sanity checks: my re-implementation of the
+unmodified original model gives KL 0.00001 against the reference forward, and swapping the four
+heads' full patterns reproduces section 5's 0.0567.
+
+![copy tests](figures/fig11_copy_tests.png)
+
+*Fig. 11. Left: decomposed model plus Σ_{j ∈ S} dP(j) u(j) at `=` for the four heads, for key
+sets S, with u = u_d (an exact pattern change) or u = u_o (the change the original head would
+make, read from the stored original stream). The y axis is the KL change against the unpatched
+decomposed model (0.0511). Right: the original model with the four heads' `=` rows modified. The
+dashed line is the decomposed model's own KL.*
+
+**Test 1: is the extra information irrelevant in the original model?** Mostly.
+
+| original model, 4 heads modified | KL |
+|---|---|
+| decomposed patterns on every query row | 0.0414 |
+| decomposed `=` row | 0.0420 |
+| focus weight alone set to P_d(f) (others unchanged) | 0.0503 |
+| other keys removed (keep P_o(f) only, `<BOS>` included in "other") | 0.0043 |
+| other non-`<BOS>` keys removed | 0.0041 |
+
+Removing everything except the focus key costs the original 0.0043, a tenth of the cost of the
+decomposed row (0.0420). The cost comes from raising the focus weight (0.0503), not from losing the
+other keys. `<BOS>` contributes nothing; its value is near zero in both models (next table).
+
+**Test 2: are the ignored keys' values reconstructed?** No. Neither is the focus key, except
+partly in L16H21 and L15H13. Relative error is Σ_n |u_d − u_o|² / Σ_n |u_o|² over the 20000
+prompts n; RMS norms are over prompts.
+
+| head (focus) | rel. error at `<BOS>`, a, op, b, = | cos(u_d, u_o) at f | RMS norm of u_o(f) / u_d(f) | RMS norm of u_o at the other non-`<BOS>` keys / u_d |
+|---|---|---|---|---|
+| L15H13 (b) | 0.96, 0.90, 0.96, **0.73**, 1.05 | 0.59 | 3.06 / 2.67 | 1.9-3.5 / 0.7-1.1 |
+| L15H3 (b) | 1.00, 1.02, 0.99, **0.95**, 1.00 | 0.24 | 2.02 / 0.64 | 1.8-2.2 / 0.3-0.6 |
+| L16H21 (a) | 0.98, **0.61**, 0.97, 0.92, 0.99 | 0.69 | 3.29 / 3.23 | 2.1-2.6 / 0.3-0.9 |
+| L16H3 (a) | 1.00, **0.91**, 0.99, 0.98, 1.00 | 0.31 | 3.48 / 0.93 | 2.1-2.7 / 0.26-0.35 |
+
+- At the other non-`<BOS>` keys the decomposed head writes 3-8x less than the original, nearly
+  orthogonal to it (cos 0.05-0.31).
+- The `<BOS>` value is near zero in the original (RMS norm 0.09-0.18) and in the decomposed model.
+- The same components on the original stream give the same errors (focus key: 0.70, 0.95, 0.58,
+  0.91), so the error is in the v/o components, not in the upstream drift.
+
+**Test 3: which piece of the patch costs the KL?** The focus piece, entirely.
+
+| decomposed model + Σ_{j ∈ S} dP(j) u(j) | u = u_d | u = u_o |
+|---|---|---|
+| S = all keys | +0.0057 | +0.0066 |
+| S = focus key | +0.0059 | +0.0073 |
+| S = other keys | +0.0001 | −0.0000 |
+| S = `<BOS>` | +0.0000 | +0.0000 |
+| S = other non-`<BOS>` keys | +0.0001 | −0.0000 |
+
+- Per head, the focus piece costs: L16H21 +0.0019, L15H13 +0.0011, L16H3 +0.0004, L15H3 +0.0002.
+  The other-keys piece is +0.0001 or less for every head.
+- dP(f) < 0 on average for all four heads, so the focus piece lowers the weight on the copied operand.
+- Injecting the other keys' change with the ORIGINAL values (u_o) does nothing either (−0.0000).
+  The decomposed model's later layers don't read that information, whether or not it is
+  reconstructed.
+
+**Verdict.**
+- The first two steps of the first account hold: the information from the other keys matters
+  little in the original (0.0043), and the decomposition does not reconstruct it.
+- Its last step does not: copying those values back is not what hurts.
+- The harm is the amplitude of the operand copy. The decomposed heads put more weight on the
+  operand (P_d(f) > P_o(f)), the decomposed model depends on it (lowering it costs +0.0059), and
+  the original model is sensitive to it in the other direction (raising it costs 0.050, about the
+  whole decomposition gap of 0.051).
+- For L15H3 and L16H3 the larger weight comes with a smaller focus value (RMS norm 0.64 vs 2.02,
+  0.93 vs 3.48). For L15H13 and L16H21 the focus values are of similar size (2.67 vs 3.06, 3.23 vs
+  3.29).
+
 ## Caveats
 
 - The decomposed model is the rounded-CI dataset model (threshold 0.01 on the ceiling-filter CI
@@ -262,14 +360,16 @@ components and everything else stay decomposed.
   - `extract.py`: patterns, write norms, swap change, validation.
   - `summary.py`: per-head statistics.
   - `patch.py`: causal patching; `heads` mode for single heads and prompt means.
+  - `copy_tests.py`: the layer 15-16 tests of section 6 (`values` and `patch` modes).
   - `figures.py`: figures.
 - Data: `~/out/pod-backup/p-ba5a0c05/analysis/attn_patterns/`:
   - `<cond>_P.npy`, (L, N, H, T, T) float16: the patterns.
   - `<cond>_W.npy`: write norms.
   - `dec_dW.npy`: swap change.
-  - `summary.npz`, `patch.npz`, `patch_heads.npz`, `check.json`.
+  - `summary.npz`, `patch.npz`, `patch_heads.npz`, `copy_patch.npz`, `copy_values.npz`,
+    `check.json`.
   - `figures/`.
   - Shapes: L = 32 layers, N = 20000 prompts, H = 32 heads, T = 5 positions; `<cond>` is `orig`,
     `dec` or `loc` (components on the original stream).
-- SLURM wrapper: `~/pd_scratch/dual_obj_jax/attn_patterns/ap.sbatch` (`MOD=extract|summary|patch|figures`).
+- SLURM wrapper: `~/pd_scratch/dual_obj_jax/attn_patterns/ap.sbatch` (`MOD=extract|summary|patch|copy_tests|figures`).
   CPU only; the extraction took 1.7 h on 16 cores.
