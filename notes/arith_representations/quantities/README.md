@@ -317,3 +317,86 @@ by 3 as a stream quantity.
 order check above). In 4096 dimensions with 100 values of a, directions estimated from 90 values
 are mostly noise, so the embedding's cross-validated R^2 is negative and not informative; a
 ridge penalty or a lower-dimensional reference would be needed there.
+
+## V2 across layers (token a)
+Code: `v2_layers.py` (sweep), `v2_sets.py` (hypothesis sets), `v2_feature_test.py` (permutation
+test of one candidate feature on the residual), `v2_layers_features.py` (figure). Numbers:
+`layers_<set>.json`, `feature_test_*.json`.
+
+**Sites.** Every read point of the network at token position t = 1: the attention input of block
+b (stream position l = 2b, readers q, k, v) and its MLP input (l = 2b + 1, readers gate, up), for
+b = 0..31, restricted to the readers active at t = 1. 63 sites (L31's MLP has no active reader at
+t = 1); 3 to 115 readers per site. Each site is fit as in V2 (shared directions in the reader
+span, stagewise, reader metric, chance level, 10-fold cross-validation over values of a).
+
+**Loop.**
+1. The L0 set (`L0_set`) at every site (`figures/v2_layers_base_overview.png`). The residual
+   before the one-hot remainder stays above its permutation null at most sites (top singular
+   value / null 1.2-1.6), and its power peaks at frequencies k = 25, 14-15, 12, 17, 22 over a
+   (k: number of periods in a = 1..100).
+2. Residues a mod 4, 6, 7, 8, 9 (`residues_set`), the moduli whose DFT signatures fall at those
+   k: rejected. Below chance at every site (mod 6-9: -0.005 to -0.051), mod 4 at most +0.023
+   (L20.attn, L24.attn, L25.attn); held-out R^2 decreases.
+3. The residual's top singular function, read directly (`figures/v2_layers_new_features.png`,
+   top two panels):
+   - at L14-L31 it is the same function at most sites (median |correlation| with L26.mlp's 0.86):
+     positive on all 12 multiples of 8, negative on the even numbers = 2 mod 4, near 0 on odd
+     numbers: the **2-adic valuation** of a (the exponent of the largest power of 2 dividing a);
+   - at L1-L13 its largest values include the **repdigits** 22, 33, 44, 66 (a = 11 x digit), with
+     other values (23, 56) as large.
+   Token frequency (proxy: log token id, i.e. BPE merge rank) does not match it (|correlation|
+   <= 0.15).
+4. Permutation test of each feature against the residual of the L0 set (`v2_feature_test.py`):
+   the share of the residual's variance along the feature's part outside the L0 set's span, vs
+   500 permutations of the feature over a (`figures/v2_layers_new_features.png`, bottom).
+   - 2-adic valuation, one direction carrying min(v2(a), 4): p < 0.01 at 41 of 63 sites; share
+     8-32% at L16-L31 (null about 0.7%), 3-8% at L0.mlp-L5 (sites where it was not found, so not
+     selection-biased).
+   - Repdigit indicator: p < 0.01 at L0.mlp-L4.mlp (2.5-9.5%) and L12.mlp-L18.attn (3-10.5%),
+     not after L18.
+5. Final set (`final_set`) = L0 set + both features as one direction each, fit last before the
+   remainder (`figures/v2_layers_final_overview.png`).
+
+![sweep, final set](figures/v2_layers_final_overview.png)
+![new features](figures/v2_layers_new_features.png)
+
+**Results (final set).**
+
+| | L0 (2 sites) | L1-L13 (26 sites) | L14-L31 (35 sites) |
+|---|---|---|---|
+| one-hot remainder (token-specific), median share of reads | 0.207 | 0.045 | 0.036 |
+| structured part, in-sample R^2 (median) | 0.79 | 0.96 | 0.96 |
+| structured part, held-out values of a (median) | 0.33 | 0.68 | 0.79 |
+| residual top singular value / null (median) | 1.09 | 1.31 | 1.25 |
+
+| quantity (dims) | median increment | median excess over chance | sites with excess > 0.02 (of 63) |
+|---|---|---|---|
+| magnitude curve (1) | 0.281 | +0.271 | 63 |
+| 2 more smooth dims in log a (2) | 0.197 | +0.180 | 60 |
+| one digit [a <= 9] (1) | 0.002 | -0.003 | 0 |
+| a mod 10, circle j = 1 (2) | 0.036 | +0.028 | 45 |
+| a mod 10, harmonics j = 2..5 (7) | 0.134 | +0.102 | 57 |
+| a mod 3 (2) | 0.004 | -0.002 | 0 |
+| tens digit (9) | 0.137 | +0.102 | 57 |
+| place code, smooth in a (24) | 0.093 | +0.044 | 48 |
+| 2-adic valuation (1) | 0.001 | +0.000 | 0 (max 0.014, L20.attn) |
+| repdigit (1) | 0.001 | +0.000 | 0 (max 0.013, L13.attn) |
+
+- **After L0 the token-specific part nearly disappears from what the readers read**: the one-hot
+  remainder drops from 0.18-0.24 at L0 to a median 0.04, and the structured quantities predict
+  held-out values of a (median 0.68-0.79 from L1 on, vs 0.33 at L0). The readers after L0 read
+  the number through shared quantities, not through token-specific directions.
+- **The same quantities run through the whole network at token a**: the magnitude (1 + 2 smooth
+  directions), the units digit and the tens digit / decade-scale structure have an excess over
+  chance at nearly every site. a mod 3 and the one-digit flag never do.
+- **The units digit becomes strongest in the middle** (harmonics j = 2..5 excess up to 0.30 at
+  L15.attn and L20.attn; the period-10 circle j = 1 excess 0.06-0.15 at L13-L18).
+- **Two new quantities, small but significant**: the 2-adic valuation (mainly L16-L31) and
+  repdigits (L0-L4 and L12-L18). Each is about 1% of the reads at most (largest increments
+  0.014 and 0.013); they matter as structure in the residual, not as variance.
+- **Low held-out R^2 at a few attention sites with 3-11 readers** (L6, L8, L9, L10, L12, L17
+  attention inputs: -0.12 to 0.36). These are small reader spans where per-site estimates are
+  noisy; their one-hot remainder is also higher (0.11-0.22).
+- **Unexplained**: after the final set the residual is still above its permutation null at most
+  sites (median ratio 1.25-1.31), with dominant frequencies k = 25 (period 4) at L15-L29 and
+  k = 12-17 at L1-L14. The next iteration of the loop starts there.
