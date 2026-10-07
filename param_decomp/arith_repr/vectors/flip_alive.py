@@ -203,35 +203,30 @@ def flipswap() -> None:
     """Is the flip the only difference between the operations from L16 on? At the stream entering
     L16's MLP at `=`, the base model's flip part F_16 (b-odd, op-odd part of the (op, b) group means)
     is removed (`clamp16`: -F on add, +F on sub) or reversed (`swap16`: -2F on add, +2F on sub, so each
-    operation gets the other's flip). Scores: accuracy (add; sub with a >= b), and `other` = top-1 is
-    the other operation's answer (add with a > b: a - b; sub: a + b)."""
+    operation gets the other's flip). Scores per operation, against the UNEDITED model's top-1:
+    `swap` = top-1 on (o, a, b) equals the unedited top-1 on (1 - o, a, b) (row i <-> i +- 10000);
+    `same` = equals the unedited top-1 on the prompt itself; both also on the pairs with a > b."""
     S = np.load(DIR / "eval_alive_base.npz")
     F = flip_part(S["x16"][:200].astype(np.float64))  # (100, d), the add-side sign
     net = Net(dense=False, alive=True)
     cm = net.cm
     s0 = net.scales_one()
     rows = np.arange(20000)
-    add, sub = cm.op == 0, cm.op == 1
-    other = np.where(
-        add, cm.num_ids[np.clip(cm.a - cm.b, 0, 200)], cm.num_ids[np.clip(cm.a + cm.b, 0, 200)]
-    )
+    partner = np.r_[np.arange(10000, 20000), np.arange(10000)]
+    gt = cm.a > cm.b
     res: dict[str, Any] = {}
+    top0 = None
     for name, scale in (("base", 0.0), ("clamp16", 1.0), ("swap16", 2.0)):
         tab = scale * np.concatenate([F, -F]).astype(np.float32)
         net.P["clamp"] = {16: jnp.asarray(tab)} if scale else {}
         top = net.logprobs(s0, rows).argmax(-1)
-        sel_add_gt = add & (cm.a > cm.b)
-        r = {
-            "acc_add": float((top[add] == cm.answer[add]).mean()),
-            "other_add_gt": float((top[sel_add_gt] == other[sel_add_gt]).mean()),
-            "acc_sub_ge": float(
-                (top[sub & (cm.a >= cm.b)] == cm.answer[sub & (cm.a >= cm.b)]).mean()
-            ),
-            "other_sub": float((top[sub] == other[sub]).mean()),
-            "other_sub_ge": float(
-                (top[sub & (cm.a >= cm.b)] == other[sub & (cm.a >= cm.b)]).mean()
-            ),
-        }
+        if top0 is None:
+            top0 = top
+        r = {}
+        for o, nm in ((0, "add"), (1, "sub")):
+            for tag, sel in (("", cm.op == o), ("_gt", (cm.op == o) & gt)):
+                r[f"swap_{nm}{tag}"] = float((top[sel] == top0[partner][sel]).mean())
+                r[f"same_{nm}{tag}"] = float((top[sel] == top0[sel]).mean())
         res[name] = r
         print(name, {k: round(v, 3) for k, v in r.items()}, flush=True)
     net.P["clamp"] = {}
