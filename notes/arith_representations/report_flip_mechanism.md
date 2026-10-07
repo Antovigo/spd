@@ -250,13 +250,23 @@ Four gate and up components of the layer-15 MLP decide what happens next. In the
 - **"Cosine with the op flag"** compares each component's read direction (V times the norm gain)
   with the op flag at the input of the layer-15 MLP.
 - **"Mean inner activation"** is h_c averaged over each operation's prompts.
+- **"Push on the flip neurons"** lists, for each flip neuron n of step 3 that the component writes
+  to strongly, U_c[n] × (mean h_c), where U_c[n] is entry n of the component's write vector (into
+  the gate or up pre-activations of the 14,336 layer-15 neurons) and the mean is over the prompts of
+  the operation on which the component is on, at `=`. It is how much the component moves that
+  neuron's gate (for a gate component) or up (for an up component) pre-activation on average.
 
-| Component | Cosine with the op flag | Mean inner activation, add / sub | Role |
-|---|---|---|---|
-| L15.gate.c72 | −0.58 | 0.1 / 15.8 | on for subtraction only |
-| L15.up.c117 | +0.57 | −0.6 / −15.1 | on for subtraction only |
-| L15.up.c34 | −0.34 | −9.4 / 0.0 | on for addition only |
-| L15.gate.c0 | 0.00 | 21.3 / 22.7 | on for both; does not read the operation (a shared bias on the flip neurons' gates, step 3) |
+| Component | Cosine with the op flag | Mean inner activation, add / sub | Role | Push on the flip neurons |
+|---|---|---|---|---|
+| L15.gate.c72 | −0.58 | 0.1 / 15.8 | on for subtraction only | gate, on sub: 11305 +1.48, 9057 +1.40, 7446 −1.38, 13193 −0.63 |
+| L15.up.c117 | +0.57 | −0.6 / −15.1 | on for subtraction only | up, on sub: 130 −1.59, 9205 +1.50, 12769 +1.35, 6456 −1.21, 13193 +0.52 |
+| L15.up.c34 | −0.34 | −9.4 / 0.0 | on for addition only | up, on add: 130 +0.97, 9205 −0.97, 12769 −0.88, 6456 +0.85, 13193 −0.32 |
+| L15.gate.c0 | 0.00 | 21.3 / 22.7 | on for both; does not read the operation (a shared bias on the flip neurons' gates, step 3) | gate, on add / sub: 7446 +1.50 / +1.60, 13193 +0.69 / +0.74, 130 +0.52 / +0.55, 6456 +0.46 / +0.49 |
+
+Up c117 and up c34 push the same five neurons with opposite signs, on opposite operations: the up
+pre-activation of 130, 9205, 12769 and 6456 changes sign between addition and subtraction. Gate c72
+acts on a different set: on subtraction it raises the gates of 11305 and 9057 and lowers the gate of
+7446.
 
 None of the four reads b. I measure this with **alignment**: the length of a direction's projection
 onto a plane divided by its own length, where a random direction in 4096 dimensions gives 0.022. On
