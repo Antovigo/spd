@@ -81,6 +81,48 @@ position, with no masks, no delta and no dead components. Against the original m
   | down c16 | 0.67 |
   | up c34 | 0.68 |
 
+## Figure
+
+![flip planes](figures_flip/flip_planes.png)
+
+One row per harmonic k. Each panel is b's Fourier plane at k: the plane of b's code on add at that
+point of the stream. The two axes are its cos axis and its sine axis.
+
+- **Dots and curves.** Dots are the class means of the stream for each value of b. Curves are their
+  harmonic-k part, and the markers 1 and 2 show where b = 1 and b = 2 sit, so the direction of
+  travel is visible.
+- **Arrows.** They are component directions projected on the plane. Arrow length is the
+  direction's alignment with the plane (1 means fully inside it).
+- **Crosses (right).** The down component's own contribution, by class of b.
+
+Left panels: the stream entering L15's MLP.
+- Add and sub travel b's circle in the same direction, so there is no flip yet.
+- The input that reads b points along the sine axis, with alignment 0.63–0.82: up c16 and c64
+  (period 5), gate c21 (period 10), gate c4 (period 100), gate c35 (period 50).
+- The op switches feeding the same neurons barely touch b's plane (gate c0, gate c72, up c117,
+  up c0: alignment 0.01–0.07). They read the operation, not b.
+
+Right panels: the stream entering L16's MLP.
+- Each writer points along the sine axis.
+- At period 5, c16 (add) and c64 (sub) point in opposite directions. c16's own contribution is
+  spread along its arrow on add and close to 0 on sub.
+- At periods 5 and 10, b = 1 on sub sits on the opposite side of the sine axis from add: the
+  mirror.
+- Sub's curve is much flatter than add's, so sub's sine component is smaller than add's.
+
+## Is the flip the only difference between the operations?
+
+No. The test reverses only the flip in the stream entering L16's MLP, so each operation gets the
+other's flip; the op flag and everything else stay. Each prompt is scored against the unedited
+model's top-1 answer.
+
+| Edit | Add: becomes the sub answer | Add: keeps its own answer | Sub: becomes the add answer | Sub: keeps its own answer |
+|---|---|---|---|---|
+| Reverse the flip | 0.11 (0.10 for a > b) | 0.15 | 0.008 | 0.59 |
+| Remove the flip | 0.09 | 0.86 | 0.006 | 0.79 |
+
+The unedited model's add and sub answers coincide on 0.005 of prompts.
+
 ## Not settled
 
 - **The writers' b code is also needed for addition.** On addition, removing down c16 costs KL 0.26
@@ -88,9 +130,8 @@ position, with no masks, no delta and no dead components. Against the original m
   only its dependence on the operation.
 - **The switches also write an operation constant** through other neurons (mainly neuron 9816,
   read by down c6).
-- **It is not yet known whether the flip alone decides which answer is given.** That is the
-  flip-swap test: swap only the flip at the input of L16, scored against the model's own answer on
-  the paired prompt.
+- **Which other operation-dependent signals, besides the flip, decide the answer.** The flip
+  alone is not enough (previous section).
 
 Code is in `param_decomp/arith_repr/vectors/flip_{alive,core,dirs,set}.py`. Data is in
 `<run>/analysis/arith_repr/vectors/flip/`.
