@@ -1,7 +1,7 @@
 """Schematic of the b flip on b's Fourier planes, with the components' read and write directions
 (alive-only model, position `=`).
 
-    python -m param_decomp.arith_repr.vectors.flip_fig   # -> OUT/flip/flip_planes.png
+    python -m param_decomp.arith_repr.vectors.flip_fig   # -> OUT/flip/flip_planes.png, planes_read.png, planes_write.png
 
 One row per harmonic k (period T = 100 / gcd(k, 100)) and its flip neurons. Plane: b's add code at k,
 F = F_{b,add}(k) (as in `flip_dirs`), with basis e1 = Re F / |Re F|, e2 = Im F made orthogonal to e1.
@@ -66,99 +66,117 @@ def main() -> None:
     Hd = z[f"h{L}.down"][4, :200] / 100.0  # (200, n_down) class means by (op, b)
 
     fig, axes = plt.subplots(len(ROWS), 2, figsize=(10, 4.6 * len(ROWS)))
+    fr, axr = plt.subplots(2, 2, figsize=(10, 9.4))  # read side only (stream entering L15's MLP)
+    fw, axw = plt.subplots(2, 2, figsize=(10, 9.4))  # write side only (stream entering L16's MLP)
     for row, (k, neurons, downs) in enumerate(ROWS):
         T = 100 // np.gcd(k, 100)
         th = 2 * np.pi * k * np.arange(0, 100, 0.05) / 100
         for col, p in enumerate((15, 16)):
-            ax = axes[row, col]
-            B = plane(F[p][("b", 0)][k - 1])  # (2, d)
-            curves = []
-            for o in (0, 1):
-                c = B @ F[p][("b", o)][k - 1]  # (2,) complex
-                curves.append(np.stack([2 * np.real(c[i] * np.exp(1j * th)) for i in (0, 1)]))
-            scale = max(np.linalg.norm(cu, axis=0).max() for cu in curves)
-            for o, colr, ls in ((0, ADD, "-"), (1, SUB, "--")):
-                xy = (pts[p][o] @ B.T) / scale
-                ax.scatter(xy[:, 0], xy[:, 1], s=6, color=colr, alpha=0.25, linewidths=0)
-                cu = curves[o] / scale
-                ax.plot(cu[0], cu[1], ls, color=colr, lw=2, label=("add", "sub")[o])
-                c = B @ F[p][("b", o)][k - 1]
-                for v in (1, 2):
-                    q = (
-                        np.array(
-                            [2 * np.real(c[i] * np.exp(2j * np.pi * k * v / 100)) for i in (0, 1)]
-                        )
-                        / scale
-                    )
-                    ax.scatter(*q, s=40, color=colr, edgecolors="white", linewidths=1.5, zorder=4)
-                    ax.annotate(
-                        str(v), q, xytext=(5, 5), textcoords="offset points", color=INK, fontsize=9
-                    )
-            arrows = []
-            if p == 15:
-                for n in neurons:
-                    for kind in ("gate", "up"):
-                        names, V, Uc = S[kind]
-                        imp = np.abs(Uc[:, n]) * rms[kind]
-                        j = int(np.argmax(imp))
-                        r = V[:, j] * ln2
-                        arrows.append(
-                            (
-                                f"{kind} {names[j]} -> neuron {n}",
-                                B @ (r / np.linalg.norm(r)),
-                                READ_C,
+            for ax in (axes[row, col], (axr if col == 0 else axw).flat[row]):
+                B = plane(F[p][("b", 0)][k - 1])  # (2, d)
+                curves = []
+                for o in (0, 1):
+                    c = B @ F[p][("b", o)][k - 1]  # (2,) complex
+                    curves.append(np.stack([2 * np.real(c[i] * np.exp(1j * th)) for i in (0, 1)]))
+                scale = max(np.linalg.norm(cu, axis=0).max() for cu in curves)
+                for o, colr, ls in ((0, ADD, "-"), (1, SUB, "--")):
+                    xy = (pts[p][o] @ B.T) / scale
+                    ax.scatter(xy[:, 0], xy[:, 1], s=6, color=colr, alpha=0.25, linewidths=0)
+                    cu = curves[o] / scale
+                    ax.plot(cu[0], cu[1], ls, color=colr, lw=2, label=("add", "sub")[o])
+                    c = B @ F[p][("b", o)][k - 1]
+                    for v in (1, 2):
+                        q = (
+                            np.array(
+                                [
+                                    2 * np.real(c[i] * np.exp(2j * np.pi * k * v / 100))
+                                    for i in (0, 1)
+                                ]
                             )
+                            / scale
                         )
-            else:
-                names, _, Ud = S["down"]
-                for dn in downs:
-                    j = names.index(dn)
-                    u = Ud[j] / np.linalg.norm(Ud[j])
-                    arrows.append((f"down {dn}", B @ u, WRITE_C))
-                    hc = Hd[:, j].reshape(2, 100)
-                    hc = hc - hc.mean(1, keepdims=True)
-                    for o, colr in ((0, ADD), (1, SUB)):
-                        xy = np.outer(hc[o], B @ Ud[j]) / scale
                         ax.scatter(
-                            xy[:, 0],
-                            xy[:, 1],
-                            s=10,
-                            color=colr,
-                            marker="x",
-                            alpha=0.6,
-                            linewidths=1,
+                            *q, s=40, color=colr, edgecolors="white", linewidths=1.5, zorder=4
                         )
-            key = []
-            for i, (lab, vec, colr) in enumerate(arrows):
-                tag = f"{'r' if p == 15 else 'w'}{i + 1}"
-                ax.annotate(
-                    "", vec, (0, 0), arrowprops={"arrowstyle": "-|>", "color": colr, "lw": 2}
+                        ax.annotate(
+                            str(v),
+                            q,
+                            xytext=(5, 5),
+                            textcoords="offset points",
+                            color=INK,
+                            fontsize=9,
+                        )
+                arrows = []
+                if p == 15:
+                    for n in neurons:
+                        for kind in ("gate", "up"):
+                            names, V, Uc = S[kind]
+                            imp = np.abs(Uc[:, n]) * rms[kind]
+                            j = int(np.argmax(imp))
+                            r = V[:, j] * ln2
+                            arrows.append(
+                                (
+                                    f"{kind} {names[j]} -> neuron {n}",
+                                    B @ (r / np.linalg.norm(r)),
+                                    READ_C,
+                                )
+                            )
+                else:
+                    names, _, Ud = S["down"]
+                    for dn in downs:
+                        j = names.index(dn)
+                        u = Ud[j] / np.linalg.norm(Ud[j])
+                        arrows.append((f"down {dn}", B @ u, WRITE_C))
+                        hc = Hd[:, j].reshape(2, 100)
+                        hc = hc - hc.mean(1, keepdims=True)
+                        for o, colr in ((0, ADD), (1, SUB)):
+                            xy = np.outer(hc[o], B @ Ud[j]) / scale
+                            ax.scatter(
+                                xy[:, 0],
+                                xy[:, 1],
+                                s=10,
+                                color=colr,
+                                marker="x",
+                                alpha=0.6,
+                                linewidths=1,
+                            )
+                key = []
+                for i, (lab, vec, colr) in enumerate(arrows):
+                    tag = f"{'r' if p == 15 else 'w'}{i + 1}"
+                    ax.annotate(
+                        "", vec, (0, 0), arrowprops={"arrowstyle": "-|>", "color": colr, "lw": 2}
+                    )
+                    ax.annotate(tag, vec, xytext=(3, 3), textcoords="offset points", color=INK,
+                                fontsize=8, fontweight="bold")  # fmt: skip
+                    key.append(f"{tag}: {lab}, alignment {np.linalg.norm(vec):.2f}")
+                ax.text(0.02, 0.98, "\n".join(key), transform=ax.transAxes, va="top", ha="left",
+                        fontsize=7.5, color=INK)  # fmt: skip
+                ax.axhline(0, color=MUTED, lw=0.5)
+                ax.axvline(0, color=MUTED, lw=0.5)
+                ax.set_aspect("equal")
+                lim = 1.35
+                ax.set_xlim(-lim, lim)
+                ax.set_ylim(-lim, lim)
+                ax.set_xticks([])
+                ax.set_yticks([])
+                where = "entering L15 MLP (read)" if p == 15 else "entering L16 MLP (write)"
+                ax.set_title(
+                    f"b's plane, k = {k} (period {T}) — stream {where}", fontsize=10, color=INK
                 )
-                ax.annotate(tag, vec, xytext=(3, 3), textcoords="offset points", color=INK,
-                            fontsize=8, fontweight="bold")  # fmt: skip
-                key.append(f"{tag}: {lab}, alignment {np.linalg.norm(vec):.2f}")
-            ax.text(0.02, 0.98, "\n".join(key), transform=ax.transAxes, va="top", ha="left",
-                    fontsize=7.5, color=INK)  # fmt: skip
-            ax.axhline(0, color=MUTED, lw=0.5)
-            ax.axvline(0, color=MUTED, lw=0.5)
-            ax.set_aspect("equal")
-            lim = 1.35
-            ax.set_xlim(-lim, lim)
-            ax.set_ylim(-lim, lim)
-            ax.set_xticks([])
-            ax.set_yticks([])
-            where = "entering L15 MLP (read)" if p == 15 else "entering L16 MLP (write)"
-            ax.set_title(
-                f"b's plane, k = {k} (period {T}) — stream {where}", fontsize=10, color=INK
-            )
-            if row == 0 and col == 0:
-                ax.legend(loc="lower right", fontsize=8, frameon=False)
+                if row == 0:
+                    ax.legend(loc="lower right", fontsize=8, frameon=False)
     fig.text(0.5, 0.004, "dots: b class means (x: the down component's own contribution); curves: their harmonic-k part;"
              " 1, 2: b = 1, 2\narrows: read (left) / write (right) directions of components, length = alignment"
              " with the plane (1 = inside it)", ha="center", fontsize=8, color=MUTED)  # fmt: skip
     fig.tight_layout(rect=(0, 0.02, 1, 1))
     fig.savefig(DIR / "flip_planes.png", dpi=130)
-    print("saved", DIR / "flip_planes.png")
+    for f, nm, what in ((fr, "planes_read.png", "read directions of the gate / up inputs of the flip neurons"),
+                        (fw, "planes_write.png", "write directions of the down components (x: their own contributions)")):  # fmt: skip
+        f.text(0.5, 0.004, f"dots: b class means; curves: their harmonic-k part; 1, 2: b = 1, 2\narrows: {what},"
+               " length = alignment with the plane (1 = inside it)", ha="center", fontsize=8, color=MUTED)  # fmt: skip
+        f.tight_layout(rect=(0, 0.035, 1, 1))
+        f.savefig(DIR / nm, dpi=130)
+    print("saved", DIR / "flip_planes.png", DIR / "planes_read.png", DIR / "planes_write.png")
 
 
 if __name__ == "__main__":
