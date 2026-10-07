@@ -1,0 +1,419 @@
+{
+ "L0.mlp": {
+  "base": {
+   "ci_weighted_share": 0.16015221592800355,
+   "heldout_r2": 0.3849898389930575
+  },
+  "candidates": [
+   {
+    "candidate": "one-hot over single-value readers' values [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 16, 17, 18, 21, 22, 26, 28, 31, 32, 34, 38, 41, 42, 44, 45, 46, 47, 49, 50, 52, 54, 55, 56, 58, 59, 62, 64, 65, 66, 67, 68, 69, 74, 77, 78, 83, 84, 86, 87, 88, 89, 90, 94, 97, 98, 99, 100]",
+    "dims": 61,
+    "increment": 0.23557799851205777,
+    "chance": 0.2147450814640929,
+    "p": 0.004975124378109453,
+    "ci_weighted_share": 0.0076554124362783775,
+    "heldout_r2": 0.06774588626125
+   },
+   {
+    "candidate": "place code: bumps every 10 (width 4.0)",
+    "dims": 10,
+    "increment": 0.053474042733897234,
+    "chance": 0.03639747143459202,
+    "p": 0.004975124378109453,
+    "ci_weighted_share": 0.11878958026193767,
+    "heldout_r2": 0.36779781497797814
+   },
+   {
+    "candidate": "place code: bumps every 5 (width 2.5)",
+    "dims": 20,
+    "increment": 0.1012786814496651,
+    "chance": 0.07279494286918405,
+    "p": 0.004975124378109453,
+    "ci_weighted_share": 0.08916558072502728,
+    "heldout_r2": 0.3665700387424973
+   },
+   {
+    "candidate": "a mod 6 classes",
+    "dims": 5,
+    "increment": 0.007225339561762857,
+    "chance": 0.007279494286918404,
+    "p": 1.0,
+    "ci_weighted_share": 0.1510109091123502,
+    "heldout_r2": 0.3641874187376729
+   },
+   {
+    "candidate": "a mod 9 classes",
+    "dims": 8,
+    "increment": 0.019828666385163774,
+    "chance": 0.02183848286075521,
+    "p": 1.0,
+    "ci_weighted_share": 0.1347761321948909,
+    "heldout_r2": 0.32033655220915525
+   },
+   {
+    "candidate": "a mod 12 classes",
+    "dims": 11,
+    "increment": 0.029667138648239492,
+    "chance": 0.029117977147673616,
+    "p": 1.0,
+    "ci_weighted_share": 0.12581242000594617,
+    "heldout_r2": 0.30876820932888305
+   }
+  ],
+  "refined": {
+   "accepted_added": [
+    "one-hot over single-value readers' values [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 16, 17, 18, 21, 22, 26, 28, 31, 32, 34, 38, 41, 42, 44, 45, 46, 47, 49, 50, 52, 54, 55, 56, 58, 59, 62, 64, 65, 66, 67, 68, 69, 74, 77, 78, 83, 84, 86, 87, 88, 89, 90, 94, 97, 98, 99, 100]"
+   ],
+   "ci_weighted_share": 0.0076554124362783775,
+   "heldout_r2": 0.06774588626125
+  },
+  "refined_list": [
+   "log a",
+   "a mod 5 classes",
+   "tens digit classes (10..99)",
+   "one digit [a <= 9]",
+   "units digit circle (period 10)",
+   "parity (a mod 2)",
+   "repdigit (11, 22, .., 99)",
+   "circle period 50",
+   "circle period 20",
+   "2-adic valuation min(v2(a), 4)",
+   "circle period 100",
+   "a mod 3 classes",
+   "one-hot over single-value readers' values [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 16, 17, 18, 21, 22, 26, 28, 31, 32, 34, 38, 41, 42, 44, 45, 46, 47, 49, 50, 52, 54, 55, 56, 58, 59, 62, 64, 65, 66, 67, 68, 69, 74, 77, 78, 83, 84, 86, 87, 88, 89, 90, 94, 97, 98, 99, 100]"
+  ]
+ },
+ "L16.attn": {
+  "base": {
+   "ci_weighted_share": 0.02031529203690667,
+   "heldout_r2": 0.8722416287766903
+  },
+  "candidates": [
+   {
+    "candidate": "one-hot over single-value readers' values [1, 4, 14, 45, 64, 65, 85]",
+    "dims": 7,
+    "increment": 0.003124387738971813,
+    "chance": 0.005001281790013774,
+    "p": 0.9900497512437811,
+    "ci_weighted_share": 0.018458994987311246,
+    "heldout_r2": 0.8713853612427404
+   },
+   {
+    "candidate": "place code: bumps every 10 (width 4.0)",
+    "dims": 10,
+    "increment": 0.0185995906827891,
+    "chance": 0.007144688271448248,
+    "p": 0.004975124378109453,
+    "ci_weighted_share": 0.01076996507697361,
+    "heldout_r2": 0.8977353896118166
+   },
+   {
+    "candidate": "place code: bumps every 5 (width 2.5)",
+    "dims": 20,
+    "increment": 0.03998592714411396,
+    "chance": 0.014289376542896496,
+    "p": 0.004975124378109453,
+    "ci_weighted_share": 0.003172688403684341,
+    "heldout_r2": 0.9577613435572507
+   },
+   {
+    "candidate": "a mod 6 classes",
+    "dims": 5,
+    "increment": 0.0022469350172456674,
+    "chance": 0.002857875308579299,
+    "p": 0.9502487562189055,
+    "ci_weighted_share": 0.018890121067270765,
+    "heldout_r2": 0.8635324251772969
+   },
+   {
+    "candidate": "a mod 9 classes",
+    "dims": 8,
+    "increment": 0.0026799699997004127,
+    "chance": 0.005715750617158598,
+    "p": 1.0,
+    "ci_weighted_share": 0.018565913372667914,
+    "heldout_r2": 0.8514624068623793
+   },
+   {
+    "candidate": "a mod 12 classes",
+    "dims": 11,
+    "increment": 0.005801031059763443,
+    "chance": 0.007144688271448248,
+    "p": 0.9751243781094527,
+    "ci_weighted_share": 0.01677931371689031,
+    "heldout_r2": 0.8521541761686368
+   }
+  ],
+  "refined": {
+   "accepted_added": [
+    "place code: bumps every 5 (width 2.5)",
+    "place code: bumps every 10 (width 4.0)",
+    "a mod 12 classes"
+   ],
+   "ci_weighted_share": 0.001699110036242681,
+   "heldout_r2": 0.9622455877974528
+  },
+  "refined_list": [
+   "tens digit classes (10..99)",
+   "magnitude: smooth curve in log a (5)",
+   "circle period 100",
+   "circle period 20",
+   "circle period 50",
+   "units digit classes (a mod 10)",
+   "2-adic valuation min(v2(a), 4)",
+   "place code: bumps every 5 (width 2.5)",
+   "place code: bumps every 10 (width 4.0)",
+   "a mod 12 classes"
+  ]
+ },
+ "L12.mlp": {
+  "base": {
+   "ci_weighted_share": 0.02280339527903767,
+   "heldout_r2": 0.8575160007049387
+  },
+  "candidates": [
+   {
+    "candidate": "one-hot over single-value readers' values [1, 2, 3, 48, 50, 52, 74, 76, 100]",
+    "dims": 9,
+    "increment": 0.016405724985695782,
+    "chance": 0.006447034813708345,
+    "p": 0.009950248756218905,
+    "ci_weighted_share": 0.010741352425130673,
+    "heldout_r2": 0.8240598398087042
+   },
+   {
+    "candidate": "place code: bumps every 10 (width 4.0)",
+    "dims": 10,
+    "increment": 0.015434837591607433,
+    "chance": 0.007163372015231494,
+    "p": 0.004975124378109453,
+    "ci_weighted_share": 0.017458483481360542,
+    "heldout_r2": 0.8653382270088188
+   },
+   {
+    "candidate": "place code: bumps every 5 (width 2.5)",
+    "dims": 20,
+    "increment": 0.023541584894931633,
+    "chance": 0.014326744030462989,
+    "p": 0.004975124378109453,
+    "ci_weighted_share": 0.012920410861293058,
+    "heldout_r2": 0.8721165334331411
+   },
+   {
+    "candidate": "a mod 6 classes",
+    "dims": 5,
+    "increment": 0.0020000417693846837,
+    "chance": 0.001432674403046299,
+    "p": 0.9751243781094527,
+    "ci_weighted_share": 0.021397147520065548,
+    "heldout_r2": 0.852785061874748
+   },
+   {
+    "candidate": "a mod 9 classes",
+    "dims": 8,
+    "increment": 0.0019901439576025647,
+    "chance": 0.004298023209138897,
+    "p": 1.0,
+    "ci_weighted_share": 0.021054484105369538,
+    "heldout_r2": 0.8383750036896214
+   },
+   {
+    "candidate": "a mod 12 classes",
+    "dims": 11,
+    "increment": 0.007224203675627965,
+    "chance": 0.005730697612185196,
+    "p": 0.6766169154228856,
+    "ci_weighted_share": 0.017872385071749337,
+    "heldout_r2": 0.8466193951464713
+   }
+  ],
+  "refined": {
+   "accepted_added": [
+    "one-hot over single-value readers' values [1, 2, 3, 48, 50, 52, 74, 76, 100]",
+    "place code: bumps every 5 (width 2.5)"
+   ],
+   "ci_weighted_share": 0.005941790586945058,
+   "heldout_r2": 0.8471837486512842
+  },
+  "refined_list": [
+   "a mod 5 classes",
+   "tens digit classes (10..99)",
+   "units digit circle (period 10)",
+   "magnitude: smooth curve in log a (5)",
+   "parity (a mod 2)",
+   "circle period 20",
+   "circle period 100",
+   "repdigit (11, 22, .., 99)",
+   "a mod 3 classes",
+   "circle period 50",
+   "one-hot over single-value readers' values [1, 2, 3, 48, 50, 52, 74, 76, 100]",
+   "place code: bumps every 5 (width 2.5)"
+  ]
+ },
+ "L18.attn": {
+  "base": {
+   "ci_weighted_share": 0.03472039242094721,
+   "heldout_r2": 0.7180826124774715
+  },
+  "candidates": [
+   {
+    "candidate": "one-hot over single-value readers' values [16, 18, 20, 24, 30, 31, 39, 41, 45, 50, 52, 54, 55, 56, 60, 65, 66, 70, 72, 74, 75, 78, 80]",
+    "dims": 23,
+    "increment": 0.057299196987390895,
+    "chance": 0.04021543445323026,
+    "p": 0.009950248756218905,
+    "ci_weighted_share": 0.017347910811297943,
+    "heldout_r2": 0.6792542899660006
+   },
+   {
+    "candidate": "place code: bumps every 10 (width 4.0)",
+    "dims": 10,
+    "increment": 0.045326206050264974,
+    "chance": 0.01748497150140446,
+    "p": 0.004975124378109453,
+    "ci_weighted_share": 0.01798850541302699,
+    "heldout_r2": 0.7730396296112299
+   },
+   {
+    "candidate": "place code: bumps every 5 (width 2.5)",
+    "dims": 20,
+    "increment": 0.08680196874024775,
+    "chance": 0.03496994300280892,
+    "p": 0.004975124378109453,
+    "ci_weighted_share": 0.006722489962780906,
+    "heldout_r2": 0.8765830979720154
+   },
+   {
+    "candidate": "a mod 6 classes",
+    "dims": 5,
+    "increment": 0.004625861296380566,
+    "chance": 0.0034969943002808924,
+    "p": 0.9950248756218906,
+    "ci_weighted_share": 0.032826604598179744,
+    "heldout_r2": 0.7115528777690664
+   },
+   {
+    "candidate": "a mod 9 classes",
+    "dims": 8,
+    "increment": 0.005453844657945353,
+    "chance": 0.010490982900842676,
+    "p": 1.0,
+    "ci_weighted_share": 0.031765560993678325,
+    "heldout_r2": 0.6781197087894884
+   },
+   {
+    "candidate": "a mod 12 classes",
+    "dims": 11,
+    "increment": 0.021126954200413803,
+    "chance": 0.01398797720112357,
+    "p": 0.24378109452736318,
+    "ci_weighted_share": 0.026128774040276824,
+    "heldout_r2": 0.7045465324988899
+   }
+  ],
+  "refined": {
+   "accepted_added": [
+    "place code: bumps every 5 (width 2.5)",
+    "one-hot over single-value readers' values [16, 18, 20, 24, 30, 31, 39, 41, 45, 50, 52, 54, 55, 56, 60, 65, 66, 70, 72, 74, 75, 78, 80]"
+   ],
+   "ci_weighted_share": 0.0021542805472365488,
+   "heldout_r2": 0.8495600368980778
+  },
+  "refined_list": [
+   "tens digit classes (10..99)",
+   "magnitude: smooth curve in log a (5)",
+   "units digit classes (a mod 10)",
+   "circle period 20",
+   "2-adic valuation min(v2(a), 4)",
+   "circle period 50",
+   "a mod 3 classes",
+   "place code: bumps every 5 (width 2.5)",
+   "one-hot over single-value readers' values [16, 18, 20, 24, 30, 31, 39, 41, 45, 50, 52, 54, 55, 56, 60, 65, 66, 70, 72, 74, 75, 78, 80]"
+  ]
+ },
+ "L4.mlp": {
+  "base": {
+   "ci_weighted_share": 0.030376684811088295,
+   "heldout_r2": 0.8300016398900525
+  },
+  "candidates": [
+   {
+    "candidate": "one-hot over single-value readers' values [23, 24, 31, 42, 48, 52, 55, 72, 73, 74, 76, 88, 98, 99, 100]",
+    "dims": 15,
+    "increment": 0.02371623847248662,
+    "chance": 0.013609974136366715,
+    "p": 0.004975124378109453,
+    "ci_weighted_share": 0.011612973145158452,
+    "heldout_r2": 0.8215967449703689
+   },
+   {
+    "candidate": "place code: bumps every 10 (width 4.0)",
+    "dims": 10,
+    "increment": 0.021893440235092824,
+    "chance": 0.009073316090911145,
+    "p": 0.004975124378109453,
+    "ci_weighted_share": 0.019853995013880202,
+    "heldout_r2": 0.8501747684256536
+   },
+   {
+    "candidate": "place code: bumps every 5 (width 2.5)",
+    "dims": 20,
+    "increment": 0.0368136266212316,
+    "chance": 0.01814663218182229,
+    "p": 0.004975124378109453,
+    "ci_weighted_share": 0.013173119019636489,
+    "heldout_r2": 0.8819260918682558
+   },
+   {
+    "candidate": "a mod 6 classes",
+    "dims": 5,
+    "increment": 0.003259347472217047,
+    "chance": 0.0018146632181822288,
+    "p": 0.9353233830845771,
+    "ci_weighted_share": 0.028288075063592263,
+    "heldout_r2": 0.8275109510898802
+   },
+   {
+    "candidate": "a mod 9 classes",
+    "dims": 8,
+    "increment": 0.0029807107130508607,
+    "chance": 0.005443989654546687,
+    "p": 1.0,
+    "ci_weighted_share": 0.02734387661664817,
+    "heldout_r2": 0.8100578984663327
+   },
+   {
+    "candidate": "a mod 12 classes",
+    "dims": 11,
+    "increment": 0.00924754868890263,
+    "chance": 0.007258652872728915,
+    "p": 0.7114427860696517,
+    "ci_weighted_share": 0.024065178863922516,
+    "heldout_r2": 0.8144694322905073
+   }
+  ],
+  "refined": {
+   "accepted_added": [
+    "one-hot over single-value readers' values [23, 24, 31, 42, 48, 52, 55, 72, 73, 74, 76, 88, 98, 99, 100]",
+    "place code: bumps every 5 (width 2.5)"
+   ],
+   "ci_weighted_share": 0.004019416052265572,
+   "heldout_r2": 0.8874046991912283
+  },
+  "refined_list": [
+   "a mod 5 classes",
+   "units digit circle (period 10)",
+   "circle period 100",
+   "magnitude: smooth curve in log a (5)",
+   "parity (a mod 2)",
+   "circle period 50",
+   "repdigit (11, 22, .., 99)",
+   "circle period 20",
+   "tens digit classes (10..99)",
+   "2-adic valuation min(v2(a), 4)",
+   "a mod 3 classes",
+   "one-hot over single-value readers' values [23, 24, 31, 42, 48, 52, 55, 72, 73, 74, 76, 88, 98, 99, 100]",
+   "place code: bumps every 5 (width 2.5)"
+  ]
+ }
+}

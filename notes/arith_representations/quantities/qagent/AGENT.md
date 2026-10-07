@@ -89,15 +89,21 @@ addsub decomposition (run p-ba5a0c05).
    the last guesses were all rejected. Report what remains (important and unimportant parts;
    value-specific variance as such).
 7. **Patch** (`qpatch.py`), per site and all sites of the position together, in the alive-only
-   model (reader activations replaced) and in the original model (the stream's reader-span
-   component replaced, reconstruction refit on the original model's own stream). Compare with
+   model (reader activations replaced). The test must be closed: the stream at t may reach the
+   rest of the network only through the reconstruction. The readers dead at t (alive elsewhere,
+   CI <= 0.01 at t on every prompt) still read the true stream, so they are switched off at t in
+   every run, patched or not; report the KL of that switch alone, and the patched KL against
+   both references (all alive readers on; dead-at-t readers off). The original model is not
+   patched: its dense weights read the whole stream, and a closed test there would also have to
+   replace the stream outside the readers' span. Compare with
    the mean patch (the cost of losing what the site carries at t; at many sites it is near 0, and
    the test is informative only where it is not) and the exact patch (a check, KL ~ 0); use the
    held-out reconstruction for the strict version. Worst sites: rank by reconstruction KL and by
    the fraction of the mean-patch KL it leaves; inspect their readers by CI-weighted residual and
-   refine (back to 2). Patterns met at t = 1: single-value detectors (readers important on one or
-   two values: a one-hot over those values fixes them and is reported as value-specific) and
-   windows under-fit by a smooth curve (a place code with stated spacing).
+   refine (back to 2). Patterns met in the fits at t = 1 (readers with the largest CI-weighted
+   residual): single-value detectors (readers important on one or two values: a one-hot over
+   those values fixes them and is reported as value-specific) and windows under-fit by a smooth
+   curve (a place code with stated spacing).
 8. **Report** per site: A with encodings, dims, increments, chance, excess, p, readers using each,
    geometry (a circle's norm ratio and angle; class means' singular values); the log; held-out
    R^2 under each scheme; the important residual; the patching results.
@@ -121,6 +127,8 @@ a domain value must be held out together.
   a quantity of a must then generalise to unseen values of a. A quantity that holds under the
   pair scheme but fails under a-values is value-specific in a.
 - Permutation tests permute the features over the domain rows.
+- A site whose reads are constant over the domain (L0's attention input at a token that is the
+  same in every prompt, e.g. "=") has nothing to fit; `qloop.py` records it as constant.
 - Process sites in stream order within a position. Quantities accepted at earlier positions
   (e.g. a's quantities at t = 1) are candidates at later positions.
 
@@ -138,7 +146,8 @@ a domain value must be held out together.
 - `qloop.py <t> [--sites ...] [--extra mod.fn] [--tag x]`: the automatic part of steps 2-6 over
   the sites of a position (writes `qloop_t<t>_<tag>.json`, `recon_t<t>_<tag>.npz`).
 - `qinspect.py <t> <site> [--tag x]`: step 1 / step 7 inspection (tables and a figure).
-- `qpatch.py <t> <alive|original> [--tag x]`: step 7 (GPU; the original model needs 48 GB).
+- `qpatch.py <t> [--tag x]`: step 7, the closed test in the alive-only model (GPU).
+- `qsummary.py <t> [--tag x]`: step 8 tables (quantity counts, medians, patching), as markdown.
 Fits run on CPU (a 256-core node runs a position's 63 sites in minutes at t = 1); patching needs
 a GPU. Run through sbatch, or on a pod holding the per-position data files and the model weights.
 

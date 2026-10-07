@@ -161,7 +161,10 @@ Patch each site's readers with the reconstruction, then all sites of the token p
 Also patch the reconstruction fit without the patched values (held-out), the stricter test.
 Run the model with the site's reader activations at t replaced by the reconstruction from A
 (patched run), on the prompt set or a random subset, and compare its outputs with the
-unpatched model:
+unpatched model. The test must be closed: the stream at t may reach the rest of the network only
+through the reconstruction. Readers that are dead at t (CI <= 0.01 at t on every prompt) but
+alive elsewhere still read the true stream, so they are switched off at t in every run, patched
+or not (report the cost of that switch alone):
 - the output divergence (for addsub: KL at the last position, and answer accuracy);
 - two references: patching each reader's activation with its mean over the domain (the cost of
   losing everything the readers carry at t), and patching with the exact reads (should give 0;
@@ -173,12 +176,12 @@ step 1. The mean patch also shows which sites matter for the output at all: at m
 site's mean patch barely moves the output, and the test is informative only where it does.
 Worst cases: rank sites by the reconstruction's divergence and by the fraction it leaves; at each,
 rank readers by CI-weighted residual, plot their reads with the CI, and refine (back to step 2).
-Patterns met so far: readers important on one or two values (single-value detectors: a one-hot
-over those values fixes them but does not generalise and is reported separately), and windows
-of the variable whose height a smooth curve under-fits (a place code with stated spacing).
-Patch in the original model too: there are no reader components, so replace the stream's
-component in the reader span, x + (Zhat - x Q) Q^T at the analysed position, with Zhat refit on
-the original model's own stream.
+Patterns met so far in the fits (readers with the largest CI-weighted residual): readers
+important on one or two values (single-value detectors: a one-hot over those values fixes them
+but does not generalise and is reported separately), and windows of the variable whose height a
+smooth curve under-fits (a place code with stated spacing).
+The original model has no reader components and its dense weights read the whole stream, so a
+closed test there must also replace the stream outside the readers' span (not implemented).
 
 ### Step 8: report the site
 - A, in acceptance order: encoding, dims, increment, chance, excess, p-value, readers using it,
@@ -224,9 +227,8 @@ the original model's own stream.
 `v2.py` (site data, fits, chance levels, cross-validation over values, residual SVD),
 `v2_layers.py` (all sites), `v2_feature_test.py` (permutation test of a candidate on a
 residual), `v2_period20_test.py` (both-orders test), `v3.py` / `v3_run.py` (joint fits with
-drop-one losses, the important residual, the protocol run at token a) and `v3_patch.py`
-(patched runs, alive-only model), `v3_patch_full.py` (patched runs, original model),
+drop-one losses, the important residual, the protocol run at token a),
 `v3_inspect.py` (worst sites: CI-weighted residual per reader), `v3_refine.py` (refinements at
-given sites). The loop over 63 sites takes about a minute on a 256-core node; patching needs a
-GPU (48 GB for the original model). Run through sbatch, or on a pod with the compact token-a
+given sites). The loop over 63 sites takes about a minute on a 256-core node. Patching:
+`qagent/qpatch.py` (GPU). Run through sbatch, or on a pod with the compact token-a
 files (the code reads `*_token_a.npy` when present).

@@ -404,8 +404,8 @@ span, stagewise, reader metric, chance level, 10-fold cross-validation over valu
 ## V3: the protocol at token a, with patching
 Code: `PROTOCOL.md` (the protocol), `v3.py` (joint fits with a small ridge, drop-one losses,
 permutation tests, held-out R^2, the important residual), `v3_run.py` (the loop over the 63 sites
-at token a), `v3_patch.py` (patched runs), `v3_summary.py`. Numbers: `v3_token_a.json` (accepted
-quantities, decision log per site), `v3_patch.json`. Run on a RunPod L40 (a cluster run of an
+at token a), `v3_summary.py`. Numbers: `v3_token_a.json` (accepted quantities, decision log per
+site). Run on a RunPod L40 (a cluster run of an
 earlier version of the code was discarded).
 
 **What the run does** (PROTOCOL.md, steps 1-7, with the agent's hypotheses replaced by a fixed
@@ -439,22 +439,10 @@ L12 and as the 10 classes from L13 on.
 | median important residual share, in-sample | 0.065 | 0.023 |
 | median important residual share, held-out | 0.149 | 0.080 |
 
-**Patching** (2000 random prompts, alive-only model, KL at the last position against the
-unpatched alive-only model; answer accuracy unpatched 0.617):
-- exact reads patched back: KL 3e-7 (check of the patching code);
-- the site's readers patched with their mean over a: KL above 0.001 at 13 of the 63 sites; at the
-  other 50, patching a single site at token a barely changes the output. The largest: L16.attn
-  0.90, L0.mlp 0.27, L12.mlp 0.028, L13.mlp 0.027, L1.attn 0.024;
-- the reconstruction from the accepted quantities: at those 13 sites it removes 97-99.8% of the
-  mean-patch KL (L16.attn 0.0015 vs 0.90, L0.mlp 0.0020 vs 0.27); the largest KL at any site is
-  0.002;
-- all 63 sites patched together at token a: reconstruction KL 0.0022 (median 0.0013), accuracy
-  0.616; mean patch KL 1.11, accuracy 0.0015.
+**Patching.** The patching results of this run were deleted: the test was not closed (readers
+dead at token a but alive elsewhere kept reading the true stream, so what the quantities miss
+could still reach the output). The closed test is in `qagent/qpatch.py`.
 
-**Limits of this run.** The reconstructions patched in were fit on all 100 values of a with
-25-30 dims, so part of what they reproduce may be fit by chance; a patch of held-out
-reconstructions (fit without the patched values) is the stricter test. The hypothesis pool is
-fixed and includes quantities found on these same sites earlier (2-adic valuation, repdigit,
-circle period 20), so their acceptance here is not an independent discovery. A single site at
-token a matters little for the output except at a few sites (L16.attn, L0.mlp), so the patching
-test is informative mainly there and for the all-sites patch.
+**Limits of this run.** The hypothesis pool is fixed and includes quantities found on these same
+sites earlier (2-adic valuation, repdigit, circle period 20), so their acceptance here is not an
+independent discovery.
