@@ -203,3 +203,117 @@ and the same hypothesis set should explain the token embedding vectors directly 
   replace many per-reader token corrections with one per-quantity representation.
 - Hypotheses came from me looking at plots; the library (`hypotheses.py`) records each
   iteration with its rationale, which is the trace an automated agent should also produce.
+
+## V2: quantities as directions in the reader span
+Code: `v2.py` (model and fit), `v2_report.py` (tables, figures, `v2_results.json`).
+
+**Model.** Notation, in addition to the above:
+- x(a) in R^4096: the raw residual stream at the site for operand value a; X (100 x 4096).
+- V~_r = gamma_l * V^_r: reader r's gain-folded unit read direction; S = span{V~_r} over the n
+  active readers of the site, k = dim S; Q (4096 x k): an orthonormal basis of S.
+- Z = X Q (100 x k): the stream in reader-span coordinates; W = Q^T [V~_1 ... V~_n] (k x n), so
+  the readers' raw reads are Y = Z W (checked: relative error 1e-4 at site 1, 4e-5 at site 2).
+- A quantity q: a feature map phi_q(a) in R^{d_q}, stacked into Phi_q (100 x d_q), and its
+  directions D_q (k x d_q). The hypothesis is Z = 1 mu^T + sum_q Phi_q D_q^T + E, with mu in
+  R^k the mean over a and E the residual. A reader's predicted raw read is the projection
+  sum_q Phi_q D_q^T W: no per-reader selection.
+- Feature maps used: one-hot ([a = v], one direction per value); a circle (cos theta, sin theta,
+  theta = 2 pi j a / 10 for the period-10 harmonic j = 1..5); class indicators (a mod 10, a mod 3,
+  tens digit floor(a / 10) for a = 10..99); a smooth curve of unknown shape with r directions
+  (reduced-rank regression of the residual on a 6-function cubic spline basis in log a); a fine
+  place code (a 25-function cubic spline basis in a, all directions).
+- Embedding reference: the same model on the raw embedding at l = 0 with all 4096 dimensions
+  (Z = X, no readers), i.e. the stream before any reader selects a subspace.
+
+**Fit and scores.** Quantities are fit stagewise in a fixed order (each on the residual of the
+earlier ones), so a quantity's variance is its increment given the earlier ones. Variance is
+measured in the reader metric (on Y) at sites 1 and 2 and in the stream metric (on Z) for the
+embedding. Chance level of a stage: d features fit to a residual with df remaining degrees of
+freedom (df = 99 minus the dimensions already used) capture d / df of it in expectation even if
+they carry nothing, which matters here: with 100 values of a, any 10-dimensional feature set
+explains about 10%. Generalisation: 10-fold cross-validation over values of a (directions fit on
+90 values, the held-out values' reads predicted from their features); a one-hot quantity cannot
+predict a held-out value, a structured one can.
+
+**Variance explained per quantity, against chance** (increment / chance; `figures/v2_variance.png`):
+
+| quantity (dims) | embedding (stream) | site 1 (reader) | site 2 (reader) |
+|---|---|---|---|
+| magnitude curve (1) | 0.063 / 0.010 | **0.317** / 0.010 | **0.154** / 0.010 |
+| 2 more smooth dims in log a (2) | 0.065 / 0.019 | 0.044 / 0.014 | **0.132** / 0.017 |
+| one digit [a <= 9] (1) | 0.002 / 0.009 | 0.001 / 0.007 | 0.003 / 0.007 |
+| a mod 10, circle j = 1 (2) | 0.038 / 0.018 | 0.022 / 0.013 | 0.052 / 0.015 |
+| a mod 10, harmonics j = 2..5 (7) | 0.109 / 0.063 | **0.176** / 0.046 | **0.144** / 0.050 |
+| a mod 3 (2) | 0.020 / 0.017 | 0.008 / 0.010 | 0.012 / 0.012 |
+| tens digit (9) | 0.121 / 0.075 | 0.066 / 0.046 | **0.155** / 0.054 |
+| place code, smooth in a (24) | 0.143 / 0.186 | 0.122 / 0.117 | 0.162 / 0.111 |
+| one-hot remainder (the rest) | 0.439 | 0.244 | 0.184 |
+| cross-validated R^2, all structured stages | -0.17 | 0.33 | 0.33 |
+
+![V2 variance](figures/v2_variance.png)
+
+**Order check.** Fitting the place code right after the smooth magnitude (`place_first` in
+`v2_results.json`) removes the excess of the tens digit (site 2: +0.102 -> -0.025) and of the
+mod-10 circle j = 1 (+0.037 -> -0.007), while the place code's excess rises (+0.052 -> +0.199).
+The excess of the smooth magnitude dims and of the mod-10 harmonics j = 2..5 does not depend on
+the order (+0.095 -> +0.103 at site 2, +0.130 -> +0.115 at site 1). So three things are
+identified: a smooth magnitude (3 directions at site 2), the units digit, and a decade-scale
+structure whose form (tens-digit classes, a period-10 circle, or a finer place code) these
+hypotheses cannot tell apart, because the spline place code (knots every ~4 values) also spans
+period-10 oscillations.
+
+**The units digit is a simplex, not a circle** (`figures/v2_units_geometry.png`). After removing
+the smooth dims, the variance per period-10 harmonic is roughly flat at the embedding and at
+site 2 (site 2: 0.073, 0.070, 0.045, 0.057, 0.031 for j = 1..5; j = 5 has one dimension, the
+others two), and the singular values of the ten class means decay slowly (site 2: 1.00, 0.87,
+0.81, 0.77, 0.76, ...): each units digit has its own direction, as in a one-hot code over the
+ten digits. A circle would put the variance in j = 1 alone. 0 and 5 sit apart from the other
+digits at all three places, the round-number structure of V1. At site 1 the 8 readers see
+mostly j = 2 and j = 4 (0.110 and 0.129; periods 5 and 2.5), i.e. a mod 5, and the class-mean
+spectrum is low-dimensional (1.00, 0.32, 0.26, 0.12).
+![units digit geometry](figures/v2_units_geometry.png)
+
+**Smooth magnitude** (`figures/v2_smooth_and_residual.png`, top). At site 1 one saturating curve
+(steep for a <= 30, flat above) carries 32% of the readers' variance. At site 2 and in the
+embedding three smooth dims are present: a hump peaking near a = 20, a curve with a minimum near
+a = 50, and a third with a sharp feature at a <= 10.
+![smooth features and residual](figures/v2_smooth_and_residual.png)
+
+**What does not survive the shared-direction model.** a mod 3 is at chance at every site
+(divisibility by 3 was one reader in V1); the one-digit flag adds nothing after the smooth dims.
+
+**What is left.** The one-hot remainder (token-specific directions, one per value of a) carries
+44% of the embedding's variance, 24% of the reads at site 1 and 18% at site 2. Before it, the
+residual's top singular value is above the permutation null at site 2 (0.091 vs 0.079) and in the
+embedding (0.59 vs 0.39), at the null at site 1 (0.034 vs 0.031); the top residual singular
+functions (bottom of the figure above) are spiky, without a visible pattern in a.
+
+**Per-reader fit at site 2** (`figures/v2_readers.png`, `figures/v2_reader_r2.png`). The
+structured quantities predict the comb, magnitude and window readers closely (gate.c19, gate.c7,
+gate.c44, up.c52, up.c145: R^2 0.98-0.99; up.c101: 0.87) but not the single-value detectors
+(up.c415, a = 42: 0.35). In-sample R^2 must be read against chance: the full structured model has
+48 dims (in-sample chance 0.48 per reader), median 0.82; a compact model (magnitude 3 + a mod 10
+9 + tens digit 9 = 21 dims, chance 0.21) has median 0.43. Cross-validated over held-out values
+of a, the median reader R^2 is 0.14 (full) and -0.01 (compact); 38% of the readers have a
+held-out R^2 above 0.5 with the full model, 19% with the compact one. Many site-2 readers detect
+one value or a narrow window of a, which no quantity shared across values can predict.
+![V2 readers](figures/v2_readers.png)
+
+**The split of the full-rank token code at L0 (token a).** The embedding of a is full rank in the
+stream. In the shared-direction view it splits into: a smooth magnitude (3 directions), a
+units-digit simplex (9 directions, 0 and 5 apart), a decade-scale structure, and token-specific
+directions (the largest part). Site 1's 8 attention readers span 8 dimensions and see mostly the
+saturating magnitude curve and a mod 5; site 2's 115 MLP readers see all of it, including the
+token-specific directions that the single-value detectors read.
+
+**V1 vs V2.** V1 let each reader pick its own items (single tokens, intervals, residue classes)
+and reached 98.6% at site 2; V2 forces every reader to read the same quantity directions, which
+is what makes a quantity a property of the stream rather than of a reader, and measures
+generalisation across values of a. The two agree on what is there (magnitude, units digit and
+round numbers, decade-scale structure, many single-value detectors) and V2 removes divisibility
+by 3 as a stream quantity.
+
+**Limits of V2.** Stagewise attribution depends on the order where feature spaces overlap (the
+order check above). In 4096 dimensions with 100 values of a, directions estimated from 90 values
+are mostly noise, so the embedding's cross-validated R^2 is negative and not informative; a
+ridge penalty or a lower-dimensional reference would be needed there.
