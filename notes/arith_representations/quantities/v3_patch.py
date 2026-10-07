@@ -8,7 +8,11 @@ in the patched run itself (the components model's inner activation is x / rho * 
 References: the readers' mean raw read over a ("mean patch") and the exact raw read ("exact
 patch", a check: KL should be ~0). Also all sites patched together.
 
-    python v3_patch.py [n_prompts]
+    python v3_patch.py [n_prompts] [reconstruction file] [sites ...]
+
+With a reconstruction file (default v3_recon.npz) and a list of sites, only those sites are
+patched one at a time (the all-sites patch still uses every site in the file); results go to
+v3_patch_<file stem>.json.
 """
 
 import json
@@ -35,11 +39,13 @@ class AliveOnly(cm.ComponentsModel):
 
 def main() -> None:
     n_prompts = int(sys.argv[1]) if len(sys.argv) > 1 else 2000
+    recon_file = sys.argv[2] if len(sys.argv) > 2 else "v3_recon.npz"
+    only = set(sys.argv[3:])
     model = AliveOnly()
     ix = np.load(DATASET / "index.npz")
     vnorm = ix["comp_v_norm"]
     comp_layer = ix["comp_layer"]
-    R = np.load(HERE / "v3_recon.npz")
+    R = np.load(HERE / recon_file)
     sites = sorted(
         {k.split("/")[0] for k in R.files},
         key=lambda s: (int(s[1:].split(".")[0]), s.endswith("mlp")),
@@ -96,6 +102,15 @@ def main() -> None:
     joint = {"recon": {}, "mean": {}}
     for s_i, site in enumerate(sites):
         Yhat, Y = R[site + "/Yhat"], R[site + "/Y"]
+        if only and site not in only:
+            for key, (js, rs) in mapping(site).items():
+                joint["recon"][key] = (js, Yhat[:, rs], vnorm[R[site + "/cols"][rs]])
+                joint["mean"][key] = (
+                    js,
+                    np.tile(Y.mean(0), (100, 1))[:, rs],
+                    vnorm[R[site + "/cols"][rs]],
+                )
+            continue
         ent = {}
         for variant, vals in (
             ("recon", Yhat),
@@ -116,7 +131,12 @@ def main() -> None:
     for variant, p in joint.items():
         res["all_sites_" + variant] = score(run(p))
         print("all sites", variant, res["all_sites_" + variant], flush=True)
-    (HERE / "v3_patch.json").write_text(json.dumps(res, indent=1))
+    out = (
+        "v3_patch.json"
+        if recon_file == "v3_recon.npz"
+        else f"v3_patch_{Path(recon_file).stem}.json"
+    )
+    (HERE / out).write_text(json.dumps(res, indent=1))
 
 
 if __name__ == "__main__":

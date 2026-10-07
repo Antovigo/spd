@@ -35,8 +35,12 @@ Status: draft, built from the V1 / V2 experiments on the addsub task (`README.md
   residual. A quantity is shared by all readers: no per-reader selection. The fit uses every
   prompt and every reader (no masking).
 - Reader metric: variance of Y = Z W (used for decisions). Stream metric: variance of Z.
+- Joint fit: least squares of the centred Z on all accepted quantities' features together, with a
+  small ridge penalty (1e-3 of the mean feature variance). Without it, overlapping class
+  partitions (units digit, tens digit, residues) are collinear on some subsets of the domain and
+  the held-out predictions explode.
 - Increment of q given a set A of quantities: the reader-metric variance explained by adding q
-  to the joint least-squares fit of A, as a fraction of the total. Drop-one loss of q in A: the
+  to the joint fit of A, as a fraction of the total. Drop-one loss of q in A: the
   variance lost when q is removed from the joint fit of A.
 - Chance level: d_q / df times the residual variance before adding q, df = (number of distinct
   domain values - 1 - dims already in A). Excess = increment - chance. Low-dimensional features
@@ -50,7 +54,11 @@ Status: draft, built from the V1 / V2 experiments on the addsub task (`README.md
   `dataset/original/ci.npy`). Important entry: (i, r) with CI_r(i) > 0.01.
 - Important residual: the residual restricted to important entries. Its share = (residual
   variance on important entries) / (variance of Y on important entries). It is used to decide
-  when to stop (step 6), never in the fit.
+  when to stop (step 6) and to find the readers to look at (steps 1 and 7), never in the fit.
+  Compute it from held-out predictions for stopping: with 25-30 dims on 100 domain values the
+  in-sample residual is small by chance.
+- CI-weighted residual of reader r: sum over i of CI_r(i) (Y - Yhat)(i, r)^2; ranks the readers
+  whose errors can matter.
 - Patched run: the model run with the site's reader activations at t replaced by their
   reconstruction Yhat / rho (rho taken from the patched run itself), everything else unchanged.
 
@@ -96,7 +104,11 @@ evidence for it (which singular function, which readers, which pattern). Prefer,
 3. combinations of two accepted quantities;
 4. new quantities read from the residual.
 Prefer the lowest-dimensional encoding that could produce the pattern (one direction before a
-circle, a circle before a categorical, a categorical before a one-hot). A frequency peak or a
+circle, a circle before a categorical, a categorical before a one-hot). Do not propose broad
+bases (a 24-function spline over the whole range, all residue classes at once): accepted with a
+small gain per dimension, they absorb the specific quantities they span and are then inherited
+by every later site. A place code is a specific hypothesis when its spacing and width are stated
+(bumps of a every 5 values, width 2.5). A frequency peak or a
 correlation is not a hypothesis by itself: name the function. Patterns on important entries
 come first: a pattern only on unimportant entries is low priority.
 
@@ -121,7 +133,8 @@ Then decide:
   nothing; if both add, keep both; if neither adds after the other, keep the one with fewer
   dims.
 - **Backtrack** if adding q makes an earlier quantity redundant (its drop-one loss falls below
-  its chance level): remove it from A, refit, log the removal and the reason. Also backtrack when
+  its chance level): remove it from A, refit, log the removal and the reason. When several are
+  redundant at once, remove the one with the most dimensions first. Also backtrack when
   a revision shows that an earlier accepted quantity was a poor proxy for the new one (the
   earlier one adds nothing after the new one, both orders).
 - **Accept** otherwise: q joins A; return to step 1 on the new residual.
@@ -135,7 +148,7 @@ from (the other half of the domain values, or another site) before it is accepte
 
 ### Step 6: stop
 Stop when either:
-- the important residual is small (its share below a target, e.g. 5%) or without structure (its
+- the held-out important residual is small (its share below a target, e.g. 5%) or without structure (its
   top singular value within the permutation null, no task variable explaining it above chance):
   what is left is on unimportant entries or is noise, and does not matter for the output; or
 - the last few hypotheses were all rejected and the residual (all entries) is within its
@@ -144,6 +157,8 @@ Report what remains: its share on important and on unimportant entries; if it is
 on individual domain values, as value-specific (one-hot) variance.
 
 ### Step 7: validate by patching
+Patch each site's readers with the reconstruction, then all sites of the token position together.
+Also patch the reconstruction fit without the patched values (held-out), the stricter test.
 Run the model with the site's reader activations at t replaced by the reconstruction from A
 (patched run), on the prompt set or a random subset, and compare its outputs with the
 unpatched model:
@@ -154,7 +169,16 @@ unpatched model:
 The fraction of the mean-patch divergence that the reconstruction removes measures how much of
 what the readers do the quantities capture. If it is low while the important residual looked
 small, the CI threshold or the patching is wrong; if the important residual was large, return to
-step 1.
+step 1. The mean patch also shows which sites matter for the output at all: at most sites a single
+site's mean patch barely moves the output, and the test is informative only where it does.
+Worst cases: rank sites by the reconstruction's divergence and by the fraction it leaves; at each,
+rank readers by CI-weighted residual, plot their reads with the CI, and refine (back to step 2).
+Patterns met so far: readers important on one or two values (single-value detectors: a one-hot
+over those values fixes them but does not generalise and is reported separately), and windows
+of the variable whose height a smooth curve under-fits (a place code with stated spacing).
+Patch in the original model too: there are no reader components, so replace the stream's
+component in the reader span, x + (Zhat - x Q) Q^T at the analysed position, with Zhat refit on
+the original model's own stream.
 
 ### Step 8: report the site
 - A, in acceptance order: encoding, dims, increment, chance, excess, p-value, readers using it,
@@ -176,6 +200,10 @@ step 1.
   tells whether errors accumulate.
 
 ## 5. Pitfalls seen so far (addsub)
+- Inherited quantities must be re-tested at each site (drop-one excess and drop-one permutation
+  p), or the accepted list only grows.
+- A fixed hypothesis pool that contains quantities found earlier on the same sites does not make
+  their acceptance an independent result.
 - Raw increments mislead: report excess over chance.
 - Broad feature sets (a 9-class partition, a 24-dim smooth basis) explain almost anything that
   overlaps them and make the order of fitting decide the attribution; prefer specific
@@ -197,4 +225,8 @@ step 1.
 `v2_layers.py` (all sites), `v2_feature_test.py` (permutation test of a candidate on a
 residual), `v2_period20_test.py` (both-orders test), `v3.py` / `v3_run.py` (joint fits with
 drop-one losses, the important residual, the protocol run at token a) and `v3_patch.py`
-(patched runs). Run through sbatch.
+(patched runs, alive-only model), `v3_patch_full.py` (patched runs, original model),
+`v3_inspect.py` (worst sites: CI-weighted residual per reader), `v3_refine.py` (refinements at
+given sites). The loop over 63 sites takes about a minute on a 256-core node; patching needs a
+GPU (48 GB for the original model). Run through sbatch, or on a pod with the compact token-a
+files (the code reads `*_token_a.npy` when present).
