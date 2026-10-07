@@ -51,6 +51,7 @@ class Patcher:
     def __init__(self, mode: str) -> None:
         assert mode in MODES
         self.mode = mode
+        self.target: tuple[int, str, int] | None = None  # (layer, kind, position) for `comps`
         self.net = Net(dense=mode == "dense")
         cm = self.net.cm
         rng = np.random.default_rng(0)
@@ -64,7 +65,16 @@ class Patcher:
         self._fwd = jax.jit(self._run)
 
     def _run(
-        self, P: dict[str, Any], x: jax.Array, m: list[jax.Array], patch: jax.Array, mu: jax.Array
+        self,
+        P: dict[str, Any],
+        x: jax.Array,
+        m: list[jax.Array],
+        patch: jax.Array,
+        mu: jax.Array,
+        rpatch: jax.Array,
+        wpatch: jax.Array,
+        cpatch: jax.Array,
+        dpatch: jax.Array,
     ) -> tuple[jax.Array, ...]:
         """x (B, T, d) embeddings of one chunk (add half, sub half); patch (64,) 0/1; mu (64, 2, T, d).
         Returns last-position log-probs, per-sublayer output sums by op (64, 2, T, d), sums of D
@@ -81,7 +91,13 @@ class Patcher:
             def site(kind: str, xin: jax.Array) -> jax.Array:
                 V, U, cols = P["sites"][li][kind]  # noqa: B023
                 if self.mode == "dense":
-                    return xin @ P["W"][li][kind].astype(jnp.float32).T  # noqa: B023
+                    y = xin @ P["W"][li][kind].astype(jnp.float32).T  # noqa: B023
+                    if self.target is not None and self.target[:2] == (li, kind):  # noqa: B023
+                        h = xin @ V
+                        delta = y - h @ U
+                        pm = jnp.zeros(T).at[self.target[2]].set(1.0)[None, :, None]
+                        y = y + pm * ((cpatch * (h[perm] - h)) @ U + dpatch * (delta[perm] - delta))  # noqa: B023
+                    return y
                 h = xin @ V
                 if self.mode == "comp":
                     h = h * m[li][:, :, cols]  # noqa: B023
@@ -89,6 +105,7 @@ class Patcher:
 
             for off in (0, 1):
                 t = 2 * li + off
+                x = x + rpatch[t][None, :, None] * (x[perm] - x)  # residual patch from the partner
                 rms = jnp.sqrt((x * x).mean(-1) + cm.eps)
                 xin = x / rms[..., None] * P["ln"][off][li]
                 if off == 0:
@@ -104,13 +121,28 @@ class Patcher:
                 sD2.append((D * D).sum((0, 2)))
                 swapped = out[perm] - mu[t][1 - opv] + mu[t][opv]
                 out = out + patch[t] * posm * (swapped - out)  # 1: swap, 0.5: op-symmetric
+                out = out + wpatch[t][None, :, None] * (
+                    out[perm] - out
+                )  # whole write from the partner
                 x = x + out
+        x = x + rpatch[64][None, :, None] * (x[perm] - x)
         xl = x[:, -1]
         xf = xl / jnp.sqrt((xl * xl).mean(-1, keepdims=True) + cm.eps) * P["final"]
         lp = jax.nn.log_softmax(xf @ P["unembed"].T, -1)
         return lp, jnp.stack(sums), jnp.stack(sD), jnp.stack(sD2)
 
-    def run(self, patch: np.ndarray, mu: np.ndarray) -> tuple[np.ndarray, ...]:
+    def run(
+        self,
+        patch: np.ndarray,
+        mu: np.ndarray,
+        rpatch: np.ndarray | None = None,
+        wpatch: np.ndarray | None = None,
+        cpatch: np.ndarray | None = None,
+        dpatch: float = 0.0,
+    ) -> tuple[np.ndarray, ...]:
+        rp = jnp.asarray(np.zeros((65, 5), np.float32) if rpatch is None else rpatch)
+        wp = jnp.asarray(np.zeros((64, 5), np.float32) if wpatch is None else wpatch)
+        cp = jnp.asarray(np.zeros(1, np.float32) if cpatch is None else cpatch, jnp.float32)
         lps, acc_s, acc_d, acc_d2 = [], 0.0, 0.0, 0.0
         P = self.net.P
         for rows in self.chunks:
@@ -118,9 +150,11 @@ class Patcher:
             m = (
                 [jnp.asarray(self.cm.masks(li, rows)) for li in range(32)]
                 if self.mode == "comp"
-                else []
+                else []  # comp_all (the alive-only model) and dense need no masks
             )
-            lp, s, sd, sd2 = self._fwd(P, x0, m, jnp.asarray(patch), jnp.asarray(mu))
+            lp, s, sd, sd2 = self._fwd(
+                P, x0, m, jnp.asarray(patch), jnp.asarray(mu), rp, wp, cp, jnp.float32(dpatch)
+            )
             lps.append(np.asarray(lp))
             acc_s, acc_d, acc_d2 = (
                 acc_s + np.asarray(s),
@@ -255,5 +289,123 @@ def sym(mode: str) -> None:
         go(f"up to L{l0}", list(range(0, 2 * l0 + 2)))
 
 
+def resid(mode: str) -> None:
+    """Residual patching: the whole stream at point t (t = 2 l before block l's attention, 2 l + 1
+    before its MLP, 64 before the final norm) and position(s) p is copied from the partner prompt
+    (same a, b, other operation). `swap` = the answer follows the partner."""
+    pt = Patcher(mode)
+    out_file = DIR / f"resid_{mode}.json"
+    h = CHUNK // 2
+    zero = np.zeros(64, np.float32)
+    mu0 = np.zeros((64, 2, 5, 4096), np.float32)
+    base, _, _, _ = pt.run(zero, mu0)
+    gt = pt.cm.a[pt.rows] > pt.cm.b[pt.rows]
+    ans = pt.cm.answer[pt.rows]
+    res: dict[str, Any] = {"base": scores(base, base, h, gt, ans)}
+    for t in range(0, 65, 2):
+        for pname, ps in (("op", [2]), ("b", [3]), ("=", [4]), ("op+b", [2, 3])):
+            rp = np.zeros((65, 5), np.float32)
+            rp[t, ps] = 1
+            lp, _, _, _ = pt.run(zero, mu0, rp)
+            sc = scores(base, lp, h, gt, ans)
+            res[f"{t}|{pname}"] = sc
+            print(f"point {t:2d} (L{t // 2} in) {pname:4s}: " + " ".join(f"{k} {sc[k]:.3f}" for k in
+                  ("swap_add_gt", "swap_sub_gt", "same_add_gt", "same_sub_gt", "swap_add", "swap_sub")), flush=True)  # fmt: skip
+        out_file.write_text(json.dumps(res, indent=1))
+
+
+def writes(mode: str) -> None:
+    """Which writes put the operation into `=` before L16: the whole output of the chosen sublayers at
+    `=` only (flag and computation) is copied from the partner; everything else is the prompt's own.
+    Also the same at position b only."""
+    pt = Patcher(mode)
+    out_file = DIR / f"writes_{mode}.json"
+    h = CHUNK // 2
+    zero = np.zeros(64, np.float32)
+    mu0 = np.zeros((64, 2, 5, 4096), np.float32)
+    base, _, _, _ = pt.run(zero, mu0)
+    gt = pt.cm.a[pt.rows] > pt.cm.b[pt.rows]
+    ans = pt.cm.answer[pt.rows]
+    res: dict[str, Any] = {}
+
+    def go(name: str, ts: list[int], pos: int = 4) -> None:
+        wp = np.zeros((64, 5), np.float32)
+        wp[ts, pos] = 1
+        lp, _, _, _ = pt.run(zero, mu0, None, wp)
+        sc = scores(base, lp, h, gt, ans)
+        res[name] = sc
+        keys = (
+            "swap_add_gt",
+            "swap_sub_gt",
+            "same_add_gt",
+            "same_sub_gt",
+            "acc_add_gt",
+            "acc_sub_gt",
+        )
+        print(f"{name}: " + " ".join(f"{k} {sc[k]:.3f}" for k in keys), flush=True)
+        out_file.write_text(json.dumps(res, indent=1))
+
+    for t in range(32):
+        go(f"= L{t // 2}.{'attn' if t % 2 == 0 else 'mlp'}", [t])
+    attn = [t for t in range(32) if t % 2 == 0]
+    mlp = [t for t in range(32) if t % 2 == 1]
+    go("= all attn L0-15", attn)
+    go("= all mlp L0-15", mlp)
+    go("= all L0-15", list(range(32)))
+    go("= L15 attn+mlp", [30, 31])
+    go("= L13-15", list(range(26, 32)))
+    go("= L0-4", list(range(10)))
+    for t in range(32):
+        go(f"b L{t // 2}.{'attn' if t % 2 == 0 else 'mlp'}", [t], pos=3)
+    go("b all L0-15", list(range(32)), pos=3)
+    go("b mlp L0-15", mlp, pos=3)
+    go("b attn L0-15", attn, pos=3)
+
+
+def comps(mode: str, layer: str, kind: str, pos: str) -> None:
+    """Component-level copy from the partner at one writer site (o or down) and position: each alive
+    component's contribution (x V_c) U_c alone, all of them, and the remainder (delta plus the dead
+    components) alone. Dense only."""
+    assert mode == "dense"
+    pt = Patcher(mode)
+    li, p = int(layer), int(pos)
+    pt.target = (li, kind, p)
+    pt._fwd = jax.jit(pt._run)
+    names = pt.net.cm.sites[li][kind].names
+    n = len(names)
+    out_file = DIR / f"comps_{mode}_L{li}{kind}_p{p}.json"
+    h = CHUNK // 2
+    zero = np.zeros(64, np.float32)
+    mu0 = np.zeros((64, 2, 5, 4096), np.float32)
+    base, _, _, _ = pt.run(zero, mu0, cpatch=np.zeros(n, np.float32))
+    gt = pt.cm.a[pt.rows] > pt.cm.b[pt.rows]
+    ans = pt.cm.answer[pt.rows]
+    res: dict[str, Any] = {}
+
+    def go(name: str, cp: np.ndarray, dp: float) -> None:
+        lp, _, _, _ = pt.run(zero, mu0, cpatch=cp, dpatch=dp)
+        sc = scores(base, lp, h, gt, ans)
+        res[name] = sc
+        print(
+            f"{name}: "
+            + " ".join(
+                f"{k} {sc[k]:.3f}"
+                for k in ("swap_add_gt", "swap_sub_gt", "same_add_gt", "same_sub_gt")
+            ),
+            flush=True,
+        )
+        out_file.write_text(json.dumps(res, indent=1))
+
+    go("everything", np.ones(n, np.float32), 1.0)
+    go("all components", np.ones(n, np.float32), 0.0)
+    go("delta + dead", np.zeros(n, np.float32), 1.0)
+    for c in range(n):
+        e = np.zeros(n, np.float32)
+        e[c] = 1
+        go(names[c], e, 0.0)
+
+
 if __name__ == "__main__":
-    cast(Any, {"run": run, "sym": sym})[sys.argv[1]](sys.argv[2])
+    cast(Any, {"run": run, "sym": sym, "resid": resid, "writes": writes, "comps": comps})[
+        sys.argv[1]
+    ](*sys.argv[2:])

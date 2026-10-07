@@ -13,9 +13,9 @@ mirror reverses). With A = the b-odd part on add and S on sub:
     Sig_l = sum_b |(A + S) / 2|^2   (b-odd, same on both ops),
     Ev_l  = the b-even part's energy, both ops.
 A pure mirror has Sig = 0, no mirror Phi = 0; a code present on one op only has Phi = Sig.
-The search target is M = mean_l Phi_l / Phi_l(base) + KEEP_W mean_l relu(KEEP - Ev_l / Ev_l(base)) - KEEP_W (KEEP - 1),
-l in 16..31: the flip must go while b's b-even code (mostly the L15H13 copy) stays, so removing b
-altogether does not count as removing the flip.
+The search target is M = mean_l Phi_l / Phi_l(base) + KEEP_W mean_l relu(|Ev_l / Ev_l(base) - 1| - BAND),
+l in 16..31: the flip must go while b's b-even code (mostly the L15H13 copy) stays. (set.json, the
+masked components model's set, was found with an earlier one-sided penalty; commit 56d9ec89f.)
 
 Models. `comp`: the components-only model of the dataset (alive components, masks of `ATLAS/masks`,
 no delta). `dense`: the original weights. A scale s[c, t] per alive component c and position t
@@ -58,8 +58,8 @@ jax.config.update("jax_default_matmul_precision", "highest")
 
 READ = tuple(range(16, 32))
 PERM = (98 - np.arange(100)) % 100  # row of -b (mod 100) for the row of b (b = row + 1)
-TARGET = 0.1
-KEEP, KEEP_W = 1.1, 2.0  # linear penalty on b's b-even code below KEEP x base (active at base)
+TARGET = 0.05
+KEEP_W, BAND = 2.0, 0.1  # penalty when b's b-even code drifts more than BAND from base
 BATCH = 8
 PRUNE = 0.2
 T = 5
@@ -82,7 +82,12 @@ def flip_stats(r: jax.Array) -> tuple[jax.Array, jax.Array, jax.Array]:
 class Net:
     """Pure-function forward over chunks of prompts, components-only or dense, with scales s."""
 
-    def __init__(self, dense: bool) -> None:
+    def __init__(self, dense: bool, masked_removal: bool = False, alive: bool = False) -> None:
+        """masked_removal (dense only): removing a pair subtracts only the component's ACTIVE
+        contribution m (x V_c) U_c (the dataset's mask m), leaving its inactive contribution and the
+        delta in place. alive (components only): every alive component is on everywhere (m = 1)."""
+        self.masked_removal = masked_removal
+        self.alive = alive
         cm = ComponentsModel()
         self.cm = cm
         self.dense = dense
@@ -104,7 +109,7 @@ class Net:
         # weights go in as arguments: a jit closing over them would embed them as constants
         self.P: dict[str, Any] = {"sites": self.sites, "W": self.W, "G": self.G, "ln": self.ln,
                                   "unembed": cm.unembed, "final": cm.final_j, "cos": cm.cos, "sin": cm.sin,
-                                  "dU": [{} for _ in range(32)]}  # fmt: skip
+                                  "dU": [{} for _ in range(32)], "clamp": {}}  # fmt: skip
         self._light = jax.jit(lambda P, s, x0, m, oh: self._run(P, s, x0, m, oh, None)[0])
         self._grad = jax.jit(
             lambda P, s, x0, m, oh, cot: jax.vjp(
@@ -147,8 +152,11 @@ class Net:
                 h = xin @ V
                 if self.dense:
                     y = xin @ P["W"][li][kind].astype(jnp.float32).T  # noqa: B023
-                    y = y - (h * (1.0 - sc[:, :, cols])) @ U  # noqa: B023
-                    hs = h * sc[:, :, cols]  # noqa: B023
+                    off_ = 1.0 - sc[:, :, cols]  # noqa: B023
+                    if self.masked_removal:
+                        off_ = off_ * m[li][:, :, cols]  # noqa: B023
+                    y = y - (h * off_) @ U
+                    hs = h * (1.0 - off_)
                 else:
                     hs = h * mm[:, :, cols]  # noqa: B023
                     y = hs @ U
@@ -156,7 +164,9 @@ class Net:
                     j, dU = P["dU"][li][kind]  # noqa: B023
                     y = y + hs[:, :, j] @ dU
                 if ohs is not None:
-                    full[f"h{li}.{kind}"] = gsum(oh, hs[:, 4])  # noqa: B023
+                    full[f"h{li}.{kind}"] = jnp.einsum("bg,btn->tgn", ohs, hs)  # noqa: B023
+                    opoh = ohs[:, :200].reshape(-1, 2, 100).sum(-1)  # noqa: B023
+                    full[f"q{li}.{kind}"] = jnp.einsum("bo,btn->otn", opoh, hs * hs)  # noqa: B023
                 return y
 
             def attn(xin: jax.Array) -> jax.Array:
@@ -169,6 +179,8 @@ class Net:
                 return site("down", jax.nn.silu(site("gate", xin)) * site("up", xin))
 
             for off, fn in ((0, attn), (1, mlp)):
+                if off == 1 and li in P["clamp"]:  # remove a fixed per-(op, b) vector at `=`
+                    x = x.at[:, 4].add(-(oh @ P["clamp"][li]))
                 if off == 1 and li in READ:
                     light[f"r{li}"] = gsum(oh, x[:, 4] @ P["G"][li])
                 if off == 1 and ohs is not None:
@@ -188,7 +200,10 @@ class Net:
     def chunk_inputs(self, rows: np.ndarray, full: bool = False) -> tuple[Any, ...]:
         cm = self.cm
         x0 = jnp.asarray(np.stack([[cm.embed[int(t)] for t in toks] for toks in cm.tokens[rows]]), jnp.float32)  # fmt: skip
-        m = [jnp.asarray(cm.masks(li, rows)) for li in range(32)]
+        if self.alive:
+            m = [jnp.ones((len(rows), T, n), jnp.float32) for n in self.n_cols]
+        else:
+            m = [jnp.asarray(cm.masks(li, rows)) for li in range(32)]
         op, a, b = cm.op[rows], cm.a[rows], cm.b[rows]
         oh = jnp.asarray(np.eye(200, dtype=np.float32)[op * 100 + b - 1])
         if not full:
@@ -259,7 +274,7 @@ def objective(base: dict[int, tuple[float, float, float]]):  # noqa: ANN201
         st = [flip_stats(r[f"r{li}"]) for li in READ]
         phi = jnp.stack([x[0] for x in st]) / phi0
         ev = jnp.stack([x[2] for x in st]) / ev0
-        return phi.mean() + KEEP_W * (jax.nn.relu(KEEP - ev).mean() - (KEEP - 1))  # 1 at base
+        return phi.mean() + KEEP_W * jax.nn.relu(jnp.abs(ev - 1.0) - BAND).mean()
 
     return M
 
@@ -276,8 +291,12 @@ def pair_names(net: Net) -> list[list[str]]:
     return out
 
 
-def search() -> None:
-    net = Net(dense=False)
+def set_path(model: str):  # noqa: ANN201
+    return DIR / ("set.json" if model == "comp" else f"set_{model}.json")
+
+
+def search(model: str = "comp") -> None:
+    net = Net(dense=False, alive=model == "alive")
     names = pair_names(net)
     s = net.scales_one()
     t0 = time.time()
@@ -371,15 +390,20 @@ def search() -> None:
         "final": {str(k): v for k, v in final.items()},
         "history": history,
     }
-    (DIR / "set.json").write_text(json.dumps(out, indent=1))
+    set_path(model).write_text(json.dumps(out, indent=1))
     print(f"final set: {len(removed)} pairs, M {Mv:.4f}", flush=True)
 
 
-def evaluate() -> None:
+def evaluate(variant: str = "all") -> None:
+    """The masked components model's set (set.json): components model, dense with the set's active
+    contributions removed (masked), dense with its full rank-one terms removed. variant
+    `masked_only` runs the masked one only."""
     S = json.loads((DIR / "set.json").read_text())["removed"]
     res: dict[str, Any] = {}
-    for dense in (False, True):
-        net = Net(dense=dense)
+    for dense, masked in ((True, True), (False, False), (True, False)):
+        if variant == "masked_only" and not masked:
+            continue
+        net = Net(dense=dense, masked_removal=masked)
         conds = {"base": [], "set": S, "set_eq": [p for p in S if p["pos"] == 4]}
         base_lp = None
         for cond, pairs in conds.items():
@@ -390,7 +414,7 @@ def evaluate() -> None:
             lp = out.pop("lp")
             if base_lp is None:
                 base_lp = lp
-            key = f"{'dense' if dense else 'comp'}_{cond}"
+            key = f"{'dense' if dense else 'comp'}{'_masked' if masked else ''}_{cond}"
             light = {f"r{li}": out[f"x{li}"][:200] @ np.asarray(net.G[li]) for li in READ}
             st = measure(light)
             top = lp.argmax(-1)
@@ -406,7 +430,8 @@ def evaluate() -> None:
             print(key, {k: v for k, v in mets.items() if k != "stats"},
                   {li: f"{v[0]:.3g}/{v[1]:.3g}/{v[2]:.3g}" for li, v in st.items()}, flush=True)  # fmt: skip
         del net
-    (DIR / "eval.json").write_text(json.dumps(res, indent=1))
+    prev = json.loads((DIR / "eval.json").read_text()) if (DIR / "eval.json").exists() else {}
+    (DIR / "eval.json").write_text(json.dumps(prev | res, indent=1))
 
 
 def flip_part(r: np.ndarray) -> np.ndarray:
@@ -553,6 +578,7 @@ def report() -> None:
                 U = cm_uv[f"layers.{lw}.{suffix}.U"]
                 ids = cm_uv[f"layers.{lw}.{suffix}.ids"]
                 h = z[f"h{lw}.{kind}"]
+                h = h[4, :200] if h.ndim == 3 else h
                 order = _site_order(lw, suffix, ids)
                 comp_w = h @ U[order]
                 sc = float((flip_part(comp_w @ Gl) * Ofl).sum() / den)
@@ -574,4 +600,6 @@ def _site_order(layer: int, suffix: str, ids: np.ndarray) -> list[int]:
 
 
 if __name__ == "__main__":
-    cast(Any, {"search": search, "evaluate": evaluate, "report": report})[sys.argv[1]]()
+    cast(Any, {"search": search, "evaluate": evaluate, "report": report})[sys.argv[1]](
+        *sys.argv[2:3]
+    )
