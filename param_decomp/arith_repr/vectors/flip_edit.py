@@ -167,7 +167,7 @@ def run() -> None:
         net.P["dU"] = [{} for _ in range(32)]
         for (li, kind), dU in edits.items():
             j = jnp.arange(dU.shape[0])
-            net.P["dU"][li][kind] = (j, jnp.asarray(dU, jnp.float32))
+            net.P["dU"][li][kind] = (j, jnp.asarray(dU, jnp.float32), jnp.ones(5, jnp.float32))
         lp = net.logprobs(s, rows)
         sc: dict[str, Any] = dict(scores(base, lp))
         light = net.light(s)

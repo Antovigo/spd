@@ -57,6 +57,7 @@ from param_decomp.arith_repr.vectors.flip_components import DIR
 jax.config.update("jax_default_matmul_precision", "highest")
 
 READ = tuple(range(16, 32))
+W_FULL = range(28, 36)  # sublayer writes captured under all four groupings (L14-L17)
 PERM = (98 - np.arange(100)) % 100  # row of -b (mod 100) for the row of b (b = row + 1)
 TARGET = 0.05
 KEEP_W, BAND = 2.0, 0.1  # penalty when b's b-even code drifts more than BAND from base
@@ -109,7 +110,7 @@ class Net:
         # weights go in as arguments: a jit closing over them would embed them as constants
         self.P: dict[str, Any] = {"sites": self.sites, "W": self.W, "G": self.G, "ln": self.ln,
                                   "unembed": cm.unembed, "final": cm.final_j, "cos": cm.cos, "sin": cm.sin,
-                                  "dU": [{} for _ in range(32)], "clamp": {}}  # fmt: skip
+                                  "dU": [{} for _ in range(32)], "clamp": {}, "wclamp": {}}  # fmt: skip
         self._light = jax.jit(lambda P, s, x0, m, oh: self._run(P, s, x0, m, oh, None)[0])
         self._grad = jax.jit(
             lambda P, s, x0, m, oh, cot: jax.vjp(
@@ -161,8 +162,8 @@ class Net:
                     hs = h * mm[:, :, cols]  # noqa: B023
                     y = hs @ U
                 if kind in P["dU"][li]:  # noqa: B023
-                    j, dU = P["dU"][li][kind]  # noqa: B023
-                    y = y + hs[:, :, j] @ dU
+                    j, dU, pm = P["dU"][li][kind]  # noqa: B023
+                    y = y + (hs[:, :, j] * pm[None, :, None]) @ dU
                 if ohs is not None:
                     full[f"h{li}.{kind}"] = jnp.einsum("bg,btn->tgn", ohs, hs)  # noqa: B023
                     opoh = ohs[:, :200].reshape(-1, 2, 100).sum(-1)  # noqa: B023
@@ -188,8 +189,13 @@ class Net:
                 rms = jnp.sqrt((x * x).mean(-1) + cm.eps)
                 xin = x / rms[..., None] * P["ln"][off][li]
                 out = jax.checkpoint(fn)(xin) if ohs is None else fn(xin)
+                if (
+                    off == 1 and li in P["wclamp"]
+                ):  # remove a fixed per-(op, b) vector from the MLP write
+                    out = out.at[:, 4].add(-(oh @ P["wclamp"][li]))
                 if ohs is not None:
-                    full[f"w{2 * li + off}"] = gsum(oh, out[:, 4])
+                    t = 2 * li + off
+                    full[f"w{t}"] = gsum(ohs if t in W_FULL else oh, out[:, 4])
                 x = x + out
         if ohs is not None or want_lp:
             xl = x[:, -1]
@@ -233,8 +239,9 @@ class Net:
         return [np.asarray(x) for x in g]
 
     def logprobs(self, s: list[jax.Array], rows: np.ndarray) -> np.ndarray:
-        """Last-position log-probs of `rows` (a multiple of CHUNK), with the edits in P["dU"]:
-        per layer, kind -> (columns j of the site, dU (len(j), d_out)) added to those components' U."""
+        """Last-position log-probs of `rows` (a multiple of CHUNK), with the edits in P["dU"]: per
+        layer, kind -> (columns j of the site, dU (len(j), d_out), position mask (T,)) added to those
+        components' U at the masked positions."""
         out = []
         for c0 in range(0, len(rows), CHUNK):
             out.append(np.asarray(self._lp(self.P, s, *self.chunk_inputs(rows[c0 : c0 + CHUNK]))))
@@ -572,7 +579,7 @@ def report() -> None:
             den = float((Ofl**2).sum())
             parts = []
             for p in range(2 * li + 1):
-                w = z[f"w{p}"]
+                w = z[f"w{p}"][:200]
                 lw, kind = p // 2, ("o" if p % 2 == 0 else "down")
                 suffix = "self_attn.o_proj" if kind == "o" else "mlp.down_proj"
                 U = cm_uv[f"layers.{lw}.{suffix}.U"]
