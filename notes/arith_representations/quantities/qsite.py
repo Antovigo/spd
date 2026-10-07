@@ -46,6 +46,14 @@ def load_site(block: int, point: str, pos: int = 1) -> Site:
     kind = np.array([k.split(".")[-1].replace("_proj", "") for k in ix["comp_kind"]])
     act = np.load(VW / "ci_positions.npz")["ci_max"][:, pos] > 0.01
     sel = np.flatnonzero((ix["comp_layer"] == block) & np.isin(kind, READ_KINDS[point]) & act)
+    compact = VW / "alive_only/inner_token_a.npy"  # (100, A): inner[ROWS, 1], for pods
+    if compact.exists():
+        assert pos == 1
+        inner = np.load(compact)[:, None, :].repeat(2, 1)  # rows indexed below as [rows, 1]
+        rows_c = np.arange(100)
+        X = np.asarray(inner[rows_c, pos][:, sel], np.float64) / ix["comp_v_norm"][sel]
+        names = [f"L{block}.{kind[c]}.c{int(ix['comp_index'][c])}" for c in sel]
+        return Site(block, point, pos, names, sel, X)
     inner = np.load(VW / "alive_only/inner.npy", mmap_mode="r")
     rows = (
         np.arange(100) * 100

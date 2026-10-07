@@ -400,3 +400,61 @@ span, stagewise, reader metric, chance level, 10-fold cross-validation over valu
 - **Unexplained**: after the final set the residual is still above its permutation null at most
   sites (median ratio 1.25-1.31), with dominant frequencies k = 25 (period 4) at L15-L29 and
   k = 12-17 at L1-L14. The next iteration of the loop starts there.
+
+## V3: the protocol at token a, with patching
+Code: `PROTOCOL.md` (the protocol), `v3.py` (joint fits with a small ridge, drop-one losses,
+permutation tests, held-out R^2, the important residual), `v3_run.py` (the loop over the 63 sites
+at token a), `v3_patch.py` (patched runs), `v3_summary.py`. Numbers: `v3_token_a.json` (accepted
+quantities, decision log per site), `v3_patch.json`. Run on a RunPod L40 (a cluster run of an
+earlier version of the code was discarded).
+
+**What the run does** (PROTOCOL.md, steps 1-7, with the agent's hypotheses replaced by a fixed
+pool of specific quantities, all functions of a): log a; a smooth curve in log a (5 dims); one
+digit [a <= 9]; a = 100; circles of period 100, 50, 20 and 10; parity; a mod 5 classes; units
+digit classes (a mod 10); decade parity; tens digit classes (10..99); 2-adic valuation; repdigit;
+a mod 3 classes. At each site, in stream order: start from the previous site's accepted list and
+remove what is not needed here (drop-one loss at or below chance, or drop-one permutation
+p >= 0.01); then add, one at a time, the candidate with the largest excess over chance per
+dimension if its permutation p < 0.01; after each addition remove any quantity it made redundant
+(the highest-dimensional first); stop when no candidate qualifies or the held-out important
+residual (CI > 0.01) is below 5%. All entries are fit; the CI only enters the stopping rule.
+
+Two fixes were needed on the way (both recorded in the code): the broad 24-dim spline place code
+had to leave the pool (accepted with a small excess per dim, it then removed the specific
+quantities it covers and was inherited everywhere), and the joint fit needed a small ridge
+penalty (overlapping class partitions are collinear on some training folds and the held-out
+predictions exploded).
+
+**Accepted quantities** (number of the 63 sites where each is in the final list): smooth
+magnitude curve 60, tens digit classes 58, circle period 100: 54, circle period 20: 47, circle
+period 50: 42, units digit classes 36, 2-adic valuation 34, a mod 5 classes 25, a mod 3 classes 23,
+units digit circle 22, parity 19, repdigit 15, log a 4, one digit 3. Decade parity and a = 100 are
+never in a final list. The units digit enters as a circle plus parity plus a mod 5 classes up to
+L12 and as the 10 classes from L13 on.
+
+| | attention inputs (32) | MLP inputs (31) |
+|---|---|---|
+| median dims of the accepted list | 25.5 | 30 |
+| median held-out R^2 (over values of a) | 0.78 | 0.86 |
+| median important residual share, in-sample | 0.065 | 0.023 |
+| median important residual share, held-out | 0.149 | 0.080 |
+
+**Patching** (2000 random prompts, alive-only model, KL at the last position against the
+unpatched alive-only model; answer accuracy unpatched 0.617):
+- exact reads patched back: KL 3e-7 (check of the patching code);
+- the site's readers patched with their mean over a: KL above 0.001 at 13 of the 63 sites; at the
+  other 50, patching a single site at token a barely changes the output. The largest: L16.attn
+  0.90, L0.mlp 0.27, L12.mlp 0.028, L13.mlp 0.027, L1.attn 0.024;
+- the reconstruction from the accepted quantities: at those 13 sites it removes 97-99.8% of the
+  mean-patch KL (L16.attn 0.0015 vs 0.90, L0.mlp 0.0020 vs 0.27); the largest KL at any site is
+  0.002;
+- all 63 sites patched together at token a: reconstruction KL 0.0022 (median 0.0013), accuracy
+  0.616; mean patch KL 1.11, accuracy 0.0015.
+
+**Limits of this run.** The reconstructions patched in were fit on all 100 values of a with
+25-30 dims, so part of what they reproduce may be fit by chance; a patch of held-out
+reconstructions (fit without the patched values) is the stricter test. The hypothesis pool is
+fixed and includes quantities found on these same sites earlier (2-adic valuation, repdigit,
+circle period 20), so their acceptance here is not an independent discovery. A single site at
+token a matters little for the output except at a few sites (L16.attn, L0.mlp), so the patching
+test is informative mainly there and for the all-sites patch.

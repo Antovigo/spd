@@ -31,6 +31,9 @@ ROWS = np.arange(100) * 100  # prompts op = +, b = 1, a = 1..100
 
 
 def stream(l: int) -> np.ndarray:  # noqa: E741
+    compact = VW / "alive_only/resid_token_a.npy"  # (65, 100, 4096): resid[:, ROWS, 1], for pods
+    if compact.exists():
+        return np.asarray(np.load(compact, mmap_mode="r")[l], np.float64)
     r = np.load(VW / "alive_only/resid.npy", mmap_mode="r")
     return np.asarray(r[l][ROWS, 1], np.float64)
 
