@@ -107,11 +107,21 @@ def main() -> None:
     out, recon, prev = [], {}, []
     t0 = time.time()
     for label, site in pos.sites.items():
+        Y = site.Y
+        if ((Y - Y.mean(0)) ** 2).sum() <= 1e-10 * (
+            Y**2
+        ).sum():  # constant over the domain (e.g. L0 at a fixed token)
+            out.append({"site": label, "n": site.W.shape[1], "k": site.W.shape[0], "dims": 0, "accepted": [],
+                        "constant": True, "log": ["constant over the domain: nothing to fit"]})  # fmt: skip
+            for key in ("/Yhat", "/Yhat_heldout", "/Y"):
+                recon[label + key] = Y.astype(np.float32)
+            recon[label + "/cols"] = site.cols
+            print(f"t={pos.t} {label}: constant over the domain", flush=True)
+            continue
         F = Fitter(site, cands, fs)
         log: list[str] = []
         A = run_site(F, prev, log)
         prev = A
-        Y = site.Y
         Zin, Zho = F.reconstruct(A), F.reconstruct(A, heldout=True)
         rec = {
             "site": label, "n": site.W.shape[1], "k": site.W.shape[0], "dims": F.dims(A),

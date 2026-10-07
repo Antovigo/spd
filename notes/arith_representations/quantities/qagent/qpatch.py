@@ -108,7 +108,9 @@ def main() -> None:
     args = ap.parse_args()
     t, tag = args.t, (f"_{args.tag}" if args.tag else "")
     runs = json.loads((DATA / f"qloop_t{t}{tag}.json").read_text())["sites"]
-    accepted = {r["site"]: [a["name"] for a in r["accepted"]] for r in runs}
+    accepted = {
+        r["site"]: [a["name"] for a in r["accepted"]] for r in runs if not r.get("constant")
+    }
     pos = load(t)
     model = Model(dense=args.model == "original")
     rows = np.sort(np.random.default_rng(0).choice(20000, args.n, replace=False))
