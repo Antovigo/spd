@@ -199,5 +199,47 @@ def describe() -> None:
               + f" flip {flip:.2f} op {op_share:.2f} | " + " ".join(f"{nm}:{harm[nm]}" for nm in GROUPS) + rm)  # fmt: skip
 
 
+def flipswap() -> None:
+    """Is the flip the only difference between the operations from L16 on? At the stream entering
+    L16's MLP at `=`, the base model's flip part F_16 (b-odd, op-odd part of the (op, b) group means)
+    is removed (`clamp16`: -F on add, +F on sub) or reversed (`swap16`: -2F on add, +2F on sub, so each
+    operation gets the other's flip). Scores: accuracy (add; sub with a >= b), and `other` = top-1 is
+    the other operation's answer (add with a > b: a - b; sub: a + b)."""
+    S = np.load(DIR / "eval_alive_base.npz")
+    F = flip_part(S["x16"][:200].astype(np.float64))  # (100, d), the add-side sign
+    net = Net(dense=False, alive=True)
+    cm = net.cm
+    s0 = net.scales_one()
+    rows = np.arange(20000)
+    add, sub = cm.op == 0, cm.op == 1
+    other = np.where(
+        add, cm.num_ids[np.clip(cm.a - cm.b, 0, 200)], cm.num_ids[np.clip(cm.a + cm.b, 0, 200)]
+    )
+    res: dict[str, Any] = {}
+    for name, scale in (("base", 0.0), ("clamp16", 1.0), ("swap16", 2.0)):
+        tab = scale * np.concatenate([F, -F]).astype(np.float32)
+        net.P["clamp"] = {16: jnp.asarray(tab)} if scale else {}
+        top = net.logprobs(s0, rows).argmax(-1)
+        sel_add_gt = add & (cm.a > cm.b)
+        r = {
+            "acc_add": float((top[add] == cm.answer[add]).mean()),
+            "other_add_gt": float((top[sel_add_gt] == other[sel_add_gt]).mean()),
+            "acc_sub_ge": float(
+                (top[sub & (cm.a >= cm.b)] == cm.answer[sub & (cm.a >= cm.b)]).mean()
+            ),
+            "other_sub": float((top[sub] == other[sub]).mean()),
+            "other_sub_ge": float(
+                (top[sub & (cm.a >= cm.b)] == other[sub & (cm.a >= cm.b)]).mean()
+            ),
+        }
+        res[name] = r
+        print(name, {k: round(v, 3) for k, v in r.items()}, flush=True)
+    net.P["clamp"] = {}
+    (DIR / "flipswap.json").write_text(json.dumps(res, indent=1))
+
+
 if __name__ == "__main__":
-    cast(Any, {"baseline": baseline, "evaluate": evaluate, "describe": describe})[sys.argv[1]]()
+    cast(
+        Any,
+        {"baseline": baseline, "evaluate": evaluate, "describe": describe, "flipswap": flipswap},
+    )[sys.argv[1]]()
