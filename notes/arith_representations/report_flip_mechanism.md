@@ -301,6 +301,34 @@ section 5), found two ways to build the product:
 In both cases the input that reads b reads it at a quarter period, i.e. at the sine phase: exactly
 the part of b's code that a mirror reverses. Neuron 130 was not part of that analysis.
 
+The table below sorts all eight neurons into the two mechanisms, in the alive-only model at `=`.
+Each neuron's gate and up pre-activations are rebuilt from the components' class-mean inner
+activations, one value per (operation, b): pre-activation = Σ_c (mean h_c) U_c[n], with the sum over
+the alive gate (or up) components c of layer 15 and U_c[n] the entry of c's write vector on neuron n.
+act = silu(gate) × up is applied to those class means. Each cell gives the mean over the 100 values
+of b, and in brackets the standard deviation (sd) over b, which is the part that carries b.
+
+| Neuron | Period T | Mechanism | Gate pre-activation, + / − | Up pre-activation, + / − | act, + / − |
+|---|---|---|---|---|---|
+| 7446 | 5 | gate: open on + | +2.74 (0.08) / +0.34 (0.05) | −0.22 (0.57) / −0.29 (0.46) | −0.56 (1.45) / −0.06 (0.09) |
+| 11305 | 5 | gate: open on − | −1.22 (0.08) / +1.73 (0.06) | −0.06 (0.63) / −0.01 (0.51) | +0.02 (0.17) / −0.01 (0.75) |
+| 13193 | 10 | gate: open on + | +0.97 (0.31) / +0.00 (0.25) | −0.77 (0.22) / +0.18 (0.18) | −0.61 (0.36) / −0.01 (0.03) |
+| 9057 | 10 | gate: open on − | −0.98 (0.33) / +1.56 (0.28) | +0.07 (0.49) / +0.40 (0.39) | −0.01 (0.12) / +0.62 (0.59) |
+| 9205 | 10 | up: sign flips | +0.57 (0.61) / +0.68 (0.50) | −1.98 (0.10) / +0.99 (0.07) | −0.84 (0.91) / +0.51 (0.42) |
+| 12769 | 50 | up: sign flips | +0.32 (0.64) / +0.45 (0.47) | −2.14 (0.07) / +0.69 (0.08) | −0.59 (0.90) / +0.22 (0.23) |
+| 6456 | 50 | up: sign flips | +0.67 (0.50) / +0.93 (0.37) | +1.97 (0.07) / −0.71 (0.09) | +0.96 (0.78) / −0.51 (0.27) |
+| 130 | 100 | up: sign flips | +0.73 (0.69) / +0.99 (0.54) | +2.33 (0.10) / −0.96 (0.11) | +1.32 (1.30) / −0.77 (0.54) |
+
+- **Gate neurons** (7446, 11305, 13193, 9057): the gate's mean moves with the operation and
+  barely with b (sd 0.05–0.33), so silu(gate) is near 0 on one operation (−0.28 to 0.20) and
+  0.72–2.57 on the other; up carries b (sd 0.18–0.63). They come in pairs, one open on each
+  operation: 7446 (+) with 11305 (−) at period 5, and 13193 (+) with 9057 (−) at period 10. Each
+  neuron's act varies with b on its open operation only (sd 0.36–1.45 against 0.03–0.17).
+- **Up neurons** (9205, 12769, 6456, 130): up's mean changes sign between the operations and barely
+  varies with b (sd 0.07–0.11), with a magnitude 2–3 times larger on + than on −; the gate carries b
+  (sd 0.37–0.69) and its mean stays positive on both. act varies with b on both operations, with
+  opposite signs, which is the flip within a single neuron.
+
 **What gate c0 does: it holds the flip neurons' gates open.** gate c0 is the switch whose removal cuts
 the flip most (0.56 of it is left, section 4), yet it reads neither the operation (cosine with the op
 flag 0.00) nor b (alignment with b's planes 0.01–0.03). To see what it does, I rebuilt each flip
