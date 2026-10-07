@@ -225,7 +225,7 @@ Four gate and up components of the layer-15 MLP decide what happens next. In the
 | L15.gate.c72 | −0.58 | 0.1 / 15.8 | on for subtraction only |
 | L15.up.c117 | +0.57 | −0.6 / −15.1 | on for subtraction only |
 | L15.up.c34 | −0.34 | −9.4 / 0.0 | on for addition only |
-| L15.gate.c0 | 0.00 | 21.3 / 22.7 | on for both; it does not read the operation |
+| L15.gate.c0 | 0.00 | 21.3 / 22.7 | on for both; does not read the operation (a shared bias on the flip neurons' gates, step 3) |
 
 None of the four reads b. I measure this with **alignment**: the length of a direction's projection
 onto a plane divided by its own length, where a random direction in 4096 dimensions gives 0.022. On
@@ -259,6 +259,40 @@ section 5), found two ways to build the product:
 
 In both cases the input that reads b reads it at a quarter period, i.e. at the sine phase: exactly
 the part of b's code that a mirror reverses. Neuron 130 was not part of that analysis.
+
+**What gate c0 does: it holds the flip neurons' gates open.** gate c0 is the switch whose removal cuts
+the flip most (0.56 of it is left, section 4), yet it reads neither the operation (cosine with the op
+flag 0.00) nor b (alignment with b's planes 0.01–0.03). To see what it does, I rebuilt each flip
+neuron's gate and up pre-activations from the components' class-mean inner activations, one value per
+(operation, b). Gate c0 is always on, with an inner activation of about 21–23 on both operations, and
+its U adds a positive offset to every flip neuron's gate, almost the same on both operations:
+
+| Neuron | Mean gate input, add / sub | gate c0's part, add / sub | b-dependent spread of act, add / sub | The same without gate c0 |
+|---|---|---|---|---|
+| 7446 | +2.74 / +0.34 | +1.50 / +1.60 | 1.45 / 0.09 | 0.54 / 0.13 |
+| 13193 | +0.97 / +0.00 | +0.69 / +0.74 | 0.36 / 0.03 | 0.18 / 0.05 |
+| 6456 | +0.67 / +0.93 | +0.46 / +0.49 | 0.78 / 0.27 | 0.59 / 0.20 |
+| 130 | +0.73 / +0.99 | +0.52 / +0.55 | 1.30 / 0.54 | 0.99 / 0.40 |
+| 9057 | −0.98 / +1.56 | +0.32 / +0.34 | 0.12 / 0.59 | 0.13 / 0.45 |
+| 11305 | −1.22 / +1.73 | +0.26 / +0.28 | 0.18 / 0.75 | 0.17 / 0.60 |
+| 9205 | +0.57 / +0.68 | +0.23 / +0.24 | 0.91 / 0.42 | 0.81 / 0.37 |
+| 12769 | +0.32 / +0.45 | +0.08 / +0.08 | 0.90 / 0.23 | 0.86 / 0.22 |
+
+"b-dependent spread of act" is the standard deviation over b of act = silu(gate) × up, computed from
+these class means; it measures how much of b each neuron passes on.
+
+- **The operation-dependent part of each gate comes from the other switches.** For neuron 7446 the
+  gate input is +2.74 on addition and +0.34 on subtraction; gate c0 contributes the same +1.5–1.6 to
+  both.
+- **Without gate c0, the gates sit lower on silu's curve and the neurons pass on less of b.** The
+  largest effects are on the neurons where gate c0's offset is largest. Neuron 7446 on addition
+  drops from a spread of 1.45 to 0.54, and neuron 13193 on addition from 0.36 to 0.18; the others
+  lose 4–25%.
+- **So gate c0 is an operation-independent bias that amplifies the b × operation product.** It does
+  not carry the operation or b itself. That is why removing it shrinks the flip without reversing it.
+
+These numbers apply silu to class means. The variation within each (operation, b) class, over a,
+is not included.
 
 Figure 4 shows this in the alive-only model. It plots b's plane at each neuron's harmonic in the
 stream entering the layer-15 MLP, with the read directions of each neuron's strongest gate and up
