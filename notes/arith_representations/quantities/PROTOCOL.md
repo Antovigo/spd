@@ -7,6 +7,12 @@ It is a hypothesise-fit-inspect loop with backtracking: the agent guesses a quan
 reads what it leaves in the residual, and either keeps it and moves on to the rest of the
 residual, or replaces it with a better guess.
 
+Objective: the residual must not be causally important. A reader's activation only has to be
+explained on the prompts where that reader is causally important (CI above a threshold); what it
+does on the other prompts does not reach the output and is not fit. Those activations are still
+shown to the agent as hints: a pattern that is only important on a thin slice of the domain is
+often easier to recognise over the whole domain.
+
 Status: draft, built from the V1 / V2 experiments on the addsub task (`README.md`).
 
 ## 1. Definitions
@@ -30,16 +36,31 @@ Status: draft, built from the V1 / V2 experiments on the addsub task (`README.md
   input, ... restricted to a support set if needed), stacked into Phi_q (N x d_q), with
   directions D_q (k x d_q). Model: Z = 1 mu^T + sum_q Phi_q D_q^T + E, mu the mean, E the
   residual. A quantity is shared by all readers: no per-reader selection.
-- Reader metric: variance of Y = Z W (used for decisions). Stream metric: variance of Z.
-- Increment of q given a set A of quantities: the reader-metric variance explained by adding q
-  to a joint least-squares fit of A, as a fraction of the total.
-- Chance level: d_q / df times the residual variance before adding q, df = (number of distinct
-  domain values - 1 - dims already in A). Excess = increment - chance. Low-dimensional features
-  fit to a small domain explain a lot by chance (10 dims on 100 values: about 10%).
+- Causal importance: CI_r(i) in [0, 1], reader r's causal importance on prompt i at position t
+  (the decomposition's CI function; for addsub, the filter's output CI on the original model,
+  `dataset/original/ci.npy`). Active mask: M(i, r) = 1 if CI_r(i) > 0.01, else 0. N_r = number
+  of distinct domain values on which r is active.
+- Fitting objective: minimise sum over (i, r) of M(i, r) (Y(i, r) - Yhat(i, r))^2, with
+  Yhat(i, r) = c_r + sum_q Phi_q(i) D_q^T w_r (w_r: column r of W, c_r: reader r's intercept
+  on its active prompts). Only active entries enter the fit, the residual and every score
+  below. When the reader directions are linearly independent (k = n), any reader coefficients
+  B = D^T W are reachable, so this is one masked least-squares regression per reader on the
+  shared features Phi; when k < n the readers' coefficients are tied through D (fit the D
+  directly).
+- Reader metric: variance of Y = Z W over active entries (used for decisions). Stream metric:
+  variance of Z (all prompts; context only).
+- Increment of q given a set A of quantities: the active-entry variance explained by adding q to
+  the joint masked fit of A, as a fraction of the total active-entry variance (each reader's
+  values centred on its active prompts).
+- Chance level: summed over readers, d_q / df_r times reader r's residual variance before adding
+  q, df_r = N_r - 1 - (dims already in A). Readers with N_r < 3 (dims of A + q) carry too few
+  active values for these features and are left out of that comparison (reported).
+  Excess = increment - chance. Low-dimensional features fit to few values explain a lot by
+  chance (10 dims on 100 values: about 10%).
 - Permutation p-value of q: the fraction of 500 random permutations of phi_q over the domain
-  whose increment is at least the real one.
-- Held-out R^2: directions fit on part of the domain values, reads predicted on the held-out
-  values from their features (10 folds over domain values).
+  whose increment is at least the real one (same mask).
+- Held-out R^2: the fit made on part of the domain values, active entries of the held-out
+  values predicted from their features (10 folds over domain values).
 
 ## 2. What the agent keeps
 
@@ -54,21 +75,30 @@ Status: draft, built from the V1 / V2 experiments on the addsub task (`README.md
 ### Step 0: data and checks
 1. Build Z, W; check Y = Z W against the stored inner activations times rho (relative
    error < 1e-3).
-2. Record N, the domain size, n, k and rho over the domain.
-3. If k < 10, mark the site as low-power: a quantity is accepted there only if it is also
+2. Record N, the domain size, n, k, rho over the domain, and for each reader N_r and the
+   fraction of its activation variance that falls on active entries.
+3. Drop readers with no active entry at t. Readers active on very few values (N_r < 5) are kept
+   but flagged: they constrain little and are easy to fit by chance.
+4. If k < 10, mark the site as low-power: a quantity is accepted there only if it is also
    accepted at an adjacent site.
 
 ### Step 1: look at the residual
-With A empty, the residual is the centred stream. Produce, in the reader metric:
-1. The singular values of E against a permutation null (each reader's residual permuted over
-   the domain), and the top singular functions u_1, u_2, ... (functions over the domain).
+With A empty, the residual is each reader's read centred on its active prompts. The residual
+is defined on active entries only; for the matrix diagnostics, inactive entries are set to 0.
+Produce, in the reader metric:
+1. The singular values of the residual matrix (domain values x readers) against a permutation
+   null (each reader's active residual values permuted among its active domain values), and the
+   top singular functions u_1, u_2, ... (functions over the domain).
 2. Each top singular function plotted against every task variable and against every accepted
    quantity's features, and as a table of its largest positive and negative values with their
    domain values.
 3. Per task variable (and pair of variables), the residual variance explained by the variable
    as a categorical, minus its chance level: which inputs the residual still depends on.
-4. Per reader, the raw read, the current fit and the residual (for a sample of readers and for
-   the readers with the largest residuals).
+4. Per reader, over the whole domain: the raw read, with its active entries marked (and its
+   CI), the current fit and the residual on active entries (for a sample of readers and for the
+   readers with the largest active residuals). The inactive part of the read is a hint, not a
+   target: a reader whose read is a clean sine of a over the whole range but active only on a
+   slice suggests the sine; the hypothesis is then fit on the slice.
 
 ### Step 2: make a hypothesis
 Write one hypothesis: a specific quantity (its feature map, its encoding, its support) and the
@@ -83,11 +113,12 @@ circle, a circle before a categorical, a categorical before a one-hot). A freque
 correlation is not a hypothesis by itself: name the function.
 
 ### Step 3: fit it
-Refit A + q jointly. Record: increment, chance, excess, p-value, held-out R^2 of A + q, the
+Refit A + q jointly with the masked objective (active entries only). Record: increment, chance, excess, p-value, held-out R^2 of A + q, the
 number of readers with at least 10% of their variance from q, and the new residual.
 
 ### Step 4: judge it from what it leaves
-Inspect the new residual (step 1 again), looking specifically at what is tied to q:
+Inspect the new residual on active entries (step 1 again), looking specifically at what is
+tied to q:
 - the residual plotted against q's features and against the variables q is a function of;
 - the drop-one loss of every earlier quantity in A + q.
 Then decide:
@@ -108,16 +139,17 @@ Then decide:
 - **Accept** otherwise: q joins A; return to step 1 on the new residual.
 
 ### Step 5: check generalisation
-After every acceptance, the held-out R^2 of A must not decrease. A quantity that raises the
+After every acceptance, the held-out R^2 of A (active entries of held-out values) must not
+decrease. A quantity that raises the
 in-sample fit and lowers the held-out fit is fitting individual domain values: revise it
 (coarser encoding) or reject it.
 Selection bias: a quantity read off the residual of some data is tested on data it was not read
 from (the other half of the domain values, or another site) before it is accepted.
 
 ### Step 6: stop
-Stop when (a) the last few hypotheses were all rejected, (b) the residual's top singular value
-is within the 95% permutation null, and (c) no task variable or pair explains residual variance
-above chance (step 1.3). What remains is reported as unexplained; if it is concentrated on
+Stop when (a) the last few hypotheses were all rejected, (b) the active residual's top singular
+value is within the 95% permutation null, and (c) no task variable or pair explains active
+residual variance above chance (step 1.3). Structure left on inactive entries does not count. What remains is reported as unexplained; if it is concentrated on
 individual domain values, it is reported as value-specific (one-hot) variance.
 
 ### Step 7: report the site
@@ -126,6 +158,10 @@ individual domain values, it is reported as value-specific (one-hot) variance.
   for classes the singular values of the class means).
 - The hypothesis log with every revision and backtrack, and why.
 - Held-out R^2, the unexplained residual and its diagnostics.
+- Coverage: per reader N_r, its active fraction, and its R^2 on active entries; readers left
+  out of the chance comparison (too few active values).
+- For context, the same fit's R^2 on all entries (active and inactive): a gap shows how much of
+  the readers' activity the model is free to ignore.
 
 ## 4. Across sites
 - Process sites in stream order, per token position, starting each site from the previous
@@ -137,6 +173,14 @@ individual domain values, it is reported as value-specific (one-hot) variance.
 - A quantity accepted at a low-power site (k < 10) needs support from an adjacent site.
 
 ## 5. Pitfalls seen so far (addsub)
+- The CI threshold (0.01) decides what must be explained; report how the accepted list changes
+  at a stricter threshold (e.g. 0.1) for the main quantities. Weighting the squared errors by CI
+  instead of thresholding is an alternative objective; do not mix the two within one analysis.
+- A reader active on a few values can be fit by almost anything: its chance level is high and it
+  should not drive a hypothesis on its own.
+- Mean over active prompts: each reader's intercept is fit on its active prompts, so a reader
+  that is active only where its read is high has nothing left to explain but the variation
+  within that set.
 - Raw increments mislead: report excess over chance.
 - Broad feature sets (a 9-class partition, a 24-dim smooth basis) explain almost anything that
   overlaps them and make the order of fitting decide the attribution; prefer specific
@@ -154,4 +198,5 @@ individual domain values, it is reported as value-specific (one-hot) variance.
 ## 6. Tools (addsub, `notes/arith_representations/quantities/`)
 `v2.py` (site data, stagewise and joint fits, chance levels, cross-validation over values,
 residual SVD), `v2_layers.py` (all sites), `v2_feature_test.py` (permutation test of a
-candidate on a residual), `v2_period20_test.py` (both-orders test). Run through sbatch.
+candidate on a residual), `v2_period20_test.py` (both-orders test). These fit all entries; the
+masked (CI-restricted) objective is not implemented yet (to build). Run through sbatch.
