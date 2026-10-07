@@ -151,18 +151,49 @@ Replacing b by −b keeps the cos-axis part of b's code and reverses the sine-ax
 "subtraction sees −b" means, concretely, that b's sine-axis component has opposite signs on add and
 sub. I call this the **flip**.
 
-The flip should be measured in the view of the components that use b, not in the raw stream:
+The flip should be measured in the view of the components that use b, not in the raw stream. For
+a layer l (an integer from 16 to 31), the measure is built in five steps.
 
-1. **The readers' view.** Take the read directions of a layer's MLP gate and up components,
-   multiplied by the layer's norm gain. Stack them into a matrix G, and work with the stream's class
-   means multiplied by G.
-2. **The b-odd part.** In that view, take the part of the class means that changes sign under
-   b → −b. Call it A on add and S on sub.
-3. **Two energies:**
-   - **Φ = Σ_b |(A − S)/2|²**, the part that reverses with the operation: the flip;
-   - **Σ = Σ_b |(A + S)/2|²**, the part that is the same on both operations.
-4. **Flip share = Φ / (Φ + Σ).** It is 1 for a pure mirror and 0 when both operations see b the
-   same way.
+1. **The readers' view.** Let n_l be the number of alive gate and up components of layer l's MLP,
+   and g_l the gain vector (dimension d) of the RMSNorm in front of that MLP. Stack the read vectors
+   V_c of those n_l components as the columns of a d × n_l matrix, and multiply row i of it by the
+   i-th entry of g_l; call the result G_l. For each value v of b and each operation o, take the class
+   mean ȳ_o(v) of the stream entering layer l's MLP at `=` (defined above, already centred over v)
+   and form the vector r_o(v) = ȳ_o(v)ᵀ G_l, of dimension n_l. Its c-th entry is the average inner
+   activation of reader c over the 100 prompts with b = v and operation o, except that the stream is
+   not divided by its rms.
+2. **Remove the straight-line trend.** For each operation o and each reader c, fit the 100 values
+   r_o(v)[c] with a line s_o[c] · (v − 50.5) by least squares (s_o[c] is a real slope) and subtract
+   it; call the result r̃_o(v). A straight line in v is not periodic, so it has no clean "value at
+   −v" and is set aside. This removes a sizeable signal: at the layer-16 readers, the op-dependent
+   part of that line, Σ_v ‖(s_add − s_sub)/2 · (v − 50.5)‖², is 63.9, as large as the flip energy
+   below (62.1). Whether this linear code of b is reversed on subtraction is not measured here.
+3. **The b-odd part.** Define −v as 100 − v (so −v ≡ −v mod 100; v = 50 and v = 100 map to
+   themselves). The b-odd part on each operation is
+   - O_add(v) = [r̃_add(v) − r̃_add(−v)] / 2 on addition,
+   - O_sub(v) = [r̃_sub(v) − r̃_sub(−v)] / 2 on subtraction,
+   
+   both vectors of dimension n_l. In Fourier terms, O_o keeps the sine-axis part of b's code at
+   every harmonic k from 1 to 49, and drops the cos-axis part and harmonic 50. No harmonic is
+   selected in advance.
+4. **Two energies.** With ‖·‖ the Euclidean norm over the n_l readers and both sums over
+   v = 1, …, 100:
+   - **Φ_l = Σ_v ‖(O_add(v) − O_sub(v)) / 2‖²**, the part that reverses with the operation: the
+     flip;
+   - **Ψ_l = Σ_v ‖(O_add(v) + O_sub(v)) / 2‖²**, the part that is the same on both operations.
+
+   Φ_l + Ψ_l = (Σ_v ‖O_add(v)‖² + Σ_v ‖O_sub(v)‖²) / 2: the two split the b-odd energy of the two
+   operations between them.
+5. **Flip share = Φ_l / (Φ_l + Ψ_l).** It is 1 for a pure mirror (O_sub = −O_add) and 0 when both
+   operations see b the same way (O_sub = O_add).
+
+Where a section says "Φ" without a layer, it means Φ_16, the flip at the layer-16 readers.
+
+How Φ_16 splits over the harmonics (share of Φ_16 summed over the k with each period T): T = 5,
+0.37; T = 50, 0.25; T = 100, 0.24; T = 10, 0.09; T = 25, 0.03; T = 20, 0.02; T = 4 and T = 2,
+under 0.01. The four periods used in the rest of this post (5, 10, 50, 100) carry 0.95 of Φ_16, and
+0.97 of Φ_17 and Φ_18. The harmonic k = 5 (period 20) has flip share 0.50 at layer 16, 0.40 at 17
+and 0.19 at 18, below the 0.79–0.95 of the four main harmonics (k = 20, 2, 1, 10).
 
 Before the layer-15 MLP there is no flip. It appears between the input of the layer-15 MLP and the
 input of the layer-16 MLP, and is cleanest at the readers of layers 16 to 18 (Figure 2):
@@ -174,9 +205,9 @@ input of the layer-16 MLP, and is cleanest at the readers of layers 16 to 18 (Fi
 
 ![Figure 2](figures_flip/flip_share.png)
 
-*Figure 2. Flip share Φ / (Φ + Σ) at each layer's MLP readers, at the `=` token. Blue: alive-only
+*Figure 2. Flip share Φ_l / (Φ_l + Ψ_l) at each layer l's MLP readers, at the `=` token. Blue: alive-only
 model. Grey: original model. The dotted line marks 0.5, where the flip is as large as the part that
-is the same on both operations.*
+is the same on both operations (Φ_l = Ψ_l).*
 
 ## 3. The mechanism, step by step
 

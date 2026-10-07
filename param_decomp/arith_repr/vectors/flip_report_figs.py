@@ -3,7 +3,7 @@
     python -m param_decomp.arith_repr.vectors.flip_report_figs   # -> OUT/flip/report_figs/*.png
 
 * pipeline.png: the components of the mechanism, layer by layer (a diagram, no data);
-* flip_share.png: flip share Phi / (Phi + Sig) per reader layer, alive-only vs original model
+* flip_share.png: flip share Phi_l / (Phi_l + Psi_l) per reader layer, alive-only vs original model
   (alive_baseline.json);
 * patching.png: share of answers that follow the partner prompt when the stream at one position and
   layer is copied from it, alive-only model, pairs with a > b (resid_comp_all.json);
@@ -56,11 +56,11 @@ def flip_share() -> None:
             va="center",
         )
     ax.axhline(0.5, color=MUTED, lw=0.8, ls=":")
-    ax.annotate("0.5: flip as large as the shared part", (31, 0.5), xytext=(0, 4), textcoords="offset points",
+    ax.annotate("0.5: flip as large as the shared part (Φ_l = Ψ_l)", (31, 0.5), xytext=(0, 4), textcoords="offset points",
                 color=MUTED, fontsize=7, ha="right")  # fmt: skip
     ax.set_xticks(range(16, 32, 2))
-    ax.set_xlabel("layer whose MLP readers look at `=`", color=INK, fontsize=9)
-    ax.set_ylabel("flip share Φ / (Φ + Σ)", color=INK, fontsize=9)
+    ax.set_xlabel("layer l whose MLP readers look at `=`", color=INK, fontsize=9)
+    ax.set_ylabel("flip share Φ_l / (Φ_l + Ψ_l)", color=INK, fontsize=9)
     ax.set_ylim(0, 1)
     ax.set_xlim(15.5, 34)
     style(ax)
