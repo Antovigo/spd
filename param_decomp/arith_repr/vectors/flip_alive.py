@@ -185,7 +185,9 @@ def describe() -> None:
             per = 100 // np.gcd(k, 100)
             peak = float(np.mod(-np.angle(f[k - 1]) * 100 / (2 * np.pi * k), 100 / k))
             harm[nm] = f"T{per}@{peak:.1f}"
-        flip = float((flip_part(H[:200].astype(np.float64)) ** 2).mean() / max(var, 1e-12))
+        flip = float(
+            (flip_part(100.0 * H[:200].astype(np.float64)) ** 2).mean() / max(var, 1e-12)
+        )  # group sums in
         dm = (mean_op[0] - mean_op[1]) / 2
         op_share = float(dm**2 / (var + dm**2))
         key = f"{p['name']}@{POS[t]}"
