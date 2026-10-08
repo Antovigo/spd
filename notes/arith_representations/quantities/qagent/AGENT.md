@@ -147,7 +147,6 @@ a domain value must be held out together.
   the sites of a position (writes `qloop_t<t>_<tag>.json`, `recon_t<t>_<tag>.npz`).
 - `qinspect.py <t> <site> [--tag x]`: step 1 / step 7 inspection (tables and a figure).
 - `qpatch.py <t> [--tag x]`: step 7, the closed test in the alive-only model (GPU).
-- `qsummary.py <t> [--tag x]`: step 8 tables (quantity counts, medians, patching), as markdown.
 Fits run on CPU (a 256-core node runs a position's 63 sites in minutes at t = 1); patching needs
 a GPU. Run through sbatch, or on a pod holding the per-position data files and the model weights.
 
