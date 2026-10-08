@@ -59,6 +59,14 @@ unpatched 0.617). Mean patch: every site's readers set to their mean over the do
 | 3 (b) | 2355 | 0.00004 | 0.0075 | 0.0076 | 1.12 | 0.6255 / 0.626 |
 | 4 (=) | 3873 | 0.0001 | 0.080 | 0.081 | 1.27 | 0.599 / 0.598 |
 
+![patching](figures/patching.png)
+Left: one site patched at a time (grey: mean patch, blue: reconstruction, orange: held-out
+reconstruction); every run has the dead-at-t readers off, so the floor of each row is the KL of
+that switch alone (dark bar on the right). Right: all sites of the position patched together. At
+t = 4 the MLP inputs of L15-L31 are the sites that matter (mean patch KL 0.016-0.70); the
+reconstruction leaves 1-15% of their mean-patch KL (L18.mlp 0.017 against 0.70), except L20.mlp
+(0.049 against 0.078, 62%).
+
 **Where each quantity is read.** Maps (rows: quantities; columns: L0.attn, L0.mlp, ..., L31.mlp;
 colour: drop-one excess, log scale; empty: not accepted; white dot: dependence > 0.9, i.e. the
 quantity's features over the domain are reproduced to R^2 > 0.9 by the other accepted
@@ -116,6 +124,17 @@ features (dependence > 0.9: 22% of the (site, quantity) pairs at t = 1, 32% at t
 t = 3, 23% at t = 4; mostly smooth magnitude curves, log a and circles that place codes and class
 partitions also span), the readers cannot tell the quantity from that combination, and only the
 directions of the combination are determined.
+
+**Known issues** (code review of `qagent/`, not yet fixed or rerun):
+- The patched activations divide the reconstructed raw reads by the RMS rho of the live patched
+  stream, which still depends on the true stream at t (one scalar per site); the test is closed
+  for the reads but not for rho.
+- Held-out predictions use the mean of the reads over the whole domain, held-out rows included
+  (slightly optimistic held-out R^2, mostly at t = 1 with 100 rows).
+- Quantities are selected on all rows; the held-out R^2 refits the selected list only.
+- Permutation p-values permute single rows, not the units held out together (values of a,
+  (a, b) pairs), and do not correct for the search over the candidate pool.
+- The patch test has no all-sites exact patch (exact reads at every site of the position).
 
 **Limits.** The candidate pool is fixed (`qfeat.pool`) and includes quantities found on these
 sites in earlier passes, so their acceptance is not an independent discovery; quantities outside
