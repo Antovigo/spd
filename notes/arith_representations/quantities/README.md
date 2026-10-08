@@ -39,6 +39,37 @@ quantities, minus the share expected by chance for its number of dimensions.
 
 ## Procedure
 
+The loop at one site (`qagent/AGENT.md`; `qloop.py` runs it automatically with the fixed
+candidate pool in place of the agent's guesses). A is the site's accepted list of quantities;
+"the tests" are (i)-(iii) below; important entries are (reader, domain row) pairs with CI > 0.01;
+a reader's CI-weighted residual is the sum over the domain of CI x residual^2; dead-at-t readers
+are alive elsewhere but have CI <= 0.01 at t on every prompt.
+
+```mermaid
+flowchart TD
+    S([next site, in stream order]) --> I[start from the previous site's A]
+    I --> P[re-test every quantity in A as drop-one;<br/>remove those failing the tests]
+    P --> L[look at the residual of the reads:<br/>readers ranked by CI-weighted residual,<br/>top singular functions, variables still explaining it]
+    L --> STOP{held-out residual on important entries<br/>&lt; 5%, or no structure left?}
+    STOP -- yes --> MORE
+    STOP -- no --> G[guess one quantity q:<br/>earlier quantities, functions or combinations of them,<br/>or a new function read off the residual]
+    G --> F[fit q jointly with A]
+    F --> J{q passes the tests?}
+    J -- no --> R{structure tied to q's variables left?}
+    R -- yes: revise the shape, support or encoding --> G
+    R -- no: reject, log it --> GIVE{last guesses all rejected?}
+    GIVE -- no --> L
+    GIVE -- yes --> MORE
+    MORE{more sites at this position?} -- yes --> S
+    MORE -- no --> PATCH
+    J -- yes --> ACC[accept q into A]
+    ACC --> BT[backtrack: remove quantities q made redundant]
+    BT --> L
+    PATCH[patch the reconstruction into the model:<br/>every site of the position, dead-at-t readers off] --> W{patch KL close to<br/>the dead-reader switch alone?}
+    W -- no: inspect the worst sites --> L
+    W -- yes --> REP([report A, stability, directions])
+```
+
 `qloop.py`: an automatic loop over a fixed candidate pool (`qfeat.pool`). The raw reads of all
 readers of a site are fit jointly (ridge) from the features of the accepted quantities. A
 quantity belongs in a site's list when (i) it adds at least 0.2% of the reads' variance, (ii) this
