@@ -1,14 +1,18 @@
 """Closed patching test (AGENT.md step 7) at token position t, in the alive-only model.
 
 Each site's reader activations at t are replaced by their reconstruction from the accepted
-quantities: Yhat(dom(i), r) * ||V_r|| / rho(i) (rho: the RMS of the stream the site reads, from the
-patched run itself). The test is closed: the readers that are dead at t (alive somewhere, but
-CI <= 0.01 at t on every prompt) are switched off at t in every run, patched or not, so the stream
-at t reaches the rest of the network only through the patched readers. Writers (o, down) stay on:
-they read module internals, not the stream.
-Variants: recon (in-sample fit), heldout (each domain row predicted by a fit without its fold),
-mean (the readers' mean over the domain: the cost of losing what the site carries at t), exact
-(the true values; a check, first 3 sites). Sites one at a time, then all together. KL at the last
+quantities: Yhat(dom(i), r) * ||V_r|| / rhohat(dom(i)), with both the raw reads Yhat and the stream
+RMS rhohat (the norm's divisor) reconstructed from the quantities (qloop.py), so the patched
+activations are functions of (op, a, b) through the quantities only. The readers that are dead at
+t (alive somewhere, but CI <= 0.01 at t on every prompt) are switched off at t in every run,
+patched or not. With every site of the position patched, the stream at t then reaches the rest of
+the network only through the reconstruction. Writers (o, down) stay on: they read module
+internals, not the stream.
+Variants: recon (in-sample fit), heldout (nested: each domain row predicted from quantities
+selected and fit without its fold), mean (the readers' mean raw read over the domain divided by the
+mean rho: the cost of losing what the site carries at t), exact (the stored raw reads and rho of
+the unpatched alive-only model: a check of the wiring, KL = that of the dead-reader switch alone).
+Sites one at a time (exact for the first 3 sites), then all together (all variants). KL at the last
 position against the unpatched alive-only model with every alive reader on (`kl_*`) and against
 the unpatched model with the dead-at-t readers off (`kl_vs_masked_*`); answer accuracy.
 
@@ -102,7 +106,11 @@ def main() -> None:
     ap.add_argument("--sites", default=None)
     args = ap.parse_args()
     t, tag = args.t, (f"_{args.tag}" if args.tag else "")
-    runs = json.loads((DATA / f"qloop_t{t}{tag}.json").read_text())["sites"]
+    meta = json.loads((DATA / f"qloop_t{t}{tag}.json").read_text())
+    assert meta["nested"], (
+        "run qloop.py --fold f (all folds) and --combine first: the held-out variant needs it"
+    )
+    runs = meta["sites"]
     accepted = {
         r["site"]: [a["name"] for a in r["accepted"]] for r in runs if not r.get("constant")
     }
@@ -115,11 +123,20 @@ def main() -> None:
 
     # reconstructions of the raw reads (D, n) per site
     R = np.load(DATA / f"recon_t{t}{tag}.npz")
-    vals: dict[str, dict[str, np.ndarray]] = {}
+    assert np.array_equal(R["rows"], pos.rows), (
+        "recon file and site data cover different domain rows"
+    )
+    vals: dict[
+        str, dict[str, np.ndarray]
+    ] = {}  # site -> variant -> activations Y / rho (D, n), raw gauge
     for lab in accepted:
-        Y = R[lab + "/Y"].astype(np.float64)
-        vals[lab] = {"recon": R[lab + "/Yhat"].astype(np.float64), "heldout": R[lab + "/Yhat_heldout"].astype(np.float64),
-                     "mean": np.tile(Y.mean(0), (len(Y), 1)), "exact": Y}  # fmt: skip
+        assert np.array_equal(R[lab + "/cols"], pos.sites[lab].cols), (
+            f"{lab}: recon and site data readers differ"
+        )
+        g = lambda k: R[lab + "/" + k].astype(np.float64)  # noqa: B023, E731
+        Y, rho = g("Y"), g("rho")
+        vals[lab] = {"recon": g("Yhat") / g("rhohat")[:, None], "heldout": g("Yhat_heldout") / g("rhohat_heldout")[:, None],
+                     "mean": np.tile(Y.mean(0) / rho.mean(), (len(Y), 1)), "exact": Y / rho[:, None]}  # fmt: skip
 
     def hooks(sel: dict[str, str]) -> dict:  # site -> variant
         tab = {}
@@ -140,7 +157,9 @@ def main() -> None:
             if (li, kind) not in tab:
                 return h
             js, V = tab[(li, kind)]
-            return h.at[:, t, js].set(V[jnp.asarray(dom_all[rws])] / rms[:, t][:, None])
+            return h.at[:, t, js].set(
+                V[jnp.asarray(dom_all[rws])]
+            )  # not divided by the live rms: closed
 
         return {"inner": inner}
 
@@ -177,7 +196,7 @@ def main() -> None:
             ent["exact"] = score(batched(model, rows, t, **hooks({lab: "exact"})))
         res["sites"][lab] = ent
         print(lab, {k: round(v["kl_mean"], 4) for k, v in ent.items()}, flush=True)
-    for v in ("recon", "heldout", "mean"):
+    for v in ("exact", "recon", "heldout", "mean"):
         res["all_sites_" + v] = score(batched(model, rows, t, **hooks(dict.fromkeys(accepted, v))))
         print("all sites", v, res["all_sites_" + v], flush=True)
     Path(DATA / f"patch_t{t}_alive{tag}.json").write_text(json.dumps(res, indent=1))

@@ -11,13 +11,16 @@ Saved per site and quantity (index j in A):
   <site>/<j>/D      d_q x 4096 float32: the directions d_qj, one row per feature;
   <site>/<j>/resp   d_q x n float32: each reader's response g_qj W (change of its raw read per unit
                     of phi_qj);
-  <site>/<j>/basis  r x 4096 float32: an orthonormal basis of span{d_qj} (independent of how q's
-                    features are written), from the SVD of the d_q x k matrix of g_qj;
-  <site>/<j>/sv     its singular values.
+  <site>/<j>/basis  r x 4096 float32: an orthonormal basis of the stream directions along which q's
+                    term phi_q G_q varies over the domain, ranked by that variance (right singular
+                    vectors of the D x k matrix phi_q G_q; independent of how q's features are
+                    written);
+  <site>/<j>/sd     the standard deviation of q's term along each basis vector over the domain.
 JSON per site and quantity: dims; dependence: the R^2 of q's features on the other accepted
 quantities' features over the domain (near 1: the readers cannot tell q from a combination of the
 others, and how the directions are split between them is not determined by the data); readers:
-the readers with >= 10% of their read variance from q's term phi_q g_q W.
+{reader column: share} for the readers with >= 10% of their read variance from q's term
+phi_q G_q W.
 
     python qdirs.py <t> [--tag name]
 """
@@ -28,7 +31,7 @@ import json
 import numpy as np
 from qdata import DATA, load
 from qfeat import pool
-from qfit import Fitter, folds, primary_scheme
+from qfit import Fitter, folds, primary_scheme, ridge
 
 
 def main() -> None:
@@ -51,7 +54,7 @@ def main() -> None:
         s = pos.sites[lab]
         F = Fitter(s, [cands[n] for n in A], fs)
         c = F.cols(A)
-        G = F._solve(F.PP[np.ix_(c, c)], F.PZ[c])  # (features of A) x k
+        G = ridge(F.PP[np.ix_(c, c)], F.PZ[c])  # (features of A) x k
         Yc = s.Y - s.Y.mean(0)
         var_r = np.maximum((Yc**2).sum(0), 1e-30)
         rec = {"site": lab, "k": s.W.shape[0], "n": s.W.shape[1], "quantities": []}
@@ -61,18 +64,19 @@ def main() -> None:
             oth = F.cols([m for m in A if m != q])
             dep = 0.0
             if len(oth):
-                fit = F.P[:, oth] @ F._solve(F.PP[np.ix_(oth, oth)], F.PP[np.ix_(oth, F.slc[q])])
+                fit = F.P[:, oth] @ ridge(F.PP[np.ix_(oth, oth)], F.PP[np.ix_(oth, F.slc[q])])
                 dep = 1 - float(((Pq - fit) ** 2).sum() / max((Pq**2).sum(), 1e-30))
-            _, sv, Vt = np.linalg.svd(Gq, full_matrices=False)
+            _, sv, Vt = np.linalg.svd(Pq @ Gq, full_matrices=False)
             r = int((sv > 1e-6 * sv[0]).sum()) if sv[0] > 0 else 0
             term = Pq @ Gq @ s.W
+            share = (term**2).sum(0) / var_r
             arrays[f"{lab}/{j}/D"] = (Gq @ s.Q.T).astype(np.float32)
             arrays[f"{lab}/{j}/resp"] = (Gq @ s.W).astype(np.float32)
             arrays[f"{lab}/{j}/basis"] = (Vt[:r] @ s.Q.T).astype(np.float32)
-            arrays[f"{lab}/{j}/sv"] = sv[:r]
+            arrays[f"{lab}/{j}/sd"] = sv[:r] / np.sqrt(len(Pq))
             rec["quantities"].append({
                 "index": j, "name": q, "dims": r, "dependence": round(dep, 4),
-                "readers": [f"c{int(s.cols[i])}" for i in np.flatnonzero((term**2).sum(0) / var_r >= 0.1)],
+                "readers": {int(s.cols[i]): round(float(share[i]), 4) for i in np.argsort(-share) if share[i] >= 0.1},
             })  # fmt: skip
         out.append(rec)
         print(lab, f"k={rec['k']}", [(e["name"][:26], e["dims"], e["dependence"], len(e["readers"])) for e in rec["quantities"]], flush=True)  # fmt: skip

@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Quantity explorer</title>
+<script src="plotly.min.js"></script><!-- local copy (works offline); CDN if missing -->
+<script>if (!window.Plotly) document.write('<script src="https://cdn.jsdelivr.net/npm/plotly.js-dist-min@2.35.2/plotly.min.js"><\/script>');</script>
+<script src="meta.js"></script>
+<style>
+  :root { --bg: #fff; --fg: #1d1d1f; --mute: #6e6e73; --line: #d2d2d7; --accent: #0a66c2; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 13px/1.4 system-ui, sans-serif; }
+  header { padding: 10px 16px; border-bottom: 1px solid var(--line); }
+  h1 { font-size: 16px; margin: 0 0 4px; }
+  .note { color: var(--mute); font-size: 12px; }
+  .bar { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; padding: 8px 16px; border-bottom: 1px solid var(--line); }
+  .bar label { color: var(--mute); margin-right: 4px; }
+  .seg button { border: 1px solid var(--line); background: #fff; padding: 3px 9px; cursor: pointer; }
+  .seg button.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+  select { max-width: 360px; }
+  main { padding: 8px 16px 40px; }
+  #mapwrap { overflow-x: auto; }
+  #status { min-height: 18px; color: var(--mute); font-size: 12px; margin: 4px 0; }
+  .axes { display: grid; grid-template-columns: auto 1fr auto; gap: 4px 10px; align-items: center; margin: 8px 0; max-width: 900px; }
+  #plot { width: 100%; height: 640px; border: 1px solid var(--line); }
+  #grids { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 10px; }
+  .rd { border: 2px solid transparent; padding: 4px; cursor: pointer; }
+  .rd.sel { border-color: var(--accent); }
+  .rd .t { font-size: 11px; margin-bottom: 2px; }
+  .rd canvas { width: 140px; height: 140px; image-rendering: pixelated; margin-right: 4px; border: 1px solid var(--line); }
+  .sw { display: inline-block; width: 10px; height: 10px; margin-right: 4px; vertical-align: middle; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Quantity explorer (addsub decomposition, run p-ba5a0c05)</h1>
+  <div class="note">Prompt "a op b =", a and b integers 1..100, op + or -. Token position t: 1 = a, 2 = op, 3 = b, 4 = "=".
+  A site is the set of readers (q, k, v at an attention input; gate, up at an MLP input) of one block that are causally
+  important somewhere at t. Points: the alive-only model's residual stream at the site divided by its RMS, x / rho, one per
+  domain row (distinct input at t), projected on three orthonormal axes in the readers' span; reader r's inner activation is
+  (x / rho) . V~_r, V~_r its gain-folded unit read direction, and its arrow is V~_r projected on the same axes.</div>
+</header>
+<div class="bar">
+  <span><label>position t</label><span class="seg" id="tsel"></span></span>
+  <span><label>site</label><select id="site"></select></span>
+  <span id="opwrap"><label>prompts</label><span class="seg" id="opsel"></span></span>
+  <span id="subwrap"><label><input type="checkbox" id="sub" checked> random 4000 of 20000</label></span>
+  <span><label><input type="checkbox" id="center"> subtract the domain mean</label></span>
+  <span><label>colour by</label><select id="cmode"><option value="q">value of a quantity</option><option value="act">inner activation of the selected reader</option><option value="ci">causal importance of the selected reader</option></select>
+    <select id="cq"></select></span>
+  <span><label>selected reader</label><select id="reader"></select></span>
+</div>
+<main>
+  <div class="note">Quantity map of the selected position: rows are quantities, columns the read sites (attention input, MLP input
+  of each block); colour = drop-one excess (share of the readers' read variance a quantity explains beyond the other accepted
+  quantities and beyond chance, log scale 1e-4..1); white dot = dependence &gt; 0.9 (reproduced by the other accepted
+  quantities); red cross = stability &lt; 0.5 (selected in fewer than half of the nested runs). Click a cell to show that
+  quantity at that site.</div>
+  <div id="mapwrap"><canvas id="map"></canvas></div>
+  <div id="status"></div>
+  <div class="axes" id="axes"></div>
+  <div class="note" id="axnote"></div>
+  <div id="plot"></div>
+  <div class="note" id="arrownote"></div>
+  <div id="grids"></div>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const dec = (s, T) => { const b = atob(s), u = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) u[i] = b.charCodeAt(i); return new T(u.buffer); };
+const VIR = [[68,1,84],[72,40,120],[62,74,137],[49,104,142],[38,130,142],[31,158,137],[53,183,121],[109,205,89],[180,222,44],[253,231,37]];
+function viridis(x) { x = Math.min(1, Math.max(0, x)) * 9; const i = Math.min(8, Math.floor(x)), f = x - i;
+  return VIR[i].map((c, k) => Math.round(c + (VIR[i + 1][k] - c) * f)); }
+const VIR_SCALE = VIR.map((c, i) => [i / 9, `rgb(${c})`]);
+const CI_SCALE = [[0, "rgb(255,255,255)"], [0.33, "rgb(252,197,192)"], [0.67, "rgb(221,52,151)"], [1, "rgb(73,0,106)"]];
+const PAL = ["#1f77b4","#ff7f0e","#2ca02c","#d62728","#9467bd","#8c564b","#e377c2","#7f7f7f","#bcbd22","#17becf","#393b79","#ad494a"];
+
+// ---- data ----
+const P = {};  // per position: decoded domain
+for (const [t, m] of Object.entries(QA.pos)) {
+  P[t] = { ...m, rows: dec(m.rows, Int32Array), op: dec(m.op, Uint8Array), a: dec(m.a, Uint8Array), b: dec(m.b, Uint8Array),
+    vals: Object.fromEntries(Object.entries(m.values).map(([q, s]) => [q, dec(s, Float32Array)])),
+    sub: m.subsample ? dec(m.subsample, Int32Array) : null };
+}
+const siteCache = new Map(), sitePending = new Map();
+window.QAsite = (key, d) => {
+  d.proj = dec(d.proj, Int16Array); d.arrows = dec(d.arrows, Float32Array); d.gram = dec(d.gram, Float32Array);
+  siteCache.set(key, d); (sitePending.get(key) || []).forEach(f => f()); sitePending.delete(key); };
+function loadSite(t, lab) { const key = `${t}|${lab}`;
+  return new Promise(res => { if (siteCache.has(key)) return res(siteCache.get(key));
+    if (!sitePending.has(key)) { sitePending.set(key, []); const s = document.createElement("script"); s.src = `sites/t${t}_${lab}.js`; document.body.appendChild(s); }
+    sitePending.get(key).push(() => res(siteCache.get(key))); }); }
+const comps = new Map(), compPending = new Map();
+window.vwComp = (col, p) => {
+  const b = atob(p.inner), inner = new Int8Array(b.length); for (let i = 0; i < b.length; i++) inner[i] = (b.charCodeAt(i) << 24) >> 24;
+  const c = atob(p.ci), ci = new Uint8Array(c.length); for (let i = 0; i < c.length; i++) ci[i] = c.charCodeAt(i);
+  comps.set(col, { scale: p.scale, inner, ci }); (compPending.get(col) || []).forEach(f => f()); compPending.delete(col); };
+function loadComp(col) {
+  return new Promise(res => { if (comps.has(col)) return res(comps.get(col));
+    if (!compPending.has(col)) { compPending.set(col, []); const s = document.createElement("script"); s.src = `../../virtual_weights/heatmap/comps/c${col}.js`; document.body.appendChild(s); }
+    compPending.get(col).push(() => res(comps.get(col))); }); }
+const act = (C, t, prompt) => C.inner[t * 20000 + prompt] / 127 * C.scale[t];
+const ciOf = (C, t, prompt) => C.ci[t * 20000 + prompt] / 255;
+
+// ---- state ----
+const S = { t: 1, site: null, axes: [{ q: -1, d: 0 }, { q: -1, d: 0 }, { q: -1, d: 0 }], op: "both", sub: true, center: false,
+  cmode: "q", cq: null, reader: null, selCell: null };
+const POSN = { 1: "a", 2: "op", 3: "b", 4: "=" };
+const qname = q => P[S.t].quantities[q];
+const cellsAt = (t, si) => P[t].cells.filter(c => c[1] === si);
+
+function seg(el, items, cur, on) { el.innerHTML = "";
+  for (const [v, lab] of items) { const b = document.createElement("button"); b.textContent = lab; if (v === cur) b.className = "on";
+    b.onclick = () => on(v); el.appendChild(b); } }
+
+function bestQuantity(t, lab) { const si = P[t].sites.indexOf(lab), cs = cellsAt(t, si); cs.sort((x, y) => y[2] - x[2]); return cs.length ? cs[0][0] : -1; }
+async function axesFor(q) {  // the quantity's top 3 dimensions; the rest zero
+  const d = await loadSite(S.t, S.site), Q = d.quantities.find(x => x.q === q);
+  S.axes = [0, 1, 2].map(j => (Q && j < Q.r) ? { q, d: j } : { q: -1, d: 0 }); }
+
+// ---- map ----
+const CW = 11, RH = 12, LW = 300, TH = 26;
+function drawMap() {
+  const m = P[S.t], c = $("map"), nq = m.quantities.length, ns = m.sites.length;
+  c.width = LW + ns * CW + 4; c.height = TH + nq * RH + 4; const g = c.getContext("2d");
+  g.fillStyle = "#fff"; g.fillRect(0, 0, c.width, c.height); g.font = "10px system-ui"; g.fillStyle = "#1d1d1f";
+  m.quantities.forEach((n, i) => { g.textAlign = "right"; g.fillText(n.length > 52 ? n.slice(0, 50) + "..." : n, LW - 6, TH + i * RH + 9); });
+  m.sites.forEach((s, j) => { if (s.endsWith("attn")) { g.save(); g.translate(LW + j * CW + 8, TH - 4); g.rotate(-Math.PI / 2); g.textAlign = "left"; g.fillText(s.split(".")[0], 0, 0); g.restore(); } });
+  g.fillStyle = "#f3f3f5"; g.fillRect(LW, TH, ns * CW, nq * RH);
+  for (const [q, si, ex, dep, st] of m.cells) {
+    const x = LW + si * CW, y = TH + q * RH, v = (Math.log10(Math.max(ex, 1e-4)) + 4) / 4, rgb = viridis(v);
+    g.fillStyle = `rgb(${rgb})`; g.fillRect(x, y, CW - 1, RH - 1);
+    if (dep > 0.9) { g.fillStyle = "#fff"; g.beginPath(); g.arc(x + CW / 2 - 0.5, y + RH / 2 - 0.5, 1.6, 0, 7); g.fill(); }
+    if (st < 0.5) { g.strokeStyle = "#e00"; g.lineWidth = 1; g.beginPath(); g.moveTo(x + 2, y + 2); g.lineTo(x + CW - 3, y + RH - 3); g.moveTo(x + CW - 3, y + 2); g.lineTo(x + 2, y + RH - 3); g.stroke(); }
+  }
+  const sj = m.sites.indexOf(S.site); g.strokeStyle = "#0a66c2"; g.lineWidth = 1.5; g.strokeRect(LW + sj * CW - 0.5, TH - 0.5, CW, nq * RH);
+  if (S.selCell) { g.strokeStyle = "#000"; g.lineWidth = 2; g.strokeRect(LW + S.selCell[1] * CW - 1, TH + S.selCell[0] * RH - 1, CW + 1, RH + 1); }
+}
+function cellAt(ev) { const r = $("map").getBoundingClientRect(), x = ev.clientX - r.left, y = ev.clientY - r.top;
+  const si = Math.floor((x - LW) / CW), q = Math.floor((y - TH) / RH), m = P[S.t];
+  if (si < 0 || si >= m.sites.length || q < 0 || q >= m.quantities.length) return null;
+  return m.cells.find(c => c[0] === q && c[1] === si) || null; }
+$("map").addEventListener("mousemove", ev => { const c = cellAt(ev);
+  $("status").textContent = c ? `${qname(c[0])} at ${P[S.t].sites[c[1]]}: drop-one excess ${c[2].toFixed(4)}, dependence ${c[3].toFixed(2)}, stability ${c[4].toFixed(1)}` : ""; });
+$("map").addEventListener("click", async ev => { const c = cellAt(ev); if (!c) return;
+  S.site = P[S.t].sites[c[1]]; S.selCell = [c[0], c[1]]; await axesFor(c[0]); if (S.cmode === "q") S.cq = c[0]; S.reader = null; render(); });
+
+// ---- controls ----
+function controls(d) {
+  seg($("tsel"), [1, 2, 3, 4].map(t => [t, `${t} (${POSN[t]})`]), S.t, async t => {
+    S.t = t; if (!P[t].sites.includes(S.site)) S.site = P[t].sites[0]; S.selCell = null;
+    await axesFor(bestQuantity(t, S.site)); S.cq = S.axes[0].q; S.reader = null; render(); });
+  $("site").innerHTML = P[S.t].sites.map(s => `<option ${s === S.site ? "selected" : ""}>${s}</option>`).join("");
+  $("opwrap").style.display = S.t >= 2 ? "" : "none"; $("subwrap").style.display = S.t >= 3 ? "" : "none";
+  seg($("opsel"), [["both", "both"], ["add", "addition"], ["sub", "subtraction"]], S.op, v => { S.op = v; render(); });
+  const qs = d.quantities.map(x => x.q);
+  $("cq").style.display = S.cmode === "q" ? "" : "none";
+  $("cq").innerHTML = P[S.t].quantities.map((n, i) => `<option value="${i}" ${i === S.cq ? "selected" : ""}>${n}</option>`).join("");
+  const ax = $("axes"); ax.innerHTML = "";
+  S.axes.forEach((a, i) => {
+    const qsel = document.createElement("select"), dsel = document.createElement("select");
+    qsel.innerHTML = `<option value="-1">zero</option>` + qs.map(q => `<option value="${q}" ${q === a.q ? "selected" : ""}>${qname(q)}</option>`).join("");
+    const Q = d.quantities.find(x => x.q === a.q);
+    dsel.innerHTML = Q ? Q.sd.map((sd, j) => `<option value="${j}" ${j === a.d ? "selected" : ""}>dimension ${j + 1} of ${Q.r} (sd ${sd.toPrecision(3)})</option>`).join("") : "";
+    qsel.onchange = () => { S.axes[i] = { q: +qsel.value, d: 0 }; S.reader = null; render(); };
+    dsel.onchange = () => { S.axes[i].d = +dsel.value; render(); };
+    const lab = document.createElement("span"); lab.textContent = `axis ${i + 1}`;
+    ax.append(lab, qsel, dsel);
+  });
+}
+$("site").onchange = async () => { S.site = $("site").value; S.selCell = null;
+  const d = await loadSite(S.t, S.site), keep = S.axes.filter(a => a.q >= 0 && d.quantities.some(x => x.q === a.q && a.d < x.r));
+  if (keep.length) S.axes = S.axes.map(a => keep.includes(a) ? a : { q: -1, d: 0 }); else await axesFor(bestQuantity(S.t, S.site));
+  S.reader = null; render(); };
+$("sub").onchange = () => { S.sub = $("sub").checked; render(); };
+$("center").onchange = () => { S.center = $("center").checked; render(); };
+$("cmode").onchange = () => { S.cmode = $("cmode").value; render(); };
+$("cq").onchange = () => { S.cq = +$("cq").value; render(); };
+$("reader").onchange = () => { S.reader = +$("reader").value; render(); };
+
+// ---- geometry ----
+function axesGeometry(d) {  // Gram-Schmidt of the chosen basis vectors: u_i = sum_j C[i][j] v_{g_j}
+  const R = d.R, G = (i, j) => d.gram[i * R + j];
+  const g = S.axes.map(a => { if (a.q < 0) return -1; const Q = d.quantities.find(x => x.q === a.q); return Q ? Q.offset + a.d : -1; });
+  const C = [[0, 0, 0], [0, 0, 0], [0, 0, 0]], note = [];
+  for (let i = 0; i < 3; i++) {
+    if (g[i] < 0) continue;
+    const c = [0, 0, 0]; c[i] = 1;
+    for (let k = 0; k < i; k++) { if (g[k] < 0) continue; let dot = 0; for (let j = 0; j < 3; j++) if (g[j] >= 0) dot += C[k][j] * G(g[i], g[j]);
+      for (let j = 0; j < 3; j++) c[j] -= dot * C[k][j]; }
+    let n2 = 0; for (let j = 0; j < 3; j++) for (let l = 0; l < 3; l++) if (g[j] >= 0 && g[l] >= 0) n2 += c[j] * c[l] * G(g[j], g[l]);
+    if (n2 < 1e-8) { note.push(`axis ${i + 1} lies in the span of the previous axes and is set to zero`); continue; }
+    for (let j = 0; j < 3; j++) C[i][j] = c[j] / Math.sqrt(n2);
+  }
+  for (let i = 0; i < 3; i++) for (let j = i + 1; j < 3; j++) if (g[i] >= 0 && g[j] >= 0) { const cs = G(g[i], g[j]);
+    if (Math.abs(cs) > 0.05) note.push(`axes ${i + 1} and ${j + 1}: cosine ${cs.toFixed(2)} before orthogonalisation`); }
+  return { g, C, note };
+}
+
+// ---- render ----
+let plotReady = false, shown = [], arrowReaders = [];
+async function render() {
+  const t = S.t, m = P[t];
+  if (!S.site) S.site = m.sites[0];
+  const d = await loadSite(t, S.site);
+  if (S.axes.every(a => a.q < 0)) await axesFor(bestQuantity(t, S.site));
+  if (S.cq === null) S.cq = S.axes[0].q;
+  controls(d); drawMap();
+  const { g, C, note } = axesGeometry(d);
+  $("axnote").textContent = note.join("; ");
+  // points
+  let idx = t >= 3 && S.sub ? Array.from(m.sub) : Array.from({ length: m.D }, (_, i) => i);
+  if (t >= 2 && S.op !== "both") idx = idx.filter(i => m.op[i] === (S.op === "add" ? 0 : 1));
+  shown = idx;
+  const R = d.R, pv = (i, j) => d.proj[i * R + j] * d.pscale[j];
+  const coord = i => [0, 1, 2].map(k => { let s = 0; for (let j = 0; j < 3; j++) if (g[j] >= 0 && C[k][j]) s += C[k][j] * pv(i, g[j]); return s; });
+  let mean = [0, 0, 0];
+  if (S.center) { for (let i = 0; i < m.D; i++) { const c = coord(i); for (let k = 0; k < 3; k++) mean[k] += c[k] / m.D; } }
+  const X = idx.map(i => coord(i).map((v, k) => v - mean[k]));
+  // readers: those of the axis quantities with >= 10% of their read variance from one of them, top 12
+  const share = new Map();
+  for (const a of S.axes) { if (a.q < 0) continue; const Q = d.quantities.find(x => x.q === a.q); if (!Q) continue;
+    for (const [r, sh] of Q.readers) share.set(r, Math.max(share.get(r) || 0, sh)); }
+  arrowReaders = [...share.entries()].sort((x, y) => y[1] - x[1]).slice(0, 12).map(([r, sh]) => ({ r, col: d.cols[r], sh }));
+  if (S.reader !== null && !arrowReaders.some(x => x.col === S.reader)) S.reader = null;
+  if (S.reader === null && arrowReaders.length) S.reader = arrowReaders[0].col;
+  $("reader").innerHTML = arrowReaders.map(x => `<option value="${x.col}" ${x.col === S.reader ? "selected" : ""}>${QA.reader_names[x.col]} (${(100 * x.sh).toFixed(0)}% from the axis quantities)</option>`).join("") || "<option>none</option>";
+  const A = arrowReaders.map(x => [0, 1, 2].map(k => { let s = 0; for (let j = 0; j < 3; j++) if (g[j] >= 0) s += C[k][j] * d.arrows[x.r * R + g[j]]; return s; }));
+  const ext = Math.max(1e-9, ...X.map(p => Math.hypot(...p))), alen = Math.max(1e-12, ...A.map(p => Math.hypot(...p))), f = ext / alen;
+  $("arrownote").textContent = arrowReaders.length ? `Arrows: each reader's gain-folded unit read direction projected on the three axes, all scaled by ${f.toPrecision(3)} (relative lengths are true); readers with at least 10% of their read variance from an axis quantity, top 12. Click an arrow or a grid to select a reader.` : "No reader has 10% of its read variance from the axis quantities.";
+  // colours
+  let cval = null, cscale = VIR_SCALE, cmin, cmax, ctitle = "";
+  const sel = S.reader;
+  if (S.cmode === "q" && S.cq !== null) { const v = m.vals[S.cq]; cval = idx.map(i => v[i]); ctitle = qname(S.cq); }
+  else if (sel !== null && S.cmode !== "q") { const Cp = await loadComp(sel);
+    if (S.cmode === "act") { cval = idx.map(i => act(Cp, t, m.rows[i])); ctitle = `inner activation of ${QA.reader_names[sel]}`; }
+    else { cval = idx.map(i => ciOf(Cp, t, m.rows[i])); cmin = 0; cmax = 1; cscale = CI_SCALE; ctitle = `CI of ${QA.reader_names[sel]}`; } }
+  const finite = cval ? cval.filter(Number.isFinite) : [];
+  if (cmin === undefined && finite.length) { cmin = Math.min(...finite); cmax = Math.max(...finite); }
+  // hover text
+  const axq = S.axes.map(a => a.q).filter((q, i, arr) => q >= 0 && arr.indexOf(q) === i);
+  const prompt = i => { const a = m.a[i], b = m.b[i], o = m.op[i] ? "-" : "+";
+    return t === 1 ? `${a}` : t === 2 ? `${a} ${o}` : t === 3 ? `${a} ${o} ${b}` : `${a} ${o} ${b} =`; };
+  const fmt = v => Number.isFinite(v) ? (Number.isInteger(v) ? v : v.toFixed(3)) : "n/a (addition)";
+  const text = idx.map((i, n) => [`prompt: ${prompt(i)}`, ...axq.map(q => `${qname(q)}: ${fmt(m.vals[q][i])}`),
+    cval ? `${ctitle}: ${fmt(cval[n])}` : ""].join("<br>"));
+  const zs = X.map(p => p[2]), zmin = Math.min(0, ...zs), zmax = Math.max(0, ...zs, ...A.map(p => p[2] * f)), floor = zmin - 0.08 * (zmax - zmin || 1);
+  const ok = cval ? cval.map(Number.isFinite) : idx.map(() => true);
+  const pick = (arr, want) => arr.filter((_, n) => ok[n] === want);
+  const traces = [
+    { type: "scatter3d", mode: "markers", name: "shadow", x: X.map(p => p[0]), y: X.map(p => p[1]), z: X.map(() => floor),
+      marker: { size: 2, color: "rgba(0,0,0,0.13)" }, hoverinfo: "skip", showlegend: false },
+    { type: "scatter3d", mode: "markers", name: "prompts", x: pick(X, true).map(p => p[0]), y: pick(X, true).map(p => p[1]), z: pick(X, true).map(p => p[2]),
+      text: pick(text, true), hovertemplate: "%{text}<extra></extra>", showlegend: false,
+      marker: { size: 2.6, color: cval ? pick(cval, true) : "#555", colorscale: cscale, cmin, cmax,
+        colorbar: cval ? { title: { text: ctitle.length > 40 ? ctitle.slice(0, 38) + "..." : ctitle, side: "right" }, thickness: 12, len: 0.6 } : undefined } },
+  ];
+  if (pick(X, false).length) traces.push({ type: "scatter3d", mode: "markers", name: "not defined", x: pick(X, false).map(p => p[0]), y: pick(X, false).map(p => p[1]),
+    z: pick(X, false).map(p => p[2]), text: pick(text, false), hovertemplate: "%{text}<extra></extra>", marker: { size: 2.2, color: "#c8c8c8" }, showlegend: false });
+  arrowReaders.forEach((x, n) => { const p = A[n].map(v => v * f), col = PAL[n % PAL.length], wide = x.col === S.reader ? 7 : 4;
+    traces.push({ type: "scatter3d", mode: "lines", x: [0, p[0]], y: [0, p[1]], z: [0, p[2]], line: { color: col, width: wide },
+      name: QA.reader_names[x.col], customdata: [x.col, x.col], hovertemplate: `${QA.reader_names[x.col]}<extra></extra>` });
+    traces.push({ type: "scatter3d", mode: "lines", x: [0, p[0]], y: [0, p[1]], z: [floor, floor], line: { color: "rgba(0,0,0,0.15)", width: 3 }, hoverinfo: "skip", showlegend: false });
+    traces.push({ type: "cone", x: [p[0]], y: [p[1]], z: [p[2]], u: [p[0]], v: [p[1]], w: [p[2]], sizemode: "absolute", sizeref: 0.06 * ext, anchor: "tip",
+      colorscale: [[0, col], [1, col]], showscale: false, hoverinfo: "skip", customdata: [x.col] }); });
+  const axTitle = i => S.axes[i].q < 0 ? `axis ${i + 1}: zero` : `${qname(S.axes[i].q).slice(0, 40)}, dim ${S.axes[i].d + 1}`;
+  const layout = { uirevision: `${t}|${S.site}|${g.join(",")}|${S.center}`, margin: { l: 0, r: 0, t: 30, b: 0 },
+    title: { text: `t = ${t} (${POSN[t]}), ${S.site}: ${idx.length} domain rows`, font: { size: 13 } },
+    legend: { font: { size: 10 }, x: 0, y: 1 },
+    scene: { aspectmode: "cube", xaxis: { title: { text: axTitle(0) } }, yaxis: { title: { text: axTitle(1) } },
+      zaxis: { title: { text: axTitle(2) }, range: [floor, zmax + 0.05 * (zmax - floor)] } } };
+  await Plotly.react("plot", traces, layout, { responsive: true });
+  if (!plotReady) { plotReady = true;
+    $("plot").on("plotly_click", ev => { const p = ev.points && ev.points[0]; if (!p || !p.data.customdata) return;
+      S.reader = p.data.customdata[0]; render(); }); }
+  drawGrids(t);
+}
+
+async function drawGrids(t) {
+  const box = $("grids"); box.innerHTML = "";
+  for (const [n, x] of arrowReaders.entries()) {
+    const Cp = await loadComp(x.col), div = document.createElement("div");
+    div.className = "rd" + (x.col === S.reader ? " sel" : "");
+    let lo = Infinity, hi = -Infinity; for (let i = 0; i < 20000; i++) { const v = act(Cp, t, i); lo = Math.min(lo, v); hi = Math.max(hi, v); }
+    const span = Math.max(hi - lo, 1e-12);
+    div.innerHTML = `<div class="t"><span class="sw" style="background:${PAL[n % PAL.length]}"></span>${QA.reader_names[x.col]}: ${(100 * x.sh).toFixed(0)}% of its read variance from the axis quantities<br>inner activation at t = ${t} (viridis, ${lo.toPrecision(3)} to ${hi.toPrecision(3)}); a down, b across; left a + b, right a - b</div>`;
+    for (const op of [0, 1]) {
+      const c = document.createElement("canvas"); c.width = 100; c.height = 100; const g = c.getContext("2d"), img = g.createImageData(100, 100);
+      for (let a = 0; a < 100; a++) for (let b = 0; b < 100; b++) { const rgb = viridis((act(Cp, t, op * 10000 + a * 100 + b) - lo) / span), o = 4 * (a * 100 + b);
+        img.data[o] = rgb[0]; img.data[o + 1] = rgb[1]; img.data[o + 2] = rgb[2]; img.data[o + 3] = 255; }
+      g.putImageData(img, 0, 0);
+      c.addEventListener("mousemove", ev => { const r = c.getBoundingClientRect(), b = Math.floor((ev.clientX - r.left) / r.width * 100), a = Math.floor((ev.clientY - r.top) / r.height * 100);
+        if (a >= 0 && a < 100 && b >= 0 && b < 100) $("status").textContent = `${QA.reader_names[x.col]}: ${a + 1} ${op ? "-" : "+"} ${b + 1}, inner activation at t = ${t}: ${act(Cp, t, op * 10000 + a * 100 + b).toFixed(4)}, CI ${ciOf(Cp, t, op * 10000 + a * 100 + b).toFixed(3)}`; });
+      div.appendChild(c);
+    }
+    div.onclick = () => { S.reader = x.col; render(); };
+    box.appendChild(div);
+  }
+}
+render();
+</script>
+</body>
+</html>

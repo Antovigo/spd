@@ -6,15 +6,17 @@ One panel per position t: rows are quantities (grouped by the variable they are 
 columns are the read sites in stream order (L0.attn, L0.mlp, ..., L31.mlp). A cell is coloured by
 the quantity's drop-one excess at that site (the variance of the reads it alone explains, beyond
 the others and beyond chance, as a fraction of the reads' variance; log scale), empty where the
-quantity is not in the site's accepted list; a dot marks dependence > 0.9 (its features are
-reproduced by the other accepted quantities, so its directions are not separable from theirs).
+quantity is not in the site's accepted list; a white dot marks dependence > 0.9 (its features are
+reproduced by the other accepted quantities, so its directions are not separable from theirs); a
+red cross marks stability < 0.5 (selected in fewer than half of the nested runs, each made without
+one held-out fold).
 
 patching.png (from patch_t<t>_alive.json, qpatch.py): one row per position t. Left: KL at the last
 position against the unpatched alive-only model when one site's readers are patched at t (dead-
 at-t readers off in every run), per site in stream order, for the mean patch (the readers' mean
-over the domain), the reconstruction from the accepted quantities, and the held-out
-reconstruction. Right: every site of the position patched together; the switch of the dead-at-t
-readers alone for reference.
+over the domain), the reconstruction from the accepted quantities, and the nested held-out
+reconstruction. Right: every site of the position patched together (exact: the stored reads and
+rho, a wiring check); the switch of the dead-at-t readers alone for reference.
 
     python qmap.py [--tag name] [--out dir]
 """
@@ -62,10 +64,12 @@ def main() -> None:
         run = json.loads((DATA / f"qloop_t{t}{tag}.json").read_text())
         dep = {(s["site"], q["name"]): q["dependence"]
                for s in json.loads((DATA / f"dirs_t{t}{tag}.json").read_text())["sites"] for q in s["quantities"]}  # fmt: skip
-        cell = {}
+        cell, unstable = {}, []
         for s in run["sites"]:
             for a in s["accepted"]:
                 cell[(a["name"], s["site"])] = max(a["drop_one_loss"] - a["chance"], 1e-5)
+                if a.get("stability", 1.0) < 0.5:
+                    unstable.append((a["name"], s["site"]))
         names = sorted({n for n, _ in cell}, key=group)
         M = np.full((len(names), len(labels)), np.nan)
         for (n, lab), v in cell.items():
@@ -76,6 +80,15 @@ def main() -> None:
         )
         ys, xs = zip(*[(names.index(n), labels.index(lab)) for (lab, n), d in dep.items() if d > AMBIGUOUS], strict=True) if any(d > AMBIGUOUS for d in dep.values()) else ((), ())  # fmt: skip
         ax.scatter(xs, ys, s=4, c="white", marker="o", linewidths=0)
+        if unstable:
+            ax.scatter(
+                [labels.index(lab) for _, lab in unstable],
+                [names.index(n) for n, _ in unstable],
+                s=10,
+                c="red",
+                marker="x",
+                linewidths=0.6,
+            )
         ax.set_yticks(range(len(names)), names, fontsize=6)
         ax.set_xticks(range(0, len(labels), 2), [f"L{c}" for c in range(32)], fontsize=6)
         ax.set_xticks(np.arange(-0.5, len(labels), 2), minor=True)
@@ -99,7 +112,7 @@ def patch_figure(tag: str, out_dir: Path) -> Path:
     variants = (
         ("mean", "mean patch", "0.6"),
         ("recon", "reconstruction", "C0"),
-        ("heldout", "held-out reconstruction", "C1"),
+        ("heldout", "nested held-out reconstruction", "C1"),
     )
     fig, axes = plt.subplots(
         4, 2, figsize=(15, 11), gridspec_kw={"width_ratios": [5, 1]}, squeeze=False
@@ -119,7 +132,10 @@ def patch_figure(tag: str, out_dir: Path) -> Path:
         ax.set_ylabel("KL (mean over prompts)", fontsize=7)
         ax.tick_params(labelsize=6)
         ax.set_title(f"t = {t} (token {POS_NAMES[t]}): one site patched at a time", fontsize=8)
-        bars = [("dead-at-t\nreaders off", r["masked_only"]["kl_mean"], "0.3")]
+        bars = [
+            ("dead-at-t\nreaders off", r["masked_only"]["kl_mean"], "0.3"),
+            ("exact", r["all_sites_exact"]["kl_mean"], "0.15"),
+        ]
         bars += [
             (lab.replace(" ", "\n", 1), r["all_sites_" + v]["kl_mean"], col)
             for v, lab, col in variants

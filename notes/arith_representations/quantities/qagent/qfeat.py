@@ -22,6 +22,14 @@ class Cand:
     name: str
     var: str  # the variable(s) it is a function of, e.g. "a", "op", "r", "op,a"
     Phi: np.ndarray  # (D, d)
+    value: np.ndarray | None = (
+        None  # (D,) the value it encodes, for display (default: Phi[:, 0] when d = 1)
+    )
+
+    def shown(self) -> np.ndarray:
+        """Natural value per domain row: the variable for curves and place codes, x mod P for a
+        circle of period P, the class label for classes, the scalar itself otherwise."""
+        return self.Phi[:, 0] if self.value is None else self.value
 
     @property
     def d(self) -> int:
@@ -72,44 +80,51 @@ def operand_family(x: np.ndarray, v: str) -> list[Cand]:
             f"magnitude of {v}: smooth curve in log {v} (5)",
             v,
             spline(np.log(x), 0, np.log(100), 6),
+            x,
         ),
         Cand(f"one digit [{v} <= 9]", v, ind(x <= 9)),
         Cand(f"{v} = 100", v, ind(x == 100)),
-        Cand(f"circle period 100 of {v}", v, circle(x, 100)),
-        Cand(f"circle period 50 of {v}", v, circle(x, 50)),
-        Cand(f"circle period 20 of {v}", v, circle(x, 20)),
-        Cand(f"units digit circle of {v} (period 10)", v, circle(x, 10)),
+        Cand(f"circle period 100 of {v}", v, circle(x, 100), x % 100),
+        Cand(f"circle period 50 of {v}", v, circle(x, 50), x % 50),
+        Cand(f"circle period 20 of {v}", v, circle(x, 20), x % 20),
+        Cand(f"units digit circle of {v} (period 10)", v, circle(x, 10), x % 10),
         Cand(f"parity of {v}", v, ind(x % 2 == 1)),
-        Cand(f"{v} mod 5 classes", v, classes(x % 5)),
-        Cand(f"units digit classes of {v}", v, classes(x % 10)),
-        Cand(f"tens digit classes of {v} (10..99)", v, classes(tens)),
+        Cand(f"{v} mod 5 classes", v, classes(x % 5), x % 5),
+        Cand(f"units digit classes of {v}", v, classes(x % 10), x % 10),
+        Cand(f"tens digit classes of {v} (10..99)", v, classes(tens), tens),
         Cand(f"2-adic valuation of {v}", v, two_adic(x)[:, None]),
         Cand(f"repdigit {v} (11, 22, .., 99)", v, ind((x % 11 == 0) & (x <= 99))),
-        Cand(f"{v} mod 3 classes", v, classes(x % 3)),
-        Cand(f"place code of {v}: bumps every 5 (width 2.5)", v, bumps(x, 0, 100, 5, 2.5)),
+        Cand(f"{v} mod 3 classes", v, classes(x % 3), x % 3),
+        Cand(f"place code of {v}: bumps every 5 (width 2.5)", v, bumps(x, 0, 100, 5, 2.5), x),
     ]
 
 
 def result_family(r: np.ndarray, v: str, lo: int, hi: int) -> list[Cand]:
     """Quantities of an integer result r in lo..hi (s, d or the op-dependent result)."""
     return [
-        Cand(f"magnitude of {v}: smooth curve (5)", v, spline(r.astype(float), lo, hi, 6)),
+        Cand(f"magnitude of {v}: smooth curve (5)", v, spline(r.astype(float), lo, hi, 6), r),
         Cand(f"sign of {v} [{v} < 0]", v, ind(r < 0)),
-        Cand(f"units digit classes of {v}", v, classes(np.mod(r, 10))),
-        Cand(f"units digit circle of {v} (period 10)", v, circle(r, 10)),
-        Cand(f"circle period 100 of {v}", v, circle(r, 100)),
-        Cand(f"tens digit classes of {v}", v, classes(np.abs(r) // 10)),
+        Cand(f"units digit classes of {v}", v, classes(np.mod(r, 10)), np.mod(r, 10)),
+        Cand(f"units digit circle of {v} (period 10)", v, circle(r, 10), np.mod(r, 10)),
+        Cand(f"circle period 100 of {v}", v, circle(r, 100), np.mod(r, 100)),
+        Cand(f"tens digit classes of {v}", v, classes(np.abs(r) // 10), np.abs(r) // 10),
         Cand(
             f"place code of {v}: bumps every 10 (width 5)",
             v,
             bumps(r.astype(float), lo, hi, 10, 5.0),
+            r,
         ),
     ]
 
 
 def gated(c: Cand, op: np.ndarray) -> Cand:
     """c on subtraction prompts only (an op-dependent encoding of c's variable)."""
-    return Cand(f"[op = -] x {c.name}", f"op,{c.var}", c.Phi * (op == 1)[:, None])
+    return Cand(
+        f"[op = -] x {c.name}",
+        f"op,{c.var}",
+        c.Phi * (op == 1)[:, None],
+        np.where(op == 1, c.shown(), np.nan),
+    )
 
 
 def pool(pos: Position) -> list[Cand]:
@@ -128,9 +143,9 @@ def pool(pos: Position) -> list[Cand]:
         s, d = a + b, a - b
         r = np.where(op == 0, s, d)
         out += result_family(r, "r", -99, 200)
-        out += [Cand("circle period 10 of s = a + b", "s", circle(s, 10)), Cand("circle period 100 of s = a + b", "s", circle(s, 100)),
-                Cand("circle period 10 of d = a - b", "d", circle(d, 10)), Cand("circle period 100 of d = a - b", "d", circle(d, 100)),
-                Cand("units digit classes of s = a + b", "s", classes(s % 10)), Cand("units digit classes of d = a - b", "d", classes(np.mod(d, 10))),
+        out += [Cand("circle period 10 of s = a + b", "s", circle(s, 10), s % 10), Cand("circle period 100 of s = a + b", "s", circle(s, 100), s % 100),
+                Cand("circle period 10 of d = a - b", "d", circle(d, 10), np.mod(d, 10)), Cand("circle period 100 of d = a - b", "d", circle(d, 100), np.mod(d, 100)),
+                Cand("units digit classes of s = a + b", "s", classes(s % 10), s % 10), Cand("units digit classes of d = a - b", "d", classes(np.mod(d, 10)), np.mod(d, 10)),
                 Cand("carry [u_a + u_b >= 10]", "u_a,u_b", ind(a % 10 + b % 10 >= 10)),
                 Cand("borrow [u_a < u_b]", "u_a,u_b", ind(a % 10 < b % 10)),
                 Cand("sign of a - b [a < b]", "a,b", ind(a < b))]  # fmt: skip

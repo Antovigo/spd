@@ -5,7 +5,13 @@ For a site of position t and its accepted list (qloop_t<t>[_tag].json):
   share of the site's total and the domain values where their weighted errors are largest;
 * a figure of the top readers: raw read, reconstruction and CI over the domain (t = 1: curves over
   a; t = 2: curves over a for each op; t >= 3: (a, b) grids for each op: read, residual, CI);
-* the residual's top singular functions over the domain (shared patterns), as values and plots.
+* the residual's top singular functions over the domain (shared patterns), as values, with the
+  top singular values against a permutation null (each reader's residual permuted independently
+  over the domain rows, which keeps each reader's residual distribution and destroys the patterns
+  shared across readers; 20 permutations, 95th percentile);
+* which variables still explain residual variance: for each variable (op, a, b, s, d, r, u_a,
+  u_b, as defined at t), the share of the residual explained by its values (class means) against
+  the chance share (number of values - 1) / (D - 1).
 
     python qinspect.py <t> <site> [--tag name] [--top 6]
 """
@@ -52,6 +58,34 @@ def main() -> None:
         print(f"  reader {names[r]:<8} share {w[r] / w.sum():.2f}; important on {(s.CI[:, r] > 0.01).sum()} of {pos.D} rows; "
               f"largest weighted errors at (op, a, b) = {where}")  # fmt: skip
     U, sv, _ = np.linalg.svd(E - E.mean(0), full_matrices=False)
+    rng = np.random.default_rng(0)
+    null = [
+        np.linalg.svd(
+            np.stack([rng.permutation(e) for e in (E - E.mean(0)).T], 1), compute_uv=False
+        )[0]
+        for _ in range(20)
+    ]
+    print(
+        f"  residual singular values {np.round(sv[:4], 3).tolist()}; permutation null for the top one: 95th percentile {np.percentile(null, 95):.3f}"
+    )
+    Ec = E - E.mean(0)
+    tot = (Ec**2).sum()
+    var = {"a": pos.a, "u_a": pos.a % 10}
+    if args.t >= 2:
+        var["op"] = pos.op
+    if args.t >= 3:
+        r = np.where(pos.op == 0, pos.a + pos.b, pos.a - pos.b)
+        var |= {"b": pos.b, "u_b": pos.b % 10, "s": pos.a + pos.b, "d": pos.a - pos.b, "r": r}
+    shares = []
+    for v, x in var.items():
+        vals_, inv = np.unique(x, return_inverse=True)
+        means = np.zeros((len(vals_), Ec.shape[1]))
+        np.add.at(means, inv, Ec)
+        means /= np.bincount(inv)[:, None]
+        share = float((means[inv] ** 2).sum() / tot)
+        shares.append((share - (len(vals_) - 1) / (pos.D - 1), v, share))
+    print("  residual explained by each variable's values (excess over chance, share):",
+          [(v, round(e, 4), round(sh, 4)) for e, v, sh in sorted(shares, reverse=True)])  # fmt: skip
     for j in range(2):
         top = np.argsort(-np.abs(U[:, j]))[:10]
         print(f"  residual singular function {j + 1} (sv {sv[j]:.3g}): largest at (op, a, b) = "

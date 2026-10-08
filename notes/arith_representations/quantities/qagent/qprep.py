@@ -10,7 +10,9 @@ at t (original-model CI > 0.01 somewhere at t), stores:
              readers' gain-folded unit read directions (Z = X Q);
   <site>/W   (k, n) float32: readout, raw reads Y = Z W;
   <site>/CI  (D, n) float16: the readers' CI at t on the domain rows;
-  <site>/cols (n,): dataset columns of the readers; <site>/Q (4096, k) float32.
+  <site>/cols (n,): dataset columns of the readers; <site>/Q (4096, k) float32;
+  <site>/rho (D,) float32: the stream's RMS, sqrt(mean_j x_j^2 + EPS), which the norm divides by
+             (reader activation = raw read / rho).
 plus rows, op, a, b (D,) for the domain. Output: OUT/site_data_t<t>.npz.
 
     python qprep.py <t>
@@ -26,6 +28,7 @@ DATASET = RUN / "analysis/ci_filter/step_40000/addsub-05-filter-last-pos-ceiling
 VW = RUN / "analysis/virtual_weights"
 OUT = RUN / "analysis/quantities/qagent"
 READ = {"attn": ("q", "k", "v"), "mlp": ("gate", "up")}
+EPS = 1e-5  # RMSNorm epsilon of Llama-3.1-8B
 
 
 def domain_rows(t: int) -> np.ndarray:
@@ -65,6 +68,7 @@ def main() -> None:
             out[key + "/CI"] = ci[:, cols].astype(np.float16)
             out[key + "/cols"] = cols
             out[key + "/Q"] = Q.astype(np.float32)
+            out[key + "/rho"] = np.sqrt((X**2).mean(1) + EPS).astype(np.float32)
             print(f"t={t} {key}: n={len(cols)} k={Q.shape[1]}", flush=True)
     np.savez(OUT / f"site_data_t{t}.npz", **out)
     print("saved", flush=True)

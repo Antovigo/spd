@@ -4,8 +4,11 @@ Notation (AGENT.md): Z (D, k) the stream at the site in reader-span coordinates,
 readout, M = W W^T, so reader-metric squared norms are tr(E^T E M). Features of all candidates are
 centred and stacked into P (D, C); a fit on a subset of columns is the ridge solution
 G = (P_A^T P_A + lam I)^-1 P_A^T Z (lam = RIDGE x mean diagonal), computed from the Grams
-P^T P, P^T Z, Z^T Z (and their per-fold test-row parts for held-out scores), so a fit costs
-O(C^2 k) instead of O(D C k).
+P^T P, P^T Z, Z^T Z, so a fit costs O(C^2 k) instead of O(D C k).
+
+Held-out fits: for each fold (a set of domain rows held out together), the fit uses the training
+rows only, centred on the training means (intercept included), and predicts the fold; the fold's
+Grams and sums are cached, so held-out scores cost the same as in-sample ones.
 
 Held-out schemes (`folds`): which domain rows are held out together.
 * "a-values": all rows with a in the held-out set of a values (t = 1, 2: the primary scheme);
@@ -39,6 +42,13 @@ def primary_scheme(t: int) -> str:
     return "a-values" if t <= 2 else "pairs"
 
 
+def ridge(PP: np.ndarray, PZ: np.ndarray) -> np.ndarray:
+    lam = max(
+        RIDGE * np.trace(PP) / max(PP.shape[0], 1), 1e-12
+    )  # > 0 also when every feature is constant
+    return np.linalg.solve(PP + lam * np.eye(PP.shape[0]), PZ)
+
+
 class Fitter:
     def __init__(self, site: Site, cands: list[Cand], fold_sets: list[np.ndarray]) -> None:
         self.site = site
@@ -57,10 +67,14 @@ class Fitter:
         self.ZZ = self.Zc.T @ self.Zc
         self.tot = float(np.trace(self.ZZ @ self.M))
         self.folds = fold_sets
+        self._fold_grams()
+
+    def _fold_grams(self) -> None:
+        """Per fold: test-row Grams and sums (P, Z globally centred, so training sums = -test sums)."""
         self.fg = []
-        for te in fold_sets:
+        for te in self.folds:
             Pt, Zt = self.P[te], self.Zc[te]
-            self.fg.append((Pt.T @ Pt, Pt.T @ Zt, Zt.T @ Zt))
+            self.fg.append((Pt.T @ Pt, Pt.T @ Zt, Zt.T @ Zt, Pt.sum(0), Zt.sum(0), len(te)))
 
     def add(self, c: Cand) -> None:
         """Register an agent-made candidate after construction."""
@@ -74,32 +88,21 @@ class Fitter:
         self.PP = np.block([[self.PP, cross], [cross.T, P.T @ P]])
         self.PZ = np.vstack([self.PZ, P.T @ self.Zc])
         self.P = np.hstack([self.P, P])
-        self.fg = []
-        for te in self.folds:
-            Pt, Zt = self.P[te], self.Zc[te]
-            self.fg.append((Pt.T @ Pt, Pt.T @ Zt, Zt.T @ Zt))
+        self._fold_grams()
 
     def cols(self, names: list[str]) -> np.ndarray:
         return np.concatenate([self.slc[n] for n in names]) if names else np.zeros(0, int)
 
-    @staticmethod
-    def _solve(PP: np.ndarray, PZ: np.ndarray) -> np.ndarray:
-        lam = RIDGE * np.trace(PP) / max(PP.shape[0], 1)
-        return np.linalg.solve(PP + lam * np.eye(PP.shape[0]), PZ)
-
-    def _rss(self, PP: np.ndarray, PZ: np.ndarray, ZZ: np.ndarray) -> float:
-        if PP.shape[0] == 0:
-            return float(np.trace(ZZ @ self.M))
-        G = self._solve(PP, PZ)
-        return float(
-            np.trace(ZZ @ self.M)
-            - 2 * np.trace(G.T @ PZ @ self.M)
-            + np.trace(G.T @ PP @ G @ self.M)
-        )
-
     def rss(self, names: list[str]) -> float:
         c = self.cols(names)
-        return self._rss(self.PP[np.ix_(c, c)], self.PZ[c], self.ZZ)
+        if len(c) == 0:
+            return self.tot
+        G = ridge(self.PP[np.ix_(c, c)], self.PZ[c])
+        return float(
+            np.trace(self.ZZ @ self.M)
+            - 2 * np.trace(G.T @ self.PZ[c] @ self.M)
+            + np.trace(G.T @ self.PP[np.ix_(c, c)] @ G @ self.M)
+        )
 
     def dims(self, names: list[str]) -> int:
         c = self.cols(names)
@@ -118,38 +121,40 @@ class Fitter:
     def drop_one(self, A: list[str]) -> list[tuple[str, float, float]]:
         return [(n, *self.increment([m for m in A if m != n], n)) for n in A]
 
-    def perm_p(self, A: list[str], name: str, n_perm: int = 100, seed: int = 0) -> float:
-        """Permutation p-value of `name`'s increment over A (its features permuted over the domain)."""
-        real = self.increment(A, name)[0]
-        cA = self.cols(A)
-        PA = self.P[:, cA]
-        X = self.P[:, self.slc[name]]
-        PPA, PZA = self.PP[np.ix_(cA, cA)], self.PZ[cA]
-        r0 = self.rss(A)
-        rng = np.random.default_rng(seed)
-        hits = 0
-        for _ in range(n_perm):
-            Xp = X[rng.permutation(self.D)]
-            PP = np.block([[PPA, PA.T @ Xp], [Xp.T @ PA, Xp.T @ Xp]])
-            PZ = np.vstack([PZA, Xp.T @ self.Zc])
-            hits += (r0 - self._rss(PP, PZ, self.ZZ)) / self.tot >= real
-        return (hits + 1) / (n_perm + 1)
+    def _fold_fit(self, c: np.ndarray, f: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """(G, training mean of P[:, c], training mean of Z) for fold f."""
+        PPt, PZt, _, sP, sZ, nte = self.fg[f]
+        ntr = self.D - nte
+        mP, mZ = -sP[c] / ntr, -sZ / ntr
+        PP = self.PP[np.ix_(c, c)] - PPt[np.ix_(c, c)] - ntr * np.outer(mP, mP)
+        PZ = self.PZ[c] - PZt[c] - ntr * np.outer(mP, mZ)
+        return ridge(PP, PZ), mP, mZ
 
     def heldout_r2(self, names: list[str]) -> float:
+        """1 - held-out error / held-out variance around the training mean, summed over folds."""
         c = self.cols(names)
         err = tot = 0.0
-        for PPt, PZt, ZZt in self.fg:
-            tot += float(np.trace(ZZt @ self.M))
+        for f, (PPt, PZt, ZZt, sP, sZ, nte) in enumerate(self.fg):
+            mZ = -sZ / (self.D - nte)
+            ZZc = (
+                ZZt - np.outer(sZ, mZ) - np.outer(mZ, sZ) + nte * np.outer(mZ, mZ)
+            )  # sum (Z - mZ)^T (Z - mZ)
+            tot += float(np.trace(ZZc @ self.M))
             if len(c) == 0:
-                err += float(np.trace(ZZt @ self.M))
+                err += float(np.trace(ZZc @ self.M))
                 continue
-            PPtr = self.PP[np.ix_(c, c)] - PPt[np.ix_(c, c)]
-            PZtr = self.PZ[c] - PZt[c]
-            G = self._solve(PPtr, PZtr)
+            G, mP, _ = self._fold_fit(c, f)
+            PZc = PZt[c] - np.outer(sP[c], mZ) - np.outer(mP, sZ) + nte * np.outer(mP, mZ)
+            PPc = (
+                PPt[np.ix_(c, c)]
+                - np.outer(sP[c], mP)
+                - np.outer(mP, sP[c])
+                + nte * np.outer(mP, mP)
+            )
             err += float(
-                np.trace(ZZt @ self.M)
-                - 2 * np.trace(G.T @ PZt[c] @ self.M)
-                + np.trace(G.T @ PPt[np.ix_(c, c)] @ G @ self.M)
+                np.trace(ZZc @ self.M)
+                - 2 * np.trace(G.T @ PZc @ self.M)
+                + np.trace(G.T @ PPc @ G @ self.M)
             )
         return 1 - err / tot
 
@@ -157,18 +162,22 @@ class Fitter:
         """Zhat (D, k), in-sample or from held-out fits (each fold predicted by the others)."""
         c = self.cols(names)
         mu = self.site.Z.mean(0)
-        if len(c) == 0:
-            return np.tile(mu, (self.D, 1))
         if not heldout:
-            return mu + self.P[:, c] @ self._solve(self.PP[np.ix_(c, c)], self.PZ[c])
+            if len(c) == 0:
+                return np.tile(mu, (self.D, 1))
+            return mu + self.P[:, c] @ ridge(self.PP[np.ix_(c, c)], self.PZ[c])
         out = np.zeros_like(self.Zc)
-        for te, (PPt, PZt, _) in zip(self.folds, self.fg, strict=True):
-            G = self._solve(self.PP[np.ix_(c, c)] - PPt[np.ix_(c, c)], self.PZ[c] - PZt[c])
-            out[te] = self.P[np.ix_(te, c)] @ G
+        for f, te in enumerate(self.folds):
+            if len(c) == 0:
+                out[te] = -self.fg[f][4] / (self.D - len(te))
+                continue
+            G, mP, mZ = self._fold_fit(c, f)
+            out[te] = mZ + (self.P[np.ix_(te, c)] - mP) @ G
         return mu + out
 
     def important_share(self, names: list[str], heldout: bool = True) -> float:
-        """Residual variance on important entries (CI > 0.01) / read variance there."""
+        """Residual variance on important entries (CI > 0.01) / read variance there (deviations
+        from the reader's domain mean: what a mean patch would remove)."""
         E = (self.site.Z - self.reconstruct(names, heldout)) @ self.site.W
         Y = self.site.Y
         Mk = self.site.CI > IMPORTANT
@@ -178,3 +187,24 @@ class Fitter:
         """Per reader: sum over the domain of CI x squared residual (ranks readers whose errors matter)."""
         E = (self.site.Z - self.reconstruct(names)) @ self.site.W
         return (self.site.CI * E**2).sum(0)
+
+
+def fit_scalar(
+    P: np.ndarray, y: np.ndarray, fold_sets: list[np.ndarray]
+) -> tuple[np.ndarray, np.ndarray]:
+    """(in-sample, held-out) ridge predictions of a scalar y (D,) from features P (D, C), with
+    training-mean centring per fold (used for the stream RMS rho)."""
+    if P.shape[1] == 0:
+        ho = np.empty_like(y)
+        for te in fold_sets:
+            ho[te] = np.delete(y, te).mean()
+        return np.full_like(y, y.mean()), ho
+    Pc, yc = P - P.mean(0), y - y.mean()
+    ins = y.mean() + Pc @ ridge(Pc.T @ Pc, Pc.T @ yc)
+    ho = np.empty_like(y)
+    for te in fold_sets:
+        tr = np.setdiff1d(np.arange(len(y)), te)
+        mP, my = P[tr].mean(0), y[tr].mean()
+        Ptr = P[tr] - mP
+        ho[te] = my + (P[te] - mP) @ ridge(Ptr.T @ Ptr, Ptr.T @ (y[tr] - my))
+    return ins, ho

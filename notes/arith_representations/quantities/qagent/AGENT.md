@@ -20,7 +20,8 @@ addsub decomposition (run p-ba5a0c05).
   dead ones and the weight delta off). V~_r: reader r's unit read direction with the norm's gain
   folded in. Q (4096 x k): orthonormal basis of the readers' span. Z = X Q (D x k), W = Q^T [V~_r]
   (k x n). Raw reads Y = Z W; the readers' activations are Y / rho, rho the stream's RMS. Fit raw
-  reads; rho is a function of the prompt too and is reported, not fit.
+  reads; rho, a function of the prompt too, is fit separately as a scalar from the accepted
+  quantities' features (the patching test divides by the reconstructed rho).
 - Quantity q: a feature map phi_q from the domain to R^{d_q} (its encoding: one direction for a
   scalar, cos and sin for a circle, class indicators for a partition, one direction per value for
   a one-hot, possibly restricted to a support or gated by another variable), with directions D_q
@@ -31,10 +32,11 @@ addsub decomposition (run p-ba5a0c05).
 - Increment of q given the accepted set A: the variance it adds to the joint fit, as a fraction of
   the total. Chance level: d_q / df of the residual before adding q (df = D - 1 - dims of A).
   Excess = increment - chance. Drop-one loss: what q's removal from A costs.
-- Permutation p of q: fraction of 100 permutations of phi_q over the domain whose increment
-  reaches the real one.
-- Held-out R^2: the fit made without a fold of domain rows, scored on that fold. The folds depend
-  on the position (section 4).
+- Held-out R^2: the fit made without a fold of domain rows (centred on the training rows' means),
+  scored on that fold against the training mean. The folds depend on the position (section 4).
+  Refit-only: the accepted list is chosen on all rows and only refit per fold. Nested: the list
+  itself is chosen without the fold (the whole loop rerun on the training rows); this is the
+  selection-independent score.
 - CI: the decomposition's causal importance of reader r on prompt i at t (addsub: the CI filter's
   output CI on the original model). Important entry: CI > 0.01. Important residual share: the
   residual variance on important entries over the read variance there, from held-out
@@ -69,21 +71,24 @@ addsub decomposition (run p-ba5a0c05).
    gain per dimension, they absorb the specific quantities they span and are inherited
    everywhere. A place code is specific when its spacing and width are stated. A frequency peak
    or a correlation is not a hypothesis: name the function.
-3. **Fit it** jointly with A. Record increment, chance, excess, p, held-out R^2, readers with at
+3. **Fit it** jointly with A. Record increment, chance, excess, held-out R^2, readers with at
    least 10% of their variance from it, important residual share.
 4. **Judge it by what it leaves.**
-   - Reject: excess <= 0, increment < 0.2% of the reads' variance, or p >= 0.01.
+   - Reject: excess <= 0, increment < 0.2% of the reads' variance, or held-out R^2 not higher
+     with q than without it.
    - Revise: structure tied to q's variables remains (left-over harmonics: wrong shape; structure
      on part of q's range: wrong support; a smooth function of q's value: wrong encoding). Fit the
      variant in place of q; keep the one leaving less structure at a higher excess per dimension.
      Two plausible encodings: fit each first and see what the other adds (both-orders test); keep
      the one after which the other adds nothing; both add: keep both; neither: fewer dimensions.
-   - Backtrack: q makes an earlier quantity redundant (drop-one loss at or below chance; several
-     at once: the most dimensions first): remove it and log why. Inherited quantities are
-     re-tested at every site (drop-one excess and drop-one permutation p).
+   - Backtrack: q makes an earlier quantity redundant (it fails the reject tests as a drop-one
+     test; several at once: the most dimensions first): remove it and log why. Inherited
+     quantities are re-tested the same way at every site.
    - Accept otherwise, and go back to 1.
-5. **Generalisation.** Held-out R^2 of A must not fall when q is added. A quantity read off the
-   residual of some data is tested on data it was not read from before acceptance.
+5. **Generalisation.** Held-out R^2 of A must rise when q is added. A quantity read off the
+   residual of some data is tested on data it was not read from before acceptance; report the
+   nested held-out R^2 and how often each accepted quantity is selected without each fold
+   (stability).
 6. **Stop** when the held-out important residual share is below 5% or without structure (top
    singular value within the permutation null, no variable explaining it above chance), or when
    the last guesses were all rejected. Report what remains (important and unimportant parts;
@@ -92,13 +97,15 @@ addsub decomposition (run p-ba5a0c05).
    model (reader activations replaced). The test must be closed: the stream at t may reach the
    rest of the network only through the reconstruction. The readers dead at t (alive elsewhere,
    CI <= 0.01 at t on every prompt) still read the true stream, so they are switched off at t in
-   every run, patched or not; report the KL of that switch alone, and the patched KL against
+   every run, patched or not, and the patched activations are divided by the reconstructed rho,
+   not the live one; report the KL of that switch alone, and the patched KL against
    both references (all alive readers on; dead-at-t readers off). The original model is not
    patched: its dense weights read the whole stream, and a closed test there would also have to
    replace the stream outside the readers' span. Compare with
    the mean patch (the cost of losing what the site carries at t; at many sites it is near 0, and
-   the test is informative only where it is not) and the exact patch (a check, KL ~ 0); use the
-   held-out reconstruction for the strict version. Worst sites: rank by reconstruction KL and by
+   the test is informative only where it is not) and the exact patch at every site together (a
+   check of the wiring: KL equal to the dead-reader switch alone); use the nested held-out
+   reconstruction for the strict version. Worst sites: rank by reconstruction KL and by
    the fraction of the mean-patch KL it leaves; inspect their readers by CI-weighted residual and
    refine (back to 2). Patterns met in the fits at t = 1 (readers with the largest CI-weighted
    residual): single-value detectors (readers important on one or two values: a one-hot over
@@ -126,7 +133,6 @@ a domain value must be held out together.
   tested on new combinations. The diagnostics hold out all pairs with given values of a (or b):
   a quantity of a must then generalise to unseen values of a. A quantity that holds under the
   pair scheme but fails under a-values is value-specific in a.
-- Permutation tests permute the features over the domain rows.
 - A site whose reads are constant over the domain (L0's attention input at a token that is the
   same in every prompt, e.g. "=") has nothing to fit; `qloop.py` records it as constant.
 - Process sites in stream order within a position. Quantities accepted at earlier positions
@@ -140,11 +146,12 @@ a domain value must be held out together.
   `dom_index`.
 - `qfeat.py`: `pool(pos)`, the standard candidates (operands, op, results, carry, borrow, gated
   versions), and `Cand(name, var, Phi)` for your own.
-- `qfit.py`: `Fitter(site, cands, folds)` with `increment`, `drop_one`, `perm_p`, `heldout_r2`,
+- `qfit.py`: `Fitter(site, cands, folds)` with `increment`, `drop_one`, `heldout_r2`,
   `reconstruct`, `important_share`, `ci_weighted_residual`, `add` (register a new candidate);
-  `folds(pos, scheme)`, `primary_scheme(t)`.
+  `fit_scalar` (rho); `folds(pos, scheme)`, `primary_scheme(t)`.
 - `qloop.py <t> [--sites ...] [--extra mod.fn] [--tag x]`: the automatic part of steps 2-6 over
-  the sites of a position (writes `qloop_t<t>_<tag>.json`, `recon_t<t>_<tag>.npz`).
+  the sites of a position (writes `qloop_t<t>_<tag>.json`, `recon_t<t>_<tag>.npz`); `--fold f`
+  (f = 0..9) and then `--combine` for the nested held-out scores (`qloop.sbatch`).
 - `qinspect.py <t> <site> [--tag x]`: step 1 / step 7 inspection (tables and a figure).
 - `qpatch.py <t> [--tag x]`: step 7, the closed test in the alive-only model (GPU).
 Fits run on CPU (a 256-core node runs a position's 63 sites in minutes at t = 1); patching needs

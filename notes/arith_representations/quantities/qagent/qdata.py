@@ -3,7 +3,7 @@
 A position's domain is the set of distinct inputs its activations can depend on (see qprep.py);
 `dom_index(t, op, a, b)` maps prompts to domain rows. Each site holds Z (stream in reader-span
 coordinates, D x k), W (readout, k x n; raw reads Y = Z W), CI (D x n), the readers' dataset
-columns and Q (4096 x k, the reader-span basis).
+columns, Q (4096 x k, the reader-span basis) and rho (D, the stream's RMS; activations = Y / rho).
 """
 
 from dataclasses import dataclass, field
@@ -24,6 +24,7 @@ class Site:
     CI: np.ndarray
     cols: np.ndarray
     Q: np.ndarray
+    rho: np.ndarray
 
     @property
     def Y(self) -> np.ndarray:
@@ -64,8 +65,17 @@ def load(t: int, sites: list[str] | None = None) -> Position:
     for lab in labels:
         if sites is None or lab in sites:
             pos.sites[lab] = Site(lab, f[lab + "/Z"].astype(np.float64), f[lab + "/W"].astype(np.float64),
-                                  f[lab + "/CI"].astype(np.float64), f[lab + "/cols"], f[lab + "/Q"].astype(np.float64))  # fmt: skip
+                                  f[lab + "/CI"].astype(np.float64), f[lab + "/cols"], f[lab + "/Q"].astype(np.float64),
+                                  f[lab + "/rho"].astype(np.float64))  # fmt: skip
     return pos
+
+
+def restrict(pos: Position, rows: np.ndarray) -> Position:
+    """The position restricted to domain rows `rows` (training rows of a nested fit)."""
+    sub = Position(pos.t, pos.rows[rows], pos.op[rows], pos.a[rows], pos.b[rows])
+    for lab, s in pos.sites.items():
+        sub.sites[lab] = Site(lab, s.Z[rows], s.W, s.CI[rows], s.cols, s.Q, s.rho[rows])
+    return sub
 
 
 def dom_index(t: int, op: np.ndarray, a: np.ndarray, b: np.ndarray) -> np.ndarray:
