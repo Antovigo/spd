@@ -18,11 +18,20 @@
   .seg button { border: 1px solid var(--line); background: #fff; padding: 3px 9px; cursor: pointer; }
   .seg button.on { background: var(--accent); color: #fff; border-color: var(--accent); }
   select { max-width: 360px; }
-  main { padding: 8px 16px 40px; }
+  html, body { height: 100%; }
+  body { display: flex; flex-direction: column; }
+  header, .bar { flex: none; }
+  .panes { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .panes section { overflow: auto; padding: 8px 16px 40px; min-width: 0; }
+  #left { border-right: 1px solid var(--line); }
+  h2 { font-size: 13px; margin: 14px 0 4px; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; }
+  @media (max-width: 900px) { body { display: block; height: auto; } .panes { display: block; } .panes section { overflow: visible; } #left { border-right: 0; } }
   #mapwrap { overflow-x: auto; }
   #status { min-height: 18px; color: var(--mute); font-size: 12px; margin: 4px 0; }
-  .axes { display: grid; grid-template-columns: auto 1fr auto; gap: 4px 10px; align-items: center; margin: 8px 0; max-width: 900px; }
-  #plot { width: 100%; height: 640px; border: 1px solid var(--line); }
+  .axes { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 4px 10px; align-items: center; }
+  .axes select, .row select { max-width: 100%; }
+  #plot { width: 100%; height: min(78vh, 760px); border: 1px solid var(--line); }
   #grids { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 10px; }
   .rd { border: 2px solid transparent; padding: 4px; cursor: pointer; }
   .rd.sel { border-color: var(--accent); }
@@ -46,24 +55,31 @@
   <span id="opwrap"><label>prompts</label><span class="seg" id="opsel"></span></span>
   <span id="subwrap"><label><input type="checkbox" id="sub" checked> random 4000 of 20000</label></span>
   <span><label><input type="checkbox" id="center"> subtract the domain mean</label></span>
-  <span><label>colour by</label><select id="cmode"><option value="q">value of a quantity</option><option value="act">inner activation of the selected reader</option><option value="ci">causal importance of the selected reader</option></select>
-    <select id="cq"></select></span>
-  <span><label>selected reader</label><select id="reader"></select></span>
 </div>
-<main>
-  <div class="note">Quantity map of the selected position: rows are quantities, columns the read sites (attention input, MLP input
-  of each block); colour = drop-one excess (share of the readers' read variance a quantity explains beyond the other accepted
-  quantities and beyond chance, log scale 1e-4..1); white dot = dependence &gt; 0.9 (reproduced by the other accepted
-  quantities); red cross = stability &lt; 0.5 (selected in fewer than half of the nested runs). Click a cell to show that
-  quantity at that site.</div>
-  <div id="mapwrap"><canvas id="map"></canvas></div>
-  <div id="status"></div>
-  <div class="axes" id="axes"></div>
-  <div class="note" id="axnote"></div>
-  <div id="plot"></div>
-  <div class="note" id="arrownote"></div>
-  <div id="grids"></div>
-</main>
+<div class="panes">
+  <section id="left">
+    <div class="note">Quantity map of the selected position: rows are quantities, columns the read sites (attention input, MLP
+    input of each block); colour = drop-one excess (share of the readers' read variance a quantity explains beyond the other
+    accepted quantities and beyond chance, log scale 1e-4..1); white dot = dependence &gt; 0.9 (reproduced by the other
+    accepted quantities); red cross = stability &lt; 0.5 (selected in fewer than half of the nested runs). Click a cell to
+    show that quantity at that site.</div>
+    <div id="mapwrap"><canvas id="map"></canvas></div>
+    <div id="status"></div>
+    <h2>Axes</h2>
+    <div class="axes" id="axes"></div>
+    <div class="note" id="axnote"></div>
+    <h2>Colour</h2>
+    <div class="row"><select id="cmode"><option value="q">value of a quantity</option><option value="act">inner activation of the selected reader</option><option value="ci">causal importance of the selected reader</option></select>
+      <select id="cq"></select></div>
+    <h2>Selected reader</h2>
+    <div class="row"><select id="reader"></select></div>
+  </section>
+  <section id="right">
+    <div id="plot"></div>
+    <div class="note" id="arrownote"></div>
+    <div id="grids"></div>
+  </section>
+</div>
 <script>
 const $ = id => document.getElementById(id);
 const dec = (s, T) => { const b = atob(s), u = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) u[i] = b.charCodeAt(i); return new T(u.buffer); };
@@ -118,12 +134,13 @@ async function axesFor(q) {  // the quantity's top 3 dimensions; the rest zero
   S.axes = [0, 1, 2].map(j => (Q && j < Q.r) ? { q, d: j } : { q: -1, d: 0 }); }
 
 // ---- map ----
-const CW = 11, RH = 12, LW = 300, TH = 26;
+let CW = 11; const RH = 12, LW = 250, TH = 26;
 function drawMap() {
   const m = P[S.t], c = $("map"), nq = m.quantities.length, ns = m.sites.length;
+  CW = Math.max(6, Math.min(14, Math.floor(($("mapwrap").clientWidth - LW - 6) / ns)));
   c.width = LW + ns * CW + 4; c.height = TH + nq * RH + 4; const g = c.getContext("2d");
   g.fillStyle = "#fff"; g.fillRect(0, 0, c.width, c.height); g.font = "10px system-ui"; g.fillStyle = "#1d1d1f";
-  m.quantities.forEach((n, i) => { g.textAlign = "right"; g.fillText(n.length > 52 ? n.slice(0, 50) + "..." : n, LW - 6, TH + i * RH + 9); });
+  m.quantities.forEach((n, i) => { g.textAlign = "right"; g.fillText(n.length > 44 ? n.slice(0, 42) + "..." : n, LW - 6, TH + i * RH + 9); });
   m.sites.forEach((s, j) => { if (s.endsWith("attn")) { g.save(); g.translate(LW + j * CW + 8, TH - 4); g.rotate(-Math.PI / 2); g.textAlign = "left"; g.fillText(s.split(".")[0], 0, 0); g.restore(); } });
   g.fillStyle = "#f3f3f5"; g.fillRect(LW, TH, ns * CW, nq * RH);
   for (const [q, si, ex, dep, st] of m.cells) {
@@ -296,6 +313,7 @@ async function drawGrids(t) {
     box.appendChild(div);
   }
 }
+window.addEventListener("resize", () => { drawMap(); Plotly.Plots.resize("plot"); });
 render();
 </script>
 </body>
