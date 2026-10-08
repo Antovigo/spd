@@ -10,6 +10,7 @@ Every candidate is a Cand (name, variable, Phi (D, d)). The agent adds its own c
 accepted quantity).
 """
 
+import importlib
 from dataclasses import dataclass
 
 import numpy as np
@@ -23,8 +24,9 @@ class Cand:
     var: str  # the variable(s) it is a function of, e.g. "a", "op", "r", "op,a"
     Phi: np.ndarray  # (D, d)
     value: np.ndarray | None = (
-        None  # (D,) the value it encodes, for display (default: Phi[:, 0] when d = 1)
+        None  # (D,) value it encodes, for display (default Phi[:, 0] if d = 1)
     )
+    requires: str | None = None  # a candidate that may enter a list only while this one is in it
 
     def shown(self) -> np.ndarray:
         """Natural value per domain row: the variable for curves and place codes, x mod P for a
@@ -117,14 +119,10 @@ def result_family(r: np.ndarray, v: str, lo: int, hi: int) -> list[Cand]:
     ]
 
 
-def gated(c: Cand, op: np.ndarray) -> Cand:
+def gated(c: Cand, op: np.ndarray, requires: str | None = None) -> Cand:
     """c on subtraction prompts only (an op-dependent encoding of c's variable)."""
-    return Cand(
-        f"[op = -] x {c.name}",
-        f"op,{c.var}",
-        c.Phi * (op == 1)[:, None],
-        np.where(op == 1, c.shown(), np.nan),
-    )
+    return Cand(f"[op = -] x {c.name}", f"op,{c.var}", c.Phi * (op == 1)[:, None],
+                np.where(op == 1, c.shown(), np.nan), requires)  # fmt: skip
 
 
 def pool(pos: Position) -> list[Cand]:
@@ -150,3 +148,35 @@ def pool(pos: Position) -> list[Cand]:
                 Cand("borrow [u_a < u_b]", "u_a,u_b", ind(a % 10 < b % 10)),
                 Cand("sign of a - b [a < b]", "a,b", ind(a < b))]  # fmt: skip
     return out
+
+
+HINT_OPERATIONS = ("gate_by_op",)
+
+
+def apply_hints(pos: Position, cands: list[Cand], hints: list[dict]) -> list[Cand]:
+    """Candidates added by the researcher's hints (hints.json). Hints are operations on quantities,
+    not quantities: "gate_by_op" adds, for every candidate that is not about op and not already
+    op-gated, its subtraction-only version, which may enter a site's list only while the candidate
+    itself is in it (t >= 2)."""
+    out, names = [], {c.name for c in cands}
+    for h in hints:
+        assert h["operation"] in HINT_OPERATIONS, h["operation"]
+        if h["operation"] == "gate_by_op" and pos.t >= 2:
+            for c in cands:
+                name = f"[op = -] x {c.name}"
+                if c.var != "op" and not c.name.startswith("[op = -]") and name not in names:
+                    out.append(gated(c, pos.op, requires=c.name))
+                    names.add(name)
+    return out
+
+
+def candidates(
+    pos: Position, extra: str | None = None, hints: list[dict] | None = None
+) -> list[Cand]:
+    """The standard pool, the agent's own candidates (`extra`: "module.function", a function
+    Position -> list[Cand]) and the candidates the hints add."""
+    cands = pool(pos)
+    if extra:
+        mod, fn = extra.rsplit(".", 1)
+        cands += getattr(importlib.import_module(mod), fn)(pos)
+    return cands + apply_hints(pos, cands, hints or [])

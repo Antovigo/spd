@@ -1,0 +1,9 @@
+[
+ {
+  "id": "op-gated-variants",
+  "operation": "gate_by_op",
+  "added": "2026-10-08",
+  "motivation": "In the explorer at t = 4 (token =), L18.mlp, the stream projected on the two directions of 'circle period 50 of b' forms two circles running in opposite directions on addition and subtraction prompts; the fit has no subtraction-only circle, so it rebuilt the subtraction circle from subtraction-only tens digit classes and magnitude of b (16 dimensions).",
+  "effect": "every candidate that is not about op and not already op-gated gets a subtraction-only version, allowed into a site's list only while the candidate itself is in it"
+ }
+]

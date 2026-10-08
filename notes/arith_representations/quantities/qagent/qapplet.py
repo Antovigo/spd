@@ -26,7 +26,7 @@ from pathlib import Path
 
 import numpy as np
 from qdata import DATA, POS_NAMES, load
-from qfeat import pool
+from qfeat import candidates
 from qprep import VW
 
 OUT = DATA.parent / "applet"
@@ -52,7 +52,7 @@ def main() -> None:
         dirs = json.loads((DATA / f"dirs_t{t}{tag}.json").read_text())
         dz = np.load(DATA / f"dirs_t{t}{tag}.npz")
         pos = load(t)
-        cands = {c.name: c for c in pool(pos)}
+        cands = {c.name: c for c in candidates(pos, run.get("extra"), run.get("hints"))}
         sites = [s["site"] for s in run["sites"] if not s.get("constant")]
         qnames = sorted({a["name"] for s in run["sites"] for a in s["accepted"]})
         qi = {n: i for i, n in enumerate(qnames)}

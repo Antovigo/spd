@@ -30,7 +30,7 @@ import json
 
 import numpy as np
 from qdata import DATA, load
-from qfeat import pool
+from qfeat import candidates
 from qfit import Fitter, folds, primary_scheme, ridge
 
 
@@ -47,7 +47,7 @@ def main() -> None:
         if not r.get("constant") and r["accepted"]
     }
     pos = load(args.t, list(accepted))
-    cands = {c.name: c for c in pool(pos)}
+    cands = {c.name: c for c in candidates(pos, run.get("extra"), run.get("hints"))}
     fs = folds(pos, primary_scheme(args.t))
     arrays, out = {}, []
     for lab, A in accepted.items():

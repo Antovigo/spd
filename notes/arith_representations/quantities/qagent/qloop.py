@@ -28,13 +28,13 @@ rhohat_heldout, cols per site), OUT/qloop_t<t>[_tag]_fold<f>.json.
 """
 
 import argparse
-import importlib
 import json
 import time
+from pathlib import Path
 
 import numpy as np
 from qdata import DATA, POS_NAMES, Position, load, restrict
-from qfeat import Cand, pool
+from qfeat import Cand, candidates
 from qfit import Fitter, fit_scalar, folds, primary_scheme
 
 MIN_INC = 0.002
@@ -62,6 +62,12 @@ def run_site(F: Fitter, inherited: list[str], log: list[str]) -> list[str]:
         while A:
             bad = []
             for n in A:
+                req = F.cands[n].requires
+                if req and req not in A:
+                    bad.append(
+                        (F.dims([n]), n, f"'{req}', which it requires, is no longer in the list")
+                    )
+                    continue
                 ok, why = qualifies(F, [m for m in A if m != n], n)
                 if not ok:
                     bad.append((F.dims([n]), n, why))
@@ -86,6 +92,10 @@ def run_site(F: Fitter, inherited: list[str], log: list[str]) -> list[str]:
                 n in A or n in removed or F.dims([n]) == 0
             ):  # constant on these rows (e.g. a = 100 held out)
                 continue
+            if (
+                F.cands[n].requires and F.cands[n].requires not in A
+            ):  # hinted variant of a quantity not in A
+                continue
             inc, ch = F.increment(A, n)
             scored.append(((inc - ch) / max(F.dims([n]), 1), n))
         scored.sort(key=lambda s: -s[0])
@@ -104,14 +114,6 @@ def run_site(F: Fitter, inherited: list[str], log: list[str]) -> list[str]:
             log.append("stop: none of the top candidates passes")
             break
     return A
-
-
-def candidates(pos: Position, extra: str | None) -> list[Cand]:
-    cands = pool(pos)
-    if extra:
-        mod, fn = extra.rsplit(".", 1)
-        cands += getattr(importlib.import_module(mod), fn)(pos)
-    return cands
 
 
 def constant(Y: np.ndarray) -> bool:
@@ -190,19 +192,23 @@ def main() -> None:
     ap.add_argument("--tag", default="")
     ap.add_argument("--fold", type=int, default=None)
     ap.add_argument("--combine", action="store_true")
+    ap.add_argument(
+        "--hints", default=None, help="hints file (JSON list of hint operations, see hints.json)"
+    )
     args = ap.parse_args()
+    hints = json.loads(Path(args.hints).read_text()) if args.hints else []
     tag = f"_{args.tag}" if args.tag else ""
     pos = load(args.t, args.sites.split(",") if args.sites else None)
     fs = folds(pos, primary_scheme(pos.t))
 
     if args.fold is not None:  # nested selection on the training rows of one primary fold
         sub = restrict(pos, np.setdiff1d(np.arange(pos.D), fs[args.fold]))
-        res = loop(sub, candidates(sub, args.extra))
+        res = loop(sub, candidates(sub, args.extra, hints))
         (DATA / f"qloop_t{pos.t}{tag}_fold{args.fold}.json").write_text(
             json.dumps({"fold": args.fold, "sites": {k: A for k, (A, _) in res.items()}}, indent=1)
         )
         return
-    cands = candidates(pos, args.extra)
+    cands = candidates(pos, args.extra, hints)
     if args.combine:
         combine(pos, cands, tag)
         return
@@ -252,7 +258,7 @@ def main() -> None:
               f"important {rec['important_share_in']:.3f}/{rec['important_share_heldout']:.3f} rho R2 {rec['rho_r2_in']:.3f} "
               f"{[a['name'] for a in rec['accepted']]}", flush=True)  # fmt: skip
     meta = {"t": pos.t, "position": POS_NAMES[pos.t], "D": pos.D, "scheme": primary_scheme(pos.t),
-            "MIN_INC": MIN_INC, "STOP_SHARE": STOP_SHARE, "nested": False, "sites": out}  # fmt: skip
+            "MIN_INC": MIN_INC, "STOP_SHARE": STOP_SHARE, "nested": False, "extra": args.extra, "hints": hints, "sites": out}  # fmt: skip
     (DATA / f"qloop_t{pos.t}{tag}.json").write_text(json.dumps(meta, indent=1))
     np.savez(DATA / f"recon_t{pos.t}{tag}.npz", rows=pos.rows, **recon)
 
