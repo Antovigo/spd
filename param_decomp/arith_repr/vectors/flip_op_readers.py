@@ -10,7 +10,7 @@ h_c = 0 on the plane through the origin orthogonal to V_c. S = span(V_72, V_117,
 dimensions); every V_c lies in S, so h_c / |V_c| is the coordinate of xin's projection onto S along
 V_c / |V_c|. Basis of S: e1 = the op flag (mean xin on add - mean xin on sub) projected onto S,
 normalized; e2, e3 = the directions of S orthogonal to e1, ordered by the variance of xin along them.
-* Top: two views of the 3D cloud of xin's projections onto S (blue add, orange sub), with each dot's
+* Top: the 3D cloud of xin's projections onto S (blue add, orange sub), with each dot's
   shadow on the floor of the box (grey); arrows from the origin along V_c / |V_c|, all drawn at the
   same length.
 * Bottom: histograms of h_c per operation."""
@@ -23,6 +23,7 @@ import numpy as np
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.ticker import MaxNLocator
 
 from param_decomp.arith_repr.isa.components_model import ComponentsModel
 from param_decomp.arith_repr.vectors.flip_components import DIR
@@ -79,9 +80,9 @@ def main() -> None:
     pad = 0.04 * (hi - lo)
     lo, hi = lo - pad, hi + pad
     idx = np.random.default_rng(0).permutation(len(op))
-    fig = plt.figure(figsize=(13, 10.5))
-    for vi, (elev, azim) in enumerate(((22, -62), (22, 28))):
-        ax = cast(Any, fig.add_axes((0.0 + 0.5 * vi, 0.33, 0.5, 0.64), projection="3d"))
+    fig = plt.figure(figsize=(11, 11.5))
+    for vi, (elev, azim) in enumerate(((22, -62),)):
+        ax = cast(Any, fig.add_axes((0.02, 0.29, 0.92, 0.70), projection="3d"))
         ax.scatter(P[idx, 0], P[idx, 1], np.full(len(idx), lo[2]), s=1, c=SHADOW, alpha=0.15,
                    linewidths=0, depthshade=False)  # fmt: skip
         ax.scatter(P[idx, 0], P[idx, 1], P[idx, 2], s=1.5, c=np.where(op[idx] == 0, ADD, SUB),
@@ -112,18 +113,19 @@ def main() -> None:
         ax.set_box_aspect(tuple(hi - lo))
         ax.view_init(elev=elev, azim=azim)
         ax.set_xlabel("e1: op flag within S", fontsize=9, color=INK)
-        ax.set_ylabel("e2", fontsize=9, color=INK)
-        ax.set_zlabel("e3", fontsize=9, color=INK)
+        ax.set_ylabel("e2: most remaining variance", fontsize=9, color=INK)
+        ax.set_zlabel("e3: least remaining variance", fontsize=9, color=INK)
         ax.tick_params(labelsize=7, colors=MUTED)
         if vi == 0:
-            ax.legend(loc="upper left", fontsize=8, frameon=False)
+            ax.legend(loc="upper left", bbox_to_anchor=(0.06, 0.92), fontsize=9, frameon=False)
     for i, n in enumerate(READERS):
-        ax = fig.add_axes((0.05 + 0.32 * i, 0.06, 0.27, 0.2))
+        ax = fig.add_axes((0.04 + 0.33 * i, 0.06, 0.28, 0.17))
+        ax.xaxis.set_major_locator(MaxNLocator(6))
         bins = np.linspace(h[:, i].min(), h[:, i].max(), 80)
         for o, colr, nm in ((0, ADD, "add"), (1, SUB, "sub")):
             ax.hist(h[op == o, i], bins=bins, color=colr, alpha=0.6, label=nm)
         ax.axvline(0, color=MUTED, lw=0.8)
-        ax.set_title(f"{n}: h_c, cos(V_c, op flag) {cos[n]:+.2f}", fontsize=9, color=INK)
+        ax.set_title(f"{n}: h_c\ncos(V_c, op flag) {cos[n]:+.2f}", fontsize=9, color=INK)
         ax.set_yticks([])
         for s in ("top", "right", "left"):
             ax.spines[s].set_visible(False)
