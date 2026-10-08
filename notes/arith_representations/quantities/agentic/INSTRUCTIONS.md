@@ -14,8 +14,10 @@ model's output depends on that reader there; CI > 0.01 counts as important.
 
 What the stream at t can depend on: t = 1: a only (op and b come later); t = 2: op and a; t = 3, 4:
 op, a and b. Each distinct input is one row of the data ("domain row"): 100 rows at t = 1, 200 at
-t = 2, 20000 at t = 3, 4. A fifth of them (values of a at t = 1, 2; (a, b) pairs at t = 3, 4) are
-held out for the final evaluation; the tools never show them.
+t = 2, 20000 at t = 3, 4. Some rows are held out for the final evaluation and never shown by the
+tools: at t = 1, 2 every row with one of a fifth of the values of a; at t = 3, 4 every row with one of
+a tenth of the values of a, of b, of a + b or of a - b. So the evaluation asks whether your quantities
+predict values they never saw: a function of a value can, a lookup of individual values cannot.
 
 ## What you are looking for
 Quantities: functions of (op, a, b) that the stream carries along fixed directions in the readers'
@@ -23,17 +25,22 @@ span, so that the stream at the site is approximately its mean plus, for each qu
 times a set of directions (one direction per feature, the same for all readers). The tool fits all
 directions jointly (least squares with a small ridge) for the list of quantities you give it.
 
-A good list explains the readers' inner activations where they are causally important with few,
-simple quantities. The tool scores a list by its description length (bits, lower is better):
-- data bits: how many bits the residual of the stream costs (Gaussian code);
-- parameter bits: 1/2 log2(N) bits per fitted coefficient: each feature dimension of each quantity
-  costs one coefficient per span dimension (k_eff of them), so a 20-function basis costs 20 times a
-  scalar;
-- formula bits: the length of the quantity's formula (about 5 bits per symbol, plus the bits of its
-  numbers; integers cost more the larger they are).
-A quantity is worth keeping when removing it would raise the total ("drop_one_delta_bits" > 0).
-Smooth bases (spline, bumps) can fit almost anything with enough functions, and pay for every
-function: use them only when no simpler formula explains the pattern.
+A good list predicts the readers' activations on data it was not fit on, with a short
+description. The tool scores a list by
+
+  J = model bits + B x (percentage points of held-out unexplained variance of the reads)
+
+(lower is better; B is printed in the report):
+- model bits: the length of the description: each quantity's formula (about 5 bits per symbol, plus
+  the bits of its numbers; integers cost more the larger they are) and its fitted coefficients
+  (1/2 log2(N) bits each, N = training rows; each feature dimension of a quantity has one
+  coefficient per span dimension, k_eff of them, so a 20-function basis costs 20 times a scalar);
+- held-out unexplained variance: the tool fits your list on part of the training rows and predicts
+  the rest, holding out values the same way as the evaluation (inner folds), and reports 1 - R^2.
+So a quantity must buy at least one point of held-out R^2 for every B bits it costs. A quantity is
+worth keeping when removing it would raise J ("drop_one_delta" > 0). Smooth bases (spline, bumps) and
+per-value classes can fit almost anything on the rows they see and pay for every function; they only
+help on held-out rows if the pattern they fit is a function of the value.
 
 ## The loop at one site (at most 4 fits per site)
 1. Look at the readers' inner activations (`show`): the most causally important readers, their
@@ -43,7 +50,7 @@ function: use them only when no simpler formula explains the pattern.
    the first of your block, start from the previous site's final list: the stream is passed on from
    site to site, so most quantities persist; drop or replace what does not fit here.
 3. Fit it (`fit`).
-4. Look at the result: total bits and the drop-one delta of each quantity; the residual figures of the
+4. Look at the result: J, the held-out R^2 and the drop-one delta of each quantity; the residual figures of the
    readers with the largest CI-weighted residual (the errors that matter); the residual's singular
    functions (patterns shared by many readers); which variables' values still explain residual
    variance (excess over chance). If there is no large regular discrepancy left in the causally
@@ -54,8 +61,8 @@ function: use them only when no simpler formula explains the pattern.
    b) add quantities that explain the residual;
    c) remove quantities whose drop-one delta is <= 0;
    d) anything else that seems like a good idea.
-5. Go back to 3. After the 4th fit, keep the best list you have (lowest total bits among lists with no
-   quantity of negative drop-one delta) and note what remains unexplained.
+5. Go back to 3. After the 4th fit, keep the best list you have (lowest J among lists with no quantity
+   of negative drop-one delta) and note what remains unexplained.
 
 ## Spec files and the formula language
 A spec is a Python file defining `QUANTITIES = [(name, formula), ...]`. The name is free text
@@ -86,9 +93,9 @@ outputs back; a fit takes about 10 s):
   skip those);
 - `./qa_remote.sh show <t> <site> <dir>`: prints the readers ranked by CI-weighted variance and
   writes `show_readers.png`, `show_components.png` in `<dir>`;
-- `./qa_remote.sh fit <t> <site> <spec.py> <dir>`: prints the report (bits, drop-one deltas, R^2 of
-  the reads in-sample and on held-out folds of your training rows, the important residual share,
-  the worst readers, the variable table) and writes `<spec>_reads.png`, `<spec>_residual.png`,
+- `./qa_remote.sh fit <t> <site> <spec.py> <dir>`: prints the report (J, model bits, held-out and
+  in-sample R^2 of the reads, per quantity its bits, the held-out R^2 without it and its drop-one
+  delta, the important residual share, the worst readers, the variable table) and writes `<spec>_reads.png`, `<spec>_residual.png`,
   `<spec>_residual_svd.png` in `<dir>`.
 Look at the figures with your file-reading tool. Do not modify the tools.
 
@@ -103,5 +110,5 @@ quantities and what remains unexplained.
 - Use only the tools above and the files in `agentic/` and your work directory. Do not read other
   files in the repository or in the run's analysis folders (reports, earlier results, other agents'
   folders, the data files directly): the point is to find the quantities from the activations.
-- Every quantity must be justified by something you saw, and must earn its bits.
+- Every quantity must be justified by something you saw, and must lower J.
 - Keep notes short; do not repeat the tool output.
