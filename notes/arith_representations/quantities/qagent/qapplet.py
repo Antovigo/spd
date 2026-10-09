@@ -43,6 +43,12 @@ def main() -> None:
     ap.add_argument("--positions", default="1,2,3,4")
     args = ap.parse_args()
     tag = f"_{args.tag}" if args.tag else ""
+    global OUT
+    if tag:  # a tagged run gets its own applet folder (plotly copied from the untagged one)
+        OUT = DATA.parent / f"applet{tag}"
+        (OUT / "sites").mkdir(parents=True, exist_ok=True)
+        if (DATA.parent / "applet/plotly.min.js").exists():
+            shutil.copy(DATA.parent / "applet/plotly.min.js", OUT / "plotly.min.js")
     (OUT / "sites").mkdir(parents=True, exist_ok=True)
     vix = np.load(VW / "index.npz")
     names = {int(c): f"L{int(li)}.{k}.c{int(ci)}" for c, k, li, ci in zip(vix["r_col"], vix["r_kind"], vix["r_layer"], vix["r_cidx"], strict=True)}  # fmt: skip
