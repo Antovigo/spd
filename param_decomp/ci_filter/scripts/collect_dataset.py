@@ -1,13 +1,17 @@
 """Activation dataset of the original model and of one CI filter's decomposed model over the pool.
 
     python -m param_decomp.ci_filter.scripts.collect_dataset --config <yaml> --data_root <root>
-        --source <cf-id> [--batch_size 100] [--limit N]
+        --source <cf-id> [--batch_size 100] [--limit N] [--models decomposed] [--arrays inner]
 
 The DECOMPOSED model is the filter's rounded-CI forward: on each prompt and position, exactly
 the components whose output CI (computed on the ORIGINAL model's activations, under the
 filter's constraints) exceeds `alive_threshold` are on; every other component and the weight
 delta are off. Component data covers the filter's alive set (`alive/alive.json`) only; the
 threshold crossings outside it on the original model are counted (`meta.json`, expected ~0).
+
+`--models` and `--arrays` restrict which files are written (default: every model, every array);
+the checks and `kl_last` are always computed. On a wide pool the full dataset does not fit on
+disk (a, b in 1..400: ~3.8 TB of `resid`/`mlp_*` per model).
 
 Writes `<filter dir>/dataset/` (layout in `DATASET_README`, also written as `README.md`)."""
 
@@ -54,6 +58,9 @@ from param_decomp.targets.transformer_taps import (
 )
 
 MODELS = ("original", "decomposed")
+ARRAYS = ("resid", "mlp_gate", "mlp_up", "ci", "inner", "last_top_ids", "last_top_logprobs")
+LAYER_MAJOR = ("resid", "mlp_gate", "mlp_up")
+OPERATION_CODES = ("add", "sub", "mul")
 TOP_K = 10
 CHECK_LAYERS = (0, 18, 31)
 """Blocks whose `mlp_hidden` is captured to check `silu(gate) * up` against it."""
@@ -68,8 +75,10 @@ The DECOMPOSED model runs, on each prompt and position, exactly the components w
 on the ORIGINAL model's activations exceeds {threshold}; every other component and the weight
 delta are off. Every array is a numpy `.npy`, open with `np.load(path, mmap_mode="r")`.
 
-N = {n_prompts} prompts (`index.npz`: `tokens`, `a`, `b`, `op` 0=add 1=sub, row-major (a, b)
-per operation block), T = {seq_len} positions ({position_labels}), A = {n_alive} alive
+Written here: models {models}; arrays {arrays} (the layout below lists every array).
+
+N = {n_prompts} prompts (`index.npz`: `tokens`, `a`, `b`, `op` 0=add 1=sub 2=mul, row-major
+(a, b) per operation block), T = {seq_len} positions ({position_labels}), A = {n_alive} alive
 components, L = {n_layer} blocks.
 
 ## index.npz
@@ -221,18 +230,25 @@ class Checks:
 
 def pool_columns(pool: ArithmeticPool) -> dict[str, np.ndarray]:
     a, b, op = [], [], []
-    for code, block in enumerate(pool.blocks):
+    for block in pool.blocks:
         grid = block.grid
         a.append(np.repeat(np.asarray(grid.a_values, np.int32), grid.n_b))
         b.append(np.tile(np.asarray(grid.b_values, np.int32), grid.n_a))
-        op.append(np.full(grid.n_a * grid.n_b, code, np.int8))
-        assert block.operation == ("add", "sub")[code], block.operation
+        op.append(np.full(grid.n_a * grid.n_b, OPERATION_CODES.index(block.operation), np.int8))
+        assert block.operation in OPERATION_CODES, block.operation
     return {"a": np.concatenate(a), "b": np.concatenate(b), "op": np.concatenate(op)}
 
 
 def collect_dataset(
-    config: CIFilterConfig, data_root: Path, source: str, batch_size: int, limit: int | None
+    config: CIFilterConfig,
+    data_root: Path,
+    source: str,
+    batch_size: int,
+    limit: int | None,
+    models: tuple[str, ...] = MODELS,
+    arrays: tuple[str, ...] = ARRAYS,
 ) -> Path:
+    assert set(models) <= set(MODELS) and set(arrays) <= set(ARRAYS), (models, arrays)
     if config.compilation_cache_dir is not None:
         enable_persistent_compilation_cache(config.compilation_cache_dir)
     run_dir = resolve_run_dir(config.run, data_root)
@@ -276,7 +292,7 @@ def collect_dataset(
         d_model = int(site_d_in(placed, "self_attn.q_proj"))
         d_mlp = int(site_d_in(placed, "mlp.down_proj"))
         n_resid = 2 * n_layer + 1
-        files = {
+        every_file = {
             model: {
                 "resid": ((n_resid, n_prompts, T, d_model), np.float16),
                 "mlp_gate": ((n_layer, n_prompts, T, d_mlp), np.float16),
@@ -288,6 +304,7 @@ def collect_dataset(
             }
             for model in MODELS
         }
+        files = {m: {a: every_file[m][a] for a in arrays} for m in models}
         mms: dict[str, dict[str, np.memmap]] = {}
         for model, spec in files.items():
             (out_dir / model).mkdir()
@@ -311,12 +328,16 @@ def collect_dataset(
             )
             real = stop - start
             for model, result in zip(MODELS, got[:2], strict=True):
-                host = {k: np.asarray(v) for k, v in result.items()}
-                mm = mms[model]
-                for name in ("resid", "mlp_gate", "mlp_up"):
-                    mm[name][:, start:stop] = host[name][:, :real]
-                for name in ("ci", "inner", "last_top_ids", "last_top_logprobs"):
-                    mm[name][start:stop] = host[name][:real]
+                host = {
+                    k: np.asarray(v)
+                    for k, v in result.items()
+                    if k not in ARRAYS or (model in models and k in arrays)
+                }
+                for name, mm in mms.get(model, {}).items():
+                    if name in LAYER_MAJOR:
+                        mm[:, start:stop] = host[name][:, :real]
+                    else:
+                        mm[start:stop] = host[name][:real]
                 c = checks[model]
                 c.absmax = [max(x, float(y)) for x, y in zip(c.absmax, host["absmax"], strict=True)]
                 c.hidden_rel_err = max(c.hidden_rel_err, float(host["hidden_rel_err"]))
@@ -329,7 +350,7 @@ def collect_dataset(
                     f"{stop}/{n_prompts} ({elapsed:.0f}s, eta {elapsed / (i + 1) * (len(starts) - i - 1):.0f}s)"
                     f" KL so far {kl_last[:stop].mean():.4f} checks {checks}"
                 )
-        for model in MODELS:
+        for model in models:
             for mm in mms[model].values():
                 mm.flush()
         del mms
@@ -370,6 +391,8 @@ def collect_dataset(
         "n_alive": n_alive,
         "kl_last_mean": float(kl_last.mean()),
         "checks": {m: asdict(c) for m, c in checks.items()},
+        "models": list(models),
+        "arrays": list(arrays),
         "seconds": time.time() - t0,
     }
     (out_dir / "meta.json").write_text(json.dumps(meta, indent=2))
@@ -386,6 +409,8 @@ def collect_dataset(
             n_alive=n_alive,
             n_layer=n_layer,
             top_k=TOP_K,
+            models=", ".join(models),
+            arrays=", ".join(arrays),
         )
     )
     logger.info(f"{json.dumps(meta, indent=2)}\n-> {out_dir}")
@@ -406,6 +431,8 @@ def main() -> None:
     ap.add_argument("--source", required=True, help="the CI filter id")
     ap.add_argument("--batch_size", type=int, default=100)
     ap.add_argument("--limit", type=int, default=None, help="first N prompts only (smoke)")
+    ap.add_argument("--models", nargs="+", choices=MODELS, default=list(MODELS))
+    ap.add_argument("--arrays", nargs="+", choices=ARRAYS, default=list(ARRAYS))
     args = ap.parse_args()
     collect_dataset(
         CIFilterConfig.from_file(args.config),
@@ -413,6 +440,8 @@ def main() -> None:
         args.source,
         args.batch_size,
         args.limit,
+        tuple(args.models),
+        tuple(args.arrays),
     )
 
 
