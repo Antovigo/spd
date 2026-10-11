@@ -7,8 +7,9 @@ set -euo pipefail
 : "${POD_HOST:?}" "${POD_PORT:?}" "${KEY:?}"
 EXCLUDE=(--exclude "cf-smoke/")
 [ "${1:-}" = --no-ci-fn ] && EXCLUDE=(--exclude "training/ci_fn/")
-DEST="${DEST:-$HOME/out/pod-backup/p-ba5a0c05/analysis/ci_filter/}"
+RUN_ID="${RUN_ID:-p-ba5a0c05}"
+DEST="${DEST:-$HOME/out/pod-backup/$RUN_ID/analysis/ci_filter/}"
 SSH="ssh -p $POD_PORT -i $KEY -o StrictHostKeyChecking=accept-new"
 rsync -av --mkpath "${EXCLUDE[@]}" -e "$SSH" \
-  "root@$POD_HOST:/workspace/data/runs/p-ba5a0c05/analysis/ci_filter/" "$DEST"
+  "root@$POD_HOST:/workspace/data/runs/$RUN_ID/analysis/ci_filter/" "$DEST"
 rsync -av --mkpath -e "$SSH" "root@$POD_HOST:/workspace/data/logs/ci_filter.*" "$DEST/pod-logs/" || true

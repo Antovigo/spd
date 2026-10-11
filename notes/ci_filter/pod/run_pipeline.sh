@@ -25,7 +25,7 @@ while [ $# -gt 0 ]; do
   esac; shift
 done
 
-RUN_ID=p-ba5a0c05
+RUN_ID="${RUN_ID:-p-ba5a0c05}"; export RUN_ID
 OBJ1_ID="${OBJ1_ID:-addsub-05-filter-last-pos}"
 OBJ2_ID="${OBJ2_ID:-addsub-05-filter-integers}"
 OBJ3_ID="${OBJ3_ID:-addsub-05-filter-answer-ce}"
