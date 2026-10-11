@@ -7,7 +7,7 @@ stage: `smoke` (objective 1 on a 1..30 pool, 30 steps, evals every 10 steps, the
 (last-position cross-entropy of the TRUE answer, init from --init-id).
 Hardware knobs come from the environment: MICRO (prompts per microbatch; unset = the whole
 1024-prompt batch in one forward), EVAL_BATCH (default 1000), GRID_CHUNK (default 1000),
-RUN_ID (default p-ba5a0c05), POOL_MAX (operands 1..POOL_MAX, default 100).
+RUN_ID (default p-ba5a0c05), POOL_MAX (operands 1..POOL_MAX, default 100), OPS (default add,sub).
 Every filter runs under the ceiling and prune constraints (see `CIFilterConfig`). The run is referenced by id, so it resolves to `$DATA_ROOT/runs/p-ba5a0c05`."""
 
 import argparse
@@ -38,6 +38,7 @@ def main() -> None:
     raw["run"] = {"kind": "id", "id": os.environ.get("RUN_ID", "p-ba5a0c05")}
     pool_max = int(os.environ.get("POOL_MAX", "100"))
     raw["pool"] |= {"a_range": [1, pool_max], "b_range": [1, pool_max]}
+    raw["pool"]["operations"] = os.environ.get("OPS", "add,sub").split(",")
     match args.stage:
         case "smoke":
             raw |= {"steps": 30, "eval_every": 10, "wandb": None}

@@ -10,7 +10,7 @@ import numpy as np
 from param_decomp.ci_filter.config import ArithmeticPoolConfig, Operation
 from param_decomp.experiments.lm.arithmetic_eval import ArithmeticGrid
 
-SYMBOLS: dict[Operation, str] = {"add": "+", "sub": "-"}
+SYMBOLS: dict[Operation, str] = {"add": "+", "sub": "-", "mul": "×"}
 
 
 class Tokenizer(Protocol):

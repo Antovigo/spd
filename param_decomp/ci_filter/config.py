@@ -57,7 +57,7 @@ CIInit = Annotated[InitFromRun | InitFromCIFilter, Discriminator("kind")]
 # ----------------------------------- objective -----------------------------------
 
 
-Operation = Literal["add", "sub"]
+Operation = Literal["add", "sub", "mul"]
 
 
 class ArithmeticPoolConfig(BaseConfig):
