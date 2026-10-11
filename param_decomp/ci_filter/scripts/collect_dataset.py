@@ -9,6 +9,11 @@ filter's constraints) exceeds `alive_threshold` are on; every other component an
 delta are off. Component data covers the filter's alive set (`alive/alive.json`) only; the
 threshold crossings outside it on the original model are counted (`meta.json`, expected ~0).
 
+`--per_position` replaces `inner.npy` by one `inner_pos<t>.npy` per position t, holding only the
+components that are ON (original-model CI over the threshold) at t on at least one pool prompt
+(a first pass over the pool finds them; `index.npz` gains `pos<t>_cols`, their columns among the
+A alive components). `--inner_dtype float16` halves `inner`.
+
 `--models` and `--arrays` restrict which files are written (default: every model, every array);
 the checks and `kl_last` are always computed. On a wide pool the full dataset does not fit on
 disk (a, b in 1..400: ~3.8 TB of `resid`/`mlp_*` per model).
@@ -100,6 +105,11 @@ components, L = {n_layer} blocks.
 - `last_top_ids.npy` int32, `last_top_logprobs.npy` float32 (N, {top_k}) — top next-token
   predictions at the last position
 
+With `--per_position`: `inner_pos<t>.npy` (N, A_t) replaces `inner.npy` — position t's
+inner activations of only the A_t components on at t on some prompt; their columns among the A
+alive components are `index.npz` `pos<t>_cols` (all other entries at t are never on).
+`inner` dtype here: {inner_dtype}.
+
 ## Top level
 - `kl_last.npy` (N,) float32 — KL(original || decomposed) of the last-position distribution
 - `meta.json` — counts, checks (fp16 range, gate/up vs mlp_hidden, threshold crossings outside
@@ -123,6 +133,36 @@ def residual_labels(n_layer: int) -> tuple[str, ...]:
 
 def mlp_keys(n_layer: int, kind: str) -> tuple[str, ...]:
     return tuple(site_output_tap_key(f"layers.{block}.mlp.{kind}") for block in range(n_layer))
+
+
+def make_position_max():  # noqa: ANN201 (jitted closure)
+    """`(T, A)` max over a batch of the original model's output CI on the alive columns."""
+
+    @eqx.filter_jit
+    def position_max(
+        placed: PlacedModel,
+        prepared: Prepared,
+        ci_fn: PlacedCIFn,
+        constraints: CIConstraints,
+        alive_idx: dict[str, Array],
+        tokens_all: Int[Array, "N T"],
+        idx: Int[Array, " B"],
+    ) -> Array:
+        tokens = gather_rows(tokens_all, idx)
+        clean, _ = placed.component_activation_forward(
+            prepared, tokens, capture_keys=frozenset(ci_fn.capture_keys)
+        )
+        lower = output_ci(placed, ci_fn, constraints, clean.captures, False).lower
+        ci = jnp.concatenate(
+            [
+                jnp.take(jax.sharding.reshard(lower[s], P()), alive_idx[s], axis=-1)
+                for s in sorted(alive_idx)
+            ],
+            axis=-1,
+        )
+        return jax.sharding.reshard(jnp.max(ci.astype(jnp.float32), axis=0), P())
+
+    return position_max
 
 
 def make_collect(n_layer: int, threshold: float):  # noqa: ANN201 (jitted closure)
@@ -247,6 +287,8 @@ def collect_dataset(
     limit: int | None,
     models: tuple[str, ...] = MODELS,
     arrays: tuple[str, ...] = ARRAYS,
+    per_position: bool = False,
+    inner_dtype: str = "float32",
 ) -> Path:
     assert set(models) <= set(MODELS) and set(arrays) <= set(ARRAYS), (models, arrays)
     if config.compilation_cache_dir is not None:
@@ -292,19 +334,47 @@ def collect_dataset(
         d_model = int(site_d_in(placed, "self_attn.q_proj"))
         d_mlp = int(site_d_in(placed, "mlp.down_proj"))
         n_resid = 2 * n_layer + 1
-        every_file = {
+        every_file: dict[str, dict[str, tuple[tuple[int, ...], np.dtype]]] = {
             model: {
-                "resid": ((n_resid, n_prompts, T, d_model), np.float16),
-                "mlp_gate": ((n_layer, n_prompts, T, d_mlp), np.float16),
-                "mlp_up": ((n_layer, n_prompts, T, d_mlp), np.float16),
-                "ci": ((n_prompts, T, n_alive), np.float16),
-                "inner": ((n_prompts, T, n_alive), np.float32),
-                "last_top_ids": ((n_prompts, TOP_K), np.int32),
-                "last_top_logprobs": ((n_prompts, TOP_K), np.float32),
+                "resid": ((n_resid, n_prompts, T, d_model), np.dtype(np.float16)),
+                "mlp_gate": ((n_layer, n_prompts, T, d_mlp), np.dtype(np.float16)),
+                "mlp_up": ((n_layer, n_prompts, T, d_mlp), np.dtype(np.float16)),
+                "ci": ((n_prompts, T, n_alive), np.dtype(np.float16)),
+                "inner": ((n_prompts, T, n_alive), np.dtype(np.float32)),
+                "last_top_ids": ((n_prompts, TOP_K), np.dtype(np.int32)),
+                "last_top_logprobs": ((n_prompts, TOP_K), np.dtype(np.float32)),
             }
             for model in MODELS
         }
-        files = {m: {a: every_file[m][a] for a in arrays} for m in models}
+        for model in MODELS:
+            every_file[model]["inner"] = ((n_prompts, T, n_alive), np.dtype(inner_dtype))
+        pos_cols: list[np.ndarray] = []
+        if per_position:
+            position_max = make_position_max()
+            on_max = np.zeros((T, n_alive), np.float32)
+            t1 = time.time()
+            for start in range(0, n_prompts, batch_size):
+                idx = np.arange(start, start + batch_size, dtype=np.int32) % n_prompts
+                got_max = position_max(
+                    placed, prepared, ci_fn, constraints, alive_idx, tokens_all, jnp.asarray(idx)
+                )
+                on_max = np.maximum(on_max, np.asarray(got_max))
+            pos_cols = [np.flatnonzero(on_max[t] > threshold).astype(np.int32) for t in range(T)]
+            logger.info(
+                f"per-position on sets ({time.time() - t1:.0f}s): "
+                f"{[c.size for c in pos_cols]} of {n_alive}"
+            )
+            for model in MODELS:
+                del every_file[model]["inner"]
+                for t in range(T):
+                    every_file[model][f"inner_pos{t}"] = (
+                        (n_prompts, pos_cols[t].size),
+                        np.dtype(inner_dtype),
+                    )
+        wanted = [a for a in arrays if a != "inner" or not per_position] + (
+            [f"inner_pos{t}" for t in range(T)] if per_position and "inner" in arrays else []
+        )
+        files = {m: {a: every_file[m][a] for a in wanted} for m in models}
         mms: dict[str, dict[str, np.memmap]] = {}
         for model, spec in files.items():
             (out_dir / model).mkdir()
@@ -333,8 +403,14 @@ def collect_dataset(
                     for k, v in result.items()
                     if k not in ARRAYS or (model in models and k in arrays)
                 }
+                if model in models and inner_dtype == "float16":
+                    inner_absmax = float(np.abs(host["inner"][:real]).max())
+                    assert inner_absmax < 65504, f"{model}: inner overflows fp16 ({inner_absmax})"
                 for name, mm in mms.get(model, {}).items():
-                    if name in LAYER_MAJOR:
+                    if name.startswith("inner_pos"):
+                        t = int(name.removeprefix("inner_pos"))
+                        mm[start:stop] = host["inner"][:real, t][:, pos_cols[t]]
+                    elif name in LAYER_MAJOR:
                         mm[:, start:stop] = host[name][:, :real]
                     else:
                         mm[start:stop] = host[name][:real]
@@ -373,6 +449,7 @@ def collect_dataset(
         "comp_index": np.concatenate([alive[s] for s in sites]),
         "comp_v_norm": np.concatenate([np.asarray(v_norms[s])[alive[s]] for s in sites]),
         "comp_u_norm": np.concatenate([u_norms[s][alive[s]] for s in sites]),
+        **{f"pos{t}_cols": cols for t, cols in enumerate(pos_cols)},
     }
     np.savez(out_dir / "index.npz", **index)  # pyright: ignore[reportArgumentType] (numpy savez **kwds stub is strict)
     np.save(out_dir / "kl_last.npy", kl_last)
@@ -393,6 +470,9 @@ def collect_dataset(
         "checks": {m: asdict(c) for m, c in checks.items()},
         "models": list(models),
         "arrays": list(arrays),
+        "per_position": per_position,
+        "inner_dtype": inner_dtype,
+        "n_on_per_position": [int(c.size) for c in pos_cols],
         "seconds": time.time() - t0,
     }
     (out_dir / "meta.json").write_text(json.dumps(meta, indent=2))
@@ -411,6 +491,7 @@ def collect_dataset(
             top_k=TOP_K,
             models=", ".join(models),
             arrays=", ".join(arrays),
+            inner_dtype=inner_dtype,
         )
     )
     logger.info(f"{json.dumps(meta, indent=2)}\n-> {out_dir}")
@@ -433,6 +514,8 @@ def main() -> None:
     ap.add_argument("--limit", type=int, default=None, help="first N prompts only (smoke)")
     ap.add_argument("--models", nargs="+", choices=MODELS, default=list(MODELS))
     ap.add_argument("--arrays", nargs="+", choices=ARRAYS, default=list(ARRAYS))
+    ap.add_argument("--per_position", action="store_true")
+    ap.add_argument("--inner_dtype", choices=("float32", "float16"), default="float32")
     args = ap.parse_args()
     collect_dataset(
         CIFilterConfig.from_file(args.config),
@@ -442,6 +525,8 @@ def main() -> None:
         args.limit,
         tuple(args.models),
         tuple(args.arrays),
+        args.per_position,
+        args.inner_dtype,
     )
 
 
