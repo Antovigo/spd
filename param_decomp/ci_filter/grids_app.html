@@ -53,6 +53,9 @@
   <span><label>mean CI &ge;</label><input type="range" id="thr" min="0" max="1" step="0.001" style="width:180px">
     <span id="thrval"></span></span>
   <span><label>px/square</label><input type="number" id="px" min="1" max="16" step="1" value="1" style="width:52px"></span>
+  <span id="dsctl" style="display:none"><button id="dspick" type="button">alive-only inner: pick dataset folder</button>
+    <input type="file" id="dsdir" webkitdirectory style="display:none">
+    <span id="dsstatus" style="color:var(--muted)"></span></span>
   <span id="count"></span>
 </header>
 <div class="axis-note">tiles: a on the vertical axis (top = a_min), b on the horizontal axis (left = b_min); hover the detail view for values</div>
@@ -73,7 +76,9 @@
       <div class="cap">CI (hidden)</div></div>
     <div class="pane" id="dmergepane" style="display:none"><canvas id="dcimerge"></canvas>
       <div class="cap">merge</div></div>
-    <div class="pane"><canvas id="dinner"></canvas><div class="cap">inner act</div></div>
+    <div class="pane"><canvas id="dinner"></canvas><div class="cap">inner act (full model)</div></div>
+    <div class="pane" id="dalivepane" style="display:none"><canvas id="dinneralive"></canvas>
+      <div class="cap">inner act (alive-only model)</div></div>
   </div>
   <div id="readout"></div>
 </div>
@@ -124,21 +129,55 @@ function b64F16(s) {
 const ciRoles = () => cur.ci_roles || ["output"];
 const hasHidden = () => ciRoles().includes("hidden");
 
-// Decoded per-module caches for the current payload (u8 CI per role, f32 inner, f32 mean CI).
+// Decoded per-module caches for the current payload (u8 CI per role, f32 inner, f32 mean CI),
+// each carrying the (n_a, n_b) of the grids it holds. A SPLIT slice (`thumb` present: a grid
+// wider than 100 on a side) holds pooled thumbnails here; its full-resolution grids live in
+// one file per module, loaded on demand for the detail drawer (`fullData`).
 const dec = new Map();
 function moduleData(mi) {
   const key = curKey + ":" + mi;
   if (!dec.has(key)) {
-    const m = cur.modules[mi];
+    const m = cur.modules[mi], t = cur.thumb;
+    const [ci, ciHidden, inner] = t ? [m.ci_thumb, m.ci_hidden_thumb, m.inner_thumb] : [m.ci, m.ci_hidden, m.inner];
     dec.set(key, {
       meanCi: b64F32(m.mean_ci),
       meanCiHidden: m.mean_ci_hidden ? b64F32(m.mean_ci_hidden) : null,
-      ci: m.ci ? b64Bytes(m.ci) : null,
-      ciHidden: m.ci_hidden ? b64Bytes(m.ci_hidden) : null,
-      inner: m.inner ? b64F16(m.inner) : null,
+      ci: ci ? b64Bytes(ci) : null,
+      ciHidden: ciHidden ? b64Bytes(ciHidden) : null,
+      inner: inner ? b64F16(inner) : null,
+      n_a: t ? t.n_a : cur.n_a, n_b: t ? t.n_b : cur.n_b,
     });
   }
   return dec.get(key);
+}
+
+// Full-resolution module grids of a split slice, keyed "slice:name". The module file calls
+// registerABGridModule, which re-renders the drawer if that module is still being inspected.
+const full = new Map(), requested = new Set(), FULL_KEEP = 6;
+window.registerABGridModule = doc => {
+  const key = doc.slice + ":" + doc.name, p = cache.get(doc.slice);
+  if (!p) return;
+  full.set(key, {
+    ci: b64Bytes(doc.ci), ciHidden: doc.ci_hidden ? b64Bytes(doc.ci_hidden) : null,
+    inner: b64F16(doc.inner), n_a: p.n_a, n_b: p.n_b,
+  });
+  requested.delete(key);
+  while (full.size > FULL_KEEP) full.delete(full.keys().next().value);
+  if (curKey === doc.slice && selected && cur.modules[selected.mi].name === doc.name) renderDetail();
+};
+function fullData(mi) {
+  if (!cur.thumb) return moduleData(mi);
+  const m = cur.modules[mi], key = curKey + ":" + m.name;
+  if (full.has(key)) return full.get(key);
+  if (!requested.has(key)) {
+    requested.add(key);
+    const tag = document.createElement("script");
+    tag.src = m.file;
+    tag.onload = () => tag.remove();
+    tag.onerror = () => { requested.delete(key); $("readout").textContent = `failed to load ${m.file}`; };
+    document.body.append(tag);
+  }
+  return null;
 }
 
 const lerp = (a, b, t) => a + (b - a) * t;
@@ -152,14 +191,14 @@ const DIV_STOPS = [[5,48,97],[146,197,222],[247,247,247],[244,165,130],[103,0,31
 
 function pxValue() { return Math.max(1, +$("px").value | 0); }
 
-// value accessor into [comp, pos, op, a, b] flattened grids
-function gridIndex(si, pi, oi, ai, bi) {
+// value accessor into [comp, pos, op, a, b] flattened grids of `dims.n_a x dims.n_b`
+function gridIndex(si, pi, oi, ai, bi, dims) {
   const nPos = cur.positions.length, nOps = cur.ops.length;
-  return (((si * nPos + pi) * nOps + oi) * cur.n_a + ai) * cur.n_b + bi;
+  return (((si * nPos + pi) * nOps + oi) * dims.n_a + ai) * dims.n_b + bi;
 }
 
-function drawGrid(canvas, getVal, colour, px) {
-  const { n_a, n_b } = cur;
+function drawGrid(canvas, getVal, colour, px, dims) {
+  const { n_a, n_b } = dims;
   canvas.width = n_b; canvas.height = n_a;
   canvas.style.width = n_b * px + "px"; canvas.style.height = n_a * px + "px";
   const g = canvas.getContext("2d"), img = g.createImageData(n_b, n_a);
@@ -173,8 +212,8 @@ function drawGrid(canvas, getVal, colour, px) {
 
 function innerScale(data, si, pi, oi) {
   let mx = 0;
-  for (let ai = 0; ai < cur.n_a; ai++) for (let bi = 0; bi < cur.n_b; bi++) {
-    const v = data.inner[gridIndex(si, pi, oi, ai, bi)];
+  for (let ai = 0; ai < data.n_a; ai++) for (let bi = 0; bi < data.n_b; bi++) {
+    const v = data.inner[gridIndex(si, pi, oi, ai, bi, data)];
     if (!Number.isNaN(v)) mx = Math.max(mx, Math.abs(v));
   }
   return mx || 1;
@@ -187,22 +226,32 @@ const mergeRgb = ([out, hid]) => [
   Math.round(255 * (1 - hid)), Math.round(255 * (1 - out)), Math.round(255 * (1 - hid)),
 ];
 
-function tileDrawers(mi, si, pi, oi) {
-  const data = moduleData(mi);
-  const at = (ai, bi) => gridIndex(si, pi, oi, ai, bi);
+function tileDrawers(mi, si, pi, oi, data = moduleData(mi)) {
+  const at = (ai, bi) => gridIndex(si, pi, oi, ai, bi, data);
   const ciVal = (ai, bi) => data.ci[at(ai, bi)] / 255;
   const ciHiddenVal = data.ciHidden ? (ai, bi) => data.ciHidden[at(ai, bi)] / 255 : null;
   const innerVal = (ai, bi) => data.inner[at(ai, bi)];
   const mx = data.inner ? innerScale(data, si, pi, oi) : 1;
   const drawers = {
-    ci: cv => drawGrid(cv, ciVal, v => ramp(CI_STOPS, v), cv.dataset.px | 0),
-    inner: cv => drawGrid(cv, innerVal, v => ramp(DIV_STOPS, 0.5 + v / (2 * mx)), cv.dataset.px | 0),
-    ciVal, ciHiddenVal, innerVal,
+    ci: cv => drawGrid(cv, ciVal, v => ramp(CI_STOPS, v), cv.dataset.px | 0, data),
+    inner: cv => drawGrid(cv, innerVal, v => ramp(DIV_STOPS, 0.5 + v / (2 * mx)), cv.dataset.px | 0, data),
+    ciVal, ciHiddenVal, innerVal, innerAliveVal: null,
   };
+  // The alive-only grid at the same resolution as `data` (thumbnail or full).
+  const alive = aliveColumn(cur.modules[mi].name, cur.modules[mi].saved[si], data);
+  if (alive) {
+    drawers.innerAliveVal = alive.val;
+    drawers.inner_alive = cv =>
+      drawGrid(cv, alive.val, v => ramp(DIV_STOPS, 0.5 + v / (2 * alive.mx)), cv.dataset.px | 0, data);
+  } else {
+    // Not loaded, or never on at this position in the alive-only model (not cached): grey.
+    drawers.innerAliveVal = () => NaN;
+    drawers.inner_alive = cv => drawGrid(cv, () => NaN, () => [0, 0, 0], cv.dataset.px | 0, data);
+  }
   if (ciHiddenVal) {
-    drawers.ci_hidden = cv => drawGrid(cv, ciHiddenVal, v => ramp(CI_STOPS, v), cv.dataset.px | 0);
+    drawers.ci_hidden = cv => drawGrid(cv, ciHiddenVal, v => ramp(CI_STOPS, v), cv.dataset.px | 0, data);
     drawers.ci_merge = cv =>
-      drawGrid(cv, (ai, bi) => [ciVal(ai, bi), ciHiddenVal(ai, bi)], mergeRgb, cv.dataset.px | 0);
+      drawGrid(cv, (ai, bi) => [ciVal(ai, bi), ciHiddenVal(ai, bi)], mergeRgb, cv.dataset.px | 0, data);
   }
   return drawers;
 }
@@ -306,16 +355,23 @@ function renderDetail() {
   document.body.classList.add("drawer-open");
   const pi = 0, oi = 0;
   $("dtitle").textContent = `${selected.name} · component ${selected.c} · op ${cur.ops[oi]} · position ${positionLabel(cur.positions[pi])}`;
-  const drawers = tileDrawers(selected.mi, selected.si, pi, oi);
+  // A split slice draws the pooled thumbnail until the module's full grids arrive.
+  const fullGrids = fullData(selected.mi), loading = !fullGrids;
+  const drawers = tileDrawers(selected.mi, selected.si, pi, oi, fullGrids || moduleData(selected.mi));
+  const factor = cur.thumb && !loading ? cur.thumb.factor : 1;
+  $("readout").textContent = loading ? "loading the full-resolution grid…" : "";
   $("dhidpane").style.display = drawers.ci_hidden ? "block" : "none";
   $("dmergepane").style.display = drawers.ci_merge ? "block" : "none";
+  $("dalivepane").style.display = aliveSlice ? "block" : "none";
   const panes = [["dci", "ci"], ["dinner", "inner"]];
+  if (aliveSlice) panes.push(["dinneralive", "inner_alive"]);
   if (drawers.ci_hidden) panes.push(["dcihidden", "ci_hidden"], ["dcimerge", "ci_merge"]);
   for (const [id, kind] of panes) {
     const cv = $(id);
-    cv.dataset.px = pxValue() * 2;
+    cv.dataset.px = Math.max(1, Math.round(pxValue() * 2 / factor));
     drawers[kind](cv);
     cv.onmousemove = ev => {
+      if (loading) return;
       const r = cv.getBoundingClientRect();
       const bi = Math.floor((ev.clientX - r.left) / r.width * cur.n_b);
       const ai = Math.floor((ev.clientY - r.top) / r.height * cur.n_a);
@@ -323,7 +379,8 @@ function renderDetail() {
       const a = cur.a_min + ai, b = cur.b_min + bi;
       const hid = drawers.ciHiddenVal ? `   CI_hidden=${drawers.ciHiddenVal(ai, bi).toFixed(3)}` : "";
       $("readout").textContent =
-        `a=${a} ${cur.ops[oi]} b=${b}   CI=${drawers.ciVal(ai, bi).toFixed(3)}${hid}   inner=${drawers.innerVal(ai, bi).toFixed(4)}`;
+        `a=${a} ${cur.ops[oi]} b=${b}   CI=${drawers.ciVal(ai, bi).toFixed(3)}${hid}   inner=${drawers.innerVal(ai, bi).toFixed(4)}` +
+        (aliveSlice ? `   inner_alive=${drawers.innerAliveVal(ai, bi).toFixed(4)}` : "");
     };
   }
   // Keep the gallery clear of the drawer (its width follows the canvas size).
@@ -341,23 +398,215 @@ document.addEventListener("click", ev => {
 
 function render() { renderGallery(); renderDetail(); }
 
+// ---- alive-only inner activations, read straight from the CI filter's activation dataset
+// (`<filter>/dataset/`, written by `ci_filter/scripts/collect_dataset.py`). The browser reads
+// the picked folder's files by byte range (File.slice), so nothing is converted or rewritten:
+// `decomposed/inner_pos<t>.npy` (N, A_t) when written `--per_position` (columns
+// `index.npz` pos<t>_cols among the A alive components), else `decomposed/inner.npy`
+// (N, T, A). Values are divided by ||V_c|| (`comp_v_norm`) to match the grids' full-model
+// inner, `(x . V_c) / ||V_c||`. Components never on at the position in the alive-only model
+// have no cached column and draw grey.
+let dataset = null;     // {files, index: {name: array}, colOf: Map("site:c" -> alive column)}
+let aliveSlice = null;  // {key, cols: Map("site:c" -> {data, f16}), mx: Map}
+
+const F16 = (() => {    // fp16 bit pattern -> float32
+  const t = new Float32Array(65536);
+  for (let h = 0; h < 65536; h++) {
+    const sgn = (h & 0x8000) ? -1 : 1, exp = (h >> 10) & 0x1f, frac = h & 0x3ff;
+    t[h] = exp === 0 ? sgn * frac * 2 ** -24 : exp === 31 ? (frac ? NaN : sgn * Infinity)
+      : sgn * (1 + frac / 1024) * 2 ** (exp - 15);
+  }
+  return t;
+})();
+
+// .npy header -> {descr, shape, offset}
+function npyHeader(bytes) {
+  const magic = String.fromCharCode(...bytes.slice(1, 6));
+  if (magic !== "NUMPY") throw new Error("not a .npy file");
+  const major = bytes[6], dv = new DataView(bytes.buffer, bytes.byteOffset);
+  const hlen = major === 1 ? dv.getUint16(8, true) : dv.getUint32(8, true);
+  const start = major === 1 ? 10 : 12;
+  const text = new TextDecoder("latin1").decode(bytes.slice(start, start + hlen));
+  const descr = text.match(/'descr':\s*'([^']+)'/)[1];
+  if (/'fortran_order':\s*True/.test(text)) throw new Error("fortran-order .npy unsupported");
+  const shape = text.match(/'shape':\s*\(([^)]*)\)/)[1].split(",").map(x => x.trim())
+    .filter(x => x).map(Number);
+  return { descr, shape, offset: start + hlen };
+}
+
+function npyArray(bytes) {
+  const { descr, shape, offset } = npyHeader(bytes);
+  const body = bytes.slice(offset);   // copy: aligned buffer
+  const n = shape.reduce((x, y) => x * y, 1);
+  const kind = descr.slice(1);
+  if (kind === "f4") return new Float32Array(body.buffer, 0, n);
+  if (kind === "i4") return new Int32Array(body.buffer, 0, n);
+  if (kind === "i1") return new Int8Array(body.buffer, 0, n);
+  if (kind === "i8") return Array.from(new BigInt64Array(body.buffer, 0, n), Number);
+  if (kind[0] === "U") {             // fixed-width UTF-32LE strings
+    const w = +kind.slice(1), u32 = new Uint32Array(body.buffer, 0, n * w), out = [];
+    for (let i = 0; i < n; i++) {
+      let str = "";
+      for (let k = 0; k < w; k++) { const cp = u32[i * w + k]; if (!cp) break; str += String.fromCodePoint(cp); }
+      out.push(str);
+    }
+    return out;
+  }
+  throw new Error("unsupported dtype " + descr);
+}
+
+// np.savez = an uncompressed zip: walk the central directory.
+async function readNpz(file) {
+  const buf = new Uint8Array(await file.arrayBuffer()), dv = new DataView(buf.buffer);
+  let eocd = buf.length - 22;
+  while (eocd >= 0 && dv.getUint32(eocd, true) !== 0x06054b50) eocd--;
+  const nEntries = dv.getUint16(eocd + 10, true);
+  let p = dv.getUint32(eocd + 16, true);
+  const out = {};
+  for (let i = 0; i < nEntries; i++) {
+    const method = dv.getUint16(p + 10, true), size = dv.getUint32(p + 20, true);
+    const nameLen = dv.getUint16(p + 28, true), extraLen = dv.getUint16(p + 30, true);
+    const commentLen = dv.getUint16(p + 32, true), local = dv.getUint32(p + 42, true);
+    const name = new TextDecoder().decode(buf.slice(p + 46, p + 46 + nameLen));
+    if (method !== 0) throw new Error("compressed npz entry " + name);
+    const data = local + 30 + dv.getUint16(local + 26, true) + dv.getUint16(local + 28, true);
+    out[name.replace(/\.npy$/, "")] = npyArray(buf.slice(data, data + size));
+    p += 46 + nameLen + extraLen + commentLen;
+  }
+  return out;
+}
+
+async function pickDataset(fileList) {
+  const files = new Map();
+  for (const f of fileList) files.set(f.webkitRelativePath.split("/").slice(1).join("/"), f);
+  if (!files.has("index.npz")) { $("dsstatus").textContent = "no index.npz in that folder"; return; }
+  $("dsstatus").textContent = "reading index.npz …";
+  const index = await readNpz(files.get("index.npz"));
+  const colOf = new Map();
+  index.comp_site.forEach((site, j) => colOf.set(`${site}:${index.comp_index[j]}`, j));
+  dataset = { files, index, colOf };
+  $("dsstatus").textContent = `${index.comp_site.length} alive components`;
+  setPayload(curKey, cur);
+}
+
+const OP_CODES = { "+": 0, "-": 1, "×": 2 };
+
+async function loadAliveSlice() {
+  aliveSlice = null;
+  if (!dataset || !cur) return;
+  const key = curKey, t = cur.positions[0], code = OP_CODES[cur.ops[0]];
+  const { files, index, colOf } = dataset;
+  const op = index.op, n = cur.n_a * cur.n_b;
+  const first = op.indexOf(code);
+  if (first < 0 || index.a[first] !== cur.a_min || index.b[first] !== cur.b_min ||
+      first + n > op.length || op[first + n - 1] !== code) {
+    $("dsstatus").textContent = `dataset has no ${cur.ops[0]} block matching this grid`; return;
+  }
+  // File layout: one row per prompt, `rowLen` values; column of alive component j at
+  // `posCol(j)` (or absent).
+  let file, posCol, rowLen;
+  if (files.has(`decomposed/inner_pos${t}.npy`)) {
+    file = files.get(`decomposed/inner_pos${t}.npy`);
+    const cols = index[`pos${t}_cols`], at = new Map();
+    cols.forEach((j, k) => at.set(j, k));
+    posCol = j => at.get(j);
+  } else if (files.has("decomposed/inner.npy")) {
+    file = files.get("decomposed/inner.npy");
+    posCol = j => t * index.comp_site.length + j;
+  } else { $("dsstatus").textContent = "no decomposed/inner*.npy"; return; }
+  const head = npyHeader(new Uint8Array(await file.slice(0, 4096).arrayBuffer()));
+  rowLen = head.shape.slice(1).reduce((x, y) => x * y, 1);
+  const f16 = head.descr.slice(1) === "f2", item = f16 ? 2 : 4;
+  // The components this slice shows, with a cached column.
+  const want = [];
+  cur.modules.forEach(m => m.saved.forEach(c => {
+    const j = colOf.get(`${m.name}:${c}`);
+    const k = j === undefined ? undefined : posCol(j);
+    if (k !== undefined) want.push({ id: `${m.name}:${c}`, k, vnorm: index.comp_v_norm[j] });
+  }));
+  const cols = new Map(want.map(w => [w.id, f16 ? new Uint16Array(n) : new Float32Array(n)]));
+  const rowBytes = rowLen * item, rowsPer = Math.max(1, Math.floor((64 << 20) / rowBytes));
+  for (let r0 = 0; r0 < n; r0 += rowsPer) {
+    if (curKey !== key) return;             // slice changed: abandon
+    const r1 = Math.min(n, r0 + rowsPer), off = head.offset + (first + r0) * rowBytes;
+    const buf = await file.slice(off, off + (r1 - r0) * rowBytes).arrayBuffer();
+    const view = f16 ? new Uint16Array(buf) : new Float32Array(buf);
+    for (const w of want) {
+      const dst = cols.get(w.id);
+      for (let r = r0, src = w.k; r < r1; r++, src += rowLen) dst[r] = view[src];
+    }
+    $("dsstatus").textContent = `reading ${cur.ops[0]} pos ${t}: ${Math.round(100 * r1 / n)}%`;
+  }
+  const vnorm = new Map(want.map(w => [w.id, Math.max(w.vnorm, 1e-12)]));
+  const mx = new Map();
+  for (const [id, data] of cols) {
+    let m = 0;
+    for (let i = 0; i < n; i++) m = Math.max(m, Math.abs(f16 ? F16[data[i]] : data[i]));
+    mx.set(id, m / vnorm.get(id) || 1);
+  }
+  // Pooled thumbnails (factor x factor cell means, partial edge blocks average what they
+  // have), matching the slice's own gallery tiles.
+  const thumbs = new Map(), t = cur.thumb;
+  if (t) {
+    const nb = cur.n_b, f = t.factor;
+    for (const [id, data] of cols) {
+      const sum = new Float32Array(t.n_a * t.n_b), cnt = new Float32Array(t.n_a * t.n_b);
+      for (let ai = 0; ai < cur.n_a; ai++) for (let bi = 0; bi < nb; bi++) {
+        const o = Math.floor(ai / f) * t.n_b + Math.floor(bi / f), v = data[ai * nb + bi];
+        sum[o] += f16 ? F16[v] : v; cnt[o] += 1;
+      }
+      for (let i = 0; i < sum.length; i++) sum[i] /= cnt[i];
+      thumbs.set(id, sum);
+    }
+  }
+  aliveSlice = { key, cols, thumbs, f16, vnorm, mx };
+  $("dsstatus").textContent = `alive-only inner: ${cols.size} components cached at this slice`;
+  render();
+}
+
+function aliveColumn(site, c, dims) {
+  if (!aliveSlice || aliveSlice.key !== curKey) return null;
+  const id = `${site}:${c}`, data = aliveSlice.cols.get(id);
+  if (!data) return null;
+  const s = 1 / aliveSlice.vnorm.get(id), nb = dims.n_b;
+  let val;
+  if (dims.n_a !== cur.n_a || dims.n_b !== cur.n_b) {
+    const th = aliveSlice.thumbs.get(id);
+    val = (ai, bi) => th[ai * nb + bi] * s;
+  } else val = aliveSlice.f16 ? (ai, bi) => F16[data[ai * nb + bi]] * s : (ai, bi) => data[ai * nb + bi] * s;
+  return { val, mx: aliveSlice.mx.get(id) };
+}
+
+// `alive.html` (the same page, written with ALIVE_MODE set) shows the dataset picker.
+if (window.ALIVE_MODE) $("dsctl").style.display = "";
+$("dspick").onclick = () => $("dsdir").click();
+$("dsdir").onchange = ev => pickDataset(ev.target.files).catch(e => { $("dsstatus").textContent = "error: " + e.message; });
+
 const VIEW_OPTIONS = {
   ci_merge: "CI merge (out/hid)",
   ci: "CI (output)",
   ci_hidden: "CI (hidden)",
-  inner: "inner act",
+  inner: "inner act (full model)",
+  inner_alive: "inner act (alive-only model)",
 };
 
+const AXIS_NOTE = document.querySelector(".axis-note").textContent;
 function setPayload(key, payload) {
   cur = payload;
   curKey = key;
   dec.clear();
+  const t = payload.thumb;
+  document.querySelector(".axis-note").textContent = AXIS_NOTE + (t
+    ? ` — gallery tiles are ${t.factor}×${t.factor}-cell means of the ${payload.n_a}×${payload.n_b} grid; click one for the full resolution`
+    : "");
   const viewSel = $("view"), keepView = viewSel.value;
-  const views = hasHidden() ? ["ci_merge", "ci", "ci_hidden", "inner"] : ["ci", "inner"];
+  const views = (hasHidden() ? ["ci_merge", "ci", "ci_hidden", "inner"] : ["ci", "inner"])
+    .concat(dataset ? ["inner_alive"] : []);
   viewSel.innerHTML = views.map(v => `<option value="${v}">${VIEW_OPTIONS[v]}</option>`).join("");
   viewSel.value = views.includes(keepView) ? keepView : views[0];
   $("count").textContent = "";
   render();
+  loadAliveSlice();
 }
 
 function loadSelected() {

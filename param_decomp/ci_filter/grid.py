@@ -12,6 +12,7 @@ saves (their union), which the host splits per position."""
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import equinox as eqx
 import jax
@@ -33,12 +34,12 @@ from param_decomp.core.model import PlacedModel
 from param_decomp.experiments.lm.ab_grid_dataset import (
     ABGridSnapshot,
     ab_grid_payload,
+    ab_grid_split_payload,
     saved_indices,
+    thumbnail_factor,
 )
 
 APPLET = Path(__file__).parent / "grids_app.html"
-ALIVE_APPLET = Path(__file__).parent / "grids_alive_app.html"
-"""The same applet plus the alive-only model's inner activations, read from `dataset/`."""
 GATHER_INDEX_MULTIPLE = 64
 
 
@@ -180,19 +181,66 @@ def slice_filename(operation: str, position: int) -> str:
     return f"{operation}_pos{position}.js"
 
 
+def module_filename(operation: str, position: int, site: str) -> str:
+    """A split slice's full-resolution module file, relative to `ab_grids/`."""
+    return f"{operation}_pos{position}/{site}.js"
+
+
+def slice_key(symbol: str, position: int) -> str:
+    """The applet's slice key (manifest `files` key, `registerABGridModule` doc `slice`)."""
+    return f"{symbol}:{position}"
+
+
+def write_slice(
+    grid_dir: Path,
+    operation: str,
+    symbol: str,
+    position: int,
+    index: dict[str, Any],
+    modules: dict[str, dict[str, Any]],
+) -> None:
+    """One slice file; a split slice (`modules` non-empty) writes its module files FIRST, so
+    the index never names a module file that is still missing."""
+    for site, module in modules.items():
+        path = grid_dir / module_filename(operation, position, site)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        doc = module | {"slice": slice_key(symbol, position)}
+        path.write_text(f"window.registerABGridModule({json.dumps(doc)});")
+    for entry in index["modules"]:
+        if entry["name"] in modules:
+            entry["file"] = module_filename(operation, position, entry["name"])
+    (grid_dir / slice_filename(operation, position)).write_text(
+        f"window.registerABGridSlice({json.dumps(index)});"
+    )
+
+
+def alive_page() -> str:
+    """The applet with its alive-only-inner dataset reader switched on."""
+    page = APPLET.read_text()
+    anchor = '<script src="manifest.js"></script>'
+    assert page.count(anchor) == 1
+    return page.replace(anchor, f"<script>window.ALIVE_MODE = true;</script>\n{anchor}")
+
+
 def write_operation(
     grid_dir: Path, slices: GridSlices, pool: ArithmeticPool, step: int, mean_ci_floor: float
 ) -> dict[str, int]:
-    """Write one file per position of this operation; returns saved-component counts."""
+    """Write one file per position of this operation; returns saved-component counts. A grid
+    wider than `THUMBNAIL_MAX_SIDE` on a side is written SPLIT (`ab_grid_split_payload`):
+    pooled thumbnails in the slice file, full grids in one file per module."""
     grid_dir.mkdir(parents=True, exist_ok=True)
+    block = slices.block
     counts: dict[str, int] = {}
     for p, snapshot in enumerate(slices.snapshots):
-        payload = ab_grid_payload(
-            snapshot, slices.block.grid, (p,), pool.seq_len, step, mean_ci_floor
+        args = (snapshot, block.grid, (p,), pool.seq_len, step, mean_ci_floor)
+        if thumbnail_factor(block.grid) > 1:
+            index, modules = ab_grid_split_payload(*args)
+        else:
+            index, modules = ab_grid_payload(*args), {}
+        write_slice(grid_dir, block.operation, block.grid.symbol, p, index, modules)
+        counts[slice_filename(block.operation, p)] = int(
+            sum(ids.size for ids in snapshot.saved.values())
         )
-        name = slice_filename(slices.block.operation, p)
-        (grid_dir / name).write_text(f"window.registerABGridSlice({json.dumps(payload)});")
-        counts[name] = int(sum(ids.size for ids in snapshot.saved.values()))
     return counts
 
 
@@ -212,4 +260,4 @@ def write_applet(grid_dir: Path, pool: ArithmeticPool, title: str) -> None:
     }
     (grid_dir / "manifest.js").write_text(f"window.AB_GRID_SLICES = {json.dumps(manifest)};\n")
     (grid_dir / "index.html").write_bytes(APPLET.read_bytes())
-    (grid_dir / "alive.html").write_bytes(ALIVE_APPLET.read_bytes())
+    (grid_dir / "alive.html").write_text(alive_page())
