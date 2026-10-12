@@ -37,6 +37,8 @@ from param_decomp.experiments.lm.ab_grid_dataset import (
 )
 
 APPLET = Path(__file__).parent / "grids_app.html"
+ALIVE_APPLET = Path(__file__).parent / "grids_alive_app.html"
+"""The same applet plus the alive-only model's inner activations, read from `dataset/`."""
 GATHER_INDEX_MULTIPLE = 64
 
 
@@ -210,3 +212,4 @@ def write_applet(grid_dir: Path, pool: ArithmeticPool, title: str) -> None:
     }
     (grid_dir / "manifest.js").write_text(f"window.AB_GRID_SLICES = {json.dumps(manifest)};\n")
     (grid_dir / "index.html").write_bytes(APPLET.read_bytes())
+    (grid_dir / "alive.html").write_bytes(ALIVE_APPLET.read_bytes())

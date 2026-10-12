@@ -33,7 +33,8 @@ switch off per prompt. Target stream only: no non-target pass, no hidden-activat
   masks, weight delta off.
 - `grid.py` + `grids_app.html` — the `(a, b)`-grid applet over every operation x position,
   one lazily loaded file per slice (payload format of `experiments/lm/ab_grid_dataset.py`).
-  Its "pick dataset folder" button reads a filter's `dataset/` (`scripts/collect_dataset.py`) by
+  `grids_alive_app.html` (written beside it as `alive.html`) is the same applet whose "pick
+  dataset folder" button reads a filter's `dataset/` (`scripts/collect_dataset.py`) by
   byte range in the browser and adds the ALIVE-ONLY model's inner activations (rounded CI, delta
   off, normalized by ||V_c||) as a view and a detail pane; nothing is converted.
 - `checkpoint.py` — orbax save/restore of the fine-tuned CI fn (chains objective 2 onto 1), and
