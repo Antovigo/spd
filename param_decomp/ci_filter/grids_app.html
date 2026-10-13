@@ -546,13 +546,13 @@ async function loadAliveSlice() {
   }
   // Pooled thumbnails (factor x factor cell means, partial edge blocks average what they
   // have), matching the slice's own gallery tiles.
-  const thumbs = new Map(), t = cur.thumb;
-  if (t) {
-    const nb = cur.n_b, f = t.factor;
+  const thumbs = new Map(), tb = cur.thumb;
+  if (tb) {
+    const nb = cur.n_b, f = tb.factor;
     for (const [id, data] of cols) {
-      const sum = new Float32Array(t.n_a * t.n_b), cnt = new Float32Array(t.n_a * t.n_b);
+      const sum = new Float32Array(tb.n_a * tb.n_b), cnt = new Float32Array(tb.n_a * tb.n_b);
       for (let ai = 0; ai < cur.n_a; ai++) for (let bi = 0; bi < nb; bi++) {
-        const o = Math.floor(ai / f) * t.n_b + Math.floor(bi / f), v = data[ai * nb + bi];
+        const o = Math.floor(ai / f) * tb.n_b + Math.floor(bi / f), v = data[ai * nb + bi];
         sum[o] += f16 ? F16[v] : v; cnt[o] += 1;
       }
       for (let i = 0; i < sum.length; i++) sum[i] /= cnt[i];
