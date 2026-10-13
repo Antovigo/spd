@@ -98,13 +98,13 @@ def main() -> None:
         for col in np.concatenate([rcols, wcols]):
             jsonp(pdir / f"grid_{keys[col]}.js", "rwGrid", f"{t}:{keys[col]}",
                   grid_doc(a[:, col] * m[:, col], m[:, col]))  # fmt: skip
-        score = at["I"]
+        score = at["score"]
         share = score / np.maximum(score.sum(1, keepdims=True), 1e-30)
         # k at the target, or (target never reached) the k of the best held-out R^2
-        ks_grid, r2_ig = at["ks"], np.nan_to_num(at["r2_ig"], nan=-np.inf)
-        k_of = {tag: np.where(at[f"k_{tag}"] > 0, at[f"k_{tag}"], ks_grid[np.argmax(r2_ig, 1)])
+        ks_grid, r2_abl = at["ks"], np.nan_to_num(at["r2_abl"], nan=-np.inf)
+        k_of = {tag: np.where(at[f"k_{tag}"] > 0, at[f"k_{tag}"], ks_grid[np.argmax(r2_abl, 1)])
                 for tag in ("r2_90", "r2_99")}  # fmt: skip
-        supports = {tag: [list(map(int, at["rank_ig"][w, : int(k_of[tag][w])])) for w in range(W)]
+        supports = {tag: [list(map(int, at["rank_abl"][w, : int(k_of[tag][w])])) for w in range(W)]
                     for tag in k_of}  # fmt: skip
         Ug = np.stack([u_of(c) for c in rcols[:rg]])
         Uu = np.stack([u_of(c) for c in rcols[rg:]])
@@ -159,10 +159,13 @@ def main() -> None:
                 "reached99": bool(at["k_r2_99"][w] > 0), "sup90": supports["r2_90"][w],
                 "sup99": supports["r2_99"][w],
                 "share": {int(r): float(share[w, r]) for r in sup},
-                "r2_ig": np.nan_to_num(at["r2_ig"][w], nan=-1).round(4).tolist(),
+                "r2_abl": np.nan_to_num(at["r2_abl"][w], nan=-1).round(4).tolist(),
                 "r2_wt": np.nan_to_num(at["r2_wt"][w], nan=-1).round(4).tolist(),
                 "greedy": None if g is None else {"chosen": g["chosen"], "r2": [round(x, 4) for x in g["r2_held"]]},
                 "r2_sample_support": r2_sample,
+                "offsets": [{"r": int(r), "frac_zero": float(at["frac_zero"][w, r]),
+                             "frac_mean": float(at["frac_mean"][w, r])}
+                            for r in np.flatnonzero(at["offset"][w])],
             })  # fmt: skip
             max_dev = max(max_dev, 0.0 if r2_sample is None else 1 - r2_sample)
         readers = []
@@ -183,6 +186,7 @@ def main() -> None:
                 "mean_abs": float(np.abs(s[:, r]).mean()), "std": float(s[:, r].std()),
                 "writers90": [w for w in range(W) if r in supports["r2_90"][w]],
                 "writers99": [w for w in range(W) if r in supports["r2_99"][w]],
+                "offset_for": [int(w) for w in np.flatnonzero(at["offset"][:, r])],
             })  # fmt: skip
         tot = sum(x["write"] for x in writers) or 1.0
         for x in writers:

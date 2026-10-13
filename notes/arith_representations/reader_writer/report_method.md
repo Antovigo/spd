@@ -1,4 +1,4 @@
-# Which readers drive each writer? Exact attributions inside one MLP block of a decomposed model
+# Which readers drive each writer? Exact ablations inside one MLP block of a decomposed model
 
 *Method write-up for the reader → writer analysis of the addsub -08 decomposition, tested on the
 MLP of layer 18. This post explains the method; the results are reported separately once the
@@ -94,66 +94,61 @@ measure as a baseline (section 6).
 can correlate strongly with a writer without the writer using it.
 
 **A single gradient.** The derivative `∂y_w / ∂s_r` at a prompt says how sensitive the writer is
-to a small change of the reader there. It is local: silu is flat for very negative inputs and
-nearly linear for positive ones, so the derivative at one point can badly misrepresent what the
-reader contributes overall.
+to a small change of the reader there. For an up reader it is the whole story: with every other
+reader fixed, `y_w` is a straight-line function of an up reader's activation. For a gate reader
+it is not: silu is flat for very negative inputs, so a gate reader that holds its neurons deep in
+the off region has a near-zero derivative on every prompt even though removing it could switch
+the neurons on. A derivative also ignores how much the reader actually varies.
 
-## 4. Integrated gradients: an exact split of each activation
+## 4. The measure: what is lost when one reader is held at its mean
 
-**Integrated gradients** fixes the last problem. Choose a reference point, here the point where
-every reader is off (`s_r = 0` for all `r`). There `G = H = 0`, so every writer's activation is 0.
-Now move from the reference to the actual prompt along a straight line: scale every reader's
-activation by a factor `λ` that goes from 0 to 1. Accumulate, along the way, how much each
-reader's change contributes to the change of `y_w`:
+We ask the question the analysis is about directly. "Do we need to know reader `r` to predict
+writer `w`?" becomes: if we did not look at `r` on this prompt and used a fixed guess instead,
+how wrong would `y_w` be?
 
-$$ \varphi_r(w) = s_r \int_0^1 \frac{\partial y_w}{\partial s_r}\Big|_{\lambda s}\, d\lambda , $$
+The guess is the reader's mean `s̄_r(w)`, its average activation over the prompts where `w` is
+on. (It depends on `w` because each writer is on for a different set of prompts.) On each prompt
+we replace `s_r` alone by `s̄_r(w)`, keep every other reader at its true value, and recompute the
+writer exactly with the formula of section 2. The change is
 
-where `λ s` means every reader's activation multiplied by `λ`. The key property is
-**completeness**: on every prompt,
+$$ \Delta_r(w) = y_wig(s_r 	o ar s_r(w)ig) - y_w . $$
 
-$$ \sum_r \varphi_r(w) = y_w . $$
-
-So `φ_r(w)` is an exact split of the writer's activation into one share per reader. Nothing is
-left over.
-
-For our MLP the integral has a closed form, because along the path the gate pre-activation is
-`λG` and the up pre-activation is `λH`. With two scalar functions of a real number `ξ`,
-
-$$ P(\xi) = \int_0^1 \mathrm{silu}(\lambda \xi)\, d\lambda , \qquad Q(\xi) = \int_0^1 \lambda\, \mathrm{silu}'(\lambda \xi)\, d\lambda , $$
-
-(`silu'` is the derivative of silu), the attributions are
-
-* for an **up** reader: `φ_r(w) = s_r Σ_n V_w[n] U_r[n] P(G_n)`;
-* for a **gate** reader: `φ_r(w) = s_r Σ_n V_w[n] U_r[n] H_n Q(G_n)`.
-
-Integrating by parts gives `Q(ξ) = (silu(ξ) − P(ξ)) / ξ`, and summing the two lines over all readers
-recovers `Σ_n V_w[n] H_n silu(G_n) = y_w`, which is completeness. In the code, `P` and `Q` are
-evaluated with 24-point Gauss–Legendre quadrature. On a small random test case the closed form
-agreed with a brute-force integral over 2001 path steps to 3 × 10⁻⁶, and completeness holds to
-3 × 10⁻⁷ relative error.
+For an up reader this is exactly `(s̄_r(w) − s_r) Σ_n V_w[n] U_r[n] silu(G_n)`, because `y_w` is
+linear in an up reader's activation. For a gate reader the new gate pre-activation
+`G + (s̄_r(w) − s_r) U_r` goes through silu again. Both are exact; on a small random test case
+the computed changes matched a brute-force recomputation to 2 × 10⁻⁷ relative error.
 
 **A worked example.** Take one gate reader `g` and one up reader `u` and a single neuron with
-`V_w = 1`, `U_g = U_u = 1`. Then `y_w = silu(s_g) s_u`. If `s_g = 3` and `s_u = 2`,
-`y_w = 2 silu(3) ≈ 5.71`. The up reader gets `φ_u = 2 P(3)`; the gate reader gets
-`φ_g = 2 · 3 · Q(3) = 2 (silu(3) − P(3))`. They add up to `2 silu(3)`. The up reader's share
-depends on how open the gate was *on average along the path*, not only at the end.
+`V_w = 1` and `U_g = U_u = 1`, so `y_w = silu(s_g) s_u`. Suppose that over the writer's prompts
+`s_u` varies between −1 and 1 and `s_g` is always −10. Holding `s_u` at its mean (0) changes `y_w`
+by `−silu(−10) s_u ≈ 0.00045 s_u`, a tiny amount because the gate is closed. Holding `s_g` at its
+mean (−10) changes nothing. Neither reader's *variation* matters: this writer is always close to
+0. Now suppose `s_g` instead varies between 2 and 4. Holding it at 3 changes `y_w` by
+`(silu(3) − silu(s_g)) s_u`, which is large whenever `s_u` is far from 0, so the gate reader
+matters, and so does the up reader.
 
-## 5. From attributions to a score per reader-writer pair
+## 5. From single-reader changes to a ranking, and offset readers
 
-A writer is only written into the stream when it is on, so we only care about prompts where
-`m_w = 1`. Over those prompts we average the squared attribution, and normalise per writer:
+Over the prompts where the writer is on (a writer only reaches the residual stream when it is
+on), we average the squared change and normalise per writer:
 
-$$ \text{score}(r, w) = \mathbb{E}\big[\varphi_r(w)^2 \mid m_w = 1\big], \qquad \text{share}(r, w) = \frac{\text{score}(r, w)}{\sum_{r'} \text{score}(r', w)} . $$
+$$ 	ext{score}(r, w) = \mathbb{E}ig[\Delta_r(w)^2 \mid m_w = 1ig], \qquad 	ext{share}(r, w) = rac{	ext{score}(r, w)}{\sum_{r'} 	ext{score}(r', w)} . $$
 
-Here `𝔼[· | m_w = 1]` is the average over prompts where the writer is on, and later `Var` is the variance over the same prompts. The square treats positive and negative contributions alike, and it rewards readers that
-contribute a lot on some prompts even when they cancel on average. Readers are ranked, per
-writer, by this score. The averages use a random half of the 320,000 prompts (the **fit half**);
-the other half is kept for testing.
+Here `𝔼[· | m_w = 1]` is the average over prompts where the writer is on, and `Var` below is the
+variance over the same prompts. Readers are ranked, per writer, by this score. The averages use a
+random half of the 320,000 prompts (the **fit half**); the other half is kept for testing.
 
-**Constant readers.** Many gate and up readers take nearly the same value on every prompt. They
-are central to the computation: they set the operating point of the neurons, much like a bias.
-Because the reference point of integrated gradients is "everything off", a large constant reader
-gets a large attribution and a high rank, so the ranking counts it.
+**Offset readers.** Many gate and up readers take nearly the same value on every prompt. They
+are necessary, since they set the operating point of the neurons much like a bias, but their
+variation carries no information, so they score near 0 and leave the ranking. To keep track of
+them we also switch each reader off (`s_r → 0`) and measure the squared change
+`𝔼[(y_w(s_r → 0) − y_w)² | m_w = 1]`. A reader is an **offset reader** of writer `w` when
+
+* holding it at its mean costs less than 1 % of `Var(y_w)`, and
+* switching it off costs more than 1 % of `𝔼[y_w² | m_w = 1]`.
+
+Both thresholds are first guesses, to be set from the layer-18 results. In the predictor of
+section 7, offset readers are folded into the constant offsets.
 
 ## 6. Checking that the top readers are enough
 
@@ -177,21 +172,21 @@ its top `k` readers for the smallest `k` reaching `R²_k ≥ 0.9`; we also recor
 for `R²_k ≥ 0.99`. A small support confirms the "few readers per writer" expectation for that
 writer; a large one refutes it. When a target is never reached, the writer is flagged.
 
-Note that in this test a reader that is truly constant costs nothing to leave out, since its mean
-equals its value. Constant readers that rank high still take a place in the support, so the
-support size counts them too.
+The ranking and this test measure the same thing for one reader at a time. They differ when
+several readers are left out together: their errors can add up or cancel, and a reader can be
+replaceable only because another one is kept. The `R²_k` curve measures that.
 
 Two comparisons calibrate the ranking:
 
 * **Weights-only ranking**: score `(r, w)` by the reader's typical size times the overlap of the
   vectors, `rms(s_r) · ‖V_w ⊙ U_r‖`, where `rms` is the root-mean-square over the writer's on
-  prompts and `‖·‖` the Euclidean length. If the integrated-gradients ranking reaches a given
+  prompts and `‖·‖` the Euclidean length. If the mean-ablation ranking reaches a given
   `R²` with far fewer readers, the data-dependent part of the score is doing real work.
 * **Greedy subset search**: for the 30 writers with the largest contribution to the block's
   output, build the support one reader at a time, each time adding the reader that most improves
   `R²` (fit on 1,500 prompts, tested on held-out prompts), up to 15 readers. This is close to the
-  best possible subset of each size. If the integrated-gradients curve sits close to the greedy
-  curve, the cheap ranking is near-optimal.
+  best possible subset of each size. If the mean-ablation curve sits close to the greedy
+  curve, the single-reader ranking is near-optimal.
 
 ## 7. A compact predictor for each writer
 
@@ -215,7 +210,7 @@ An interactive page shows the result for one block:
 * **Writer view.** Pick a writer. The page shows its activation over the full 400 × 400 grid of
   operand pairs, one grid for `a + b` and one for `a − b` (rows `a` = 1 to 400 from top to bottom,
   columns `b` = 1 to 400 from left to right, hatched where the writer is off), and its `R²_k`
-  curve for the three rankings. Below, one card per support reader shows that reader's two grids,
+  curve for the three rankings, and its offset readers. Below, one card per support reader shows that reader's two grids,
   the other writers whose support contains it, and a **pair plot**.
 * **Pair plot.** The horizontal axis is one reader's activation `s_r`, swept over its range on
   the writer's on prompts; the vertical axis is the predicted `ŷ_w`. A second support reader `o`
@@ -224,7 +219,7 @@ An interactive page shows the result for one block:
   mean the two readers add up; fanning or crossing lines mean they interact, for example a gate
   reader that switches an up reader's effect on or off.
 * **Reader view.** Pick a reader to see the writers whose support contains it, each with its
-  grids and the same pair plot.
+  grids and the same pair plot, and the writers it is an offset reader of.
 * Hovering a grid cell shows the prompt and its value, marks the same cell in every grid on the
   page, and rings the corresponding point in every pair plot.
 
@@ -235,8 +230,8 @@ An interactive page shows the result for one block:
   and the masks `m_c` at all five positions, and it captures the true `G`, `H` and neuron values on
   400 prompts so the formula of section 2 can be checked against the model.
 * **Attribution** (`attribute.py`, one GPU job), at the "=" and "b" positions separately: it
-  computes the integrated-gradients attributions and scores on the fit half (checking
-  completeness), the `R²_k` curves on 20,000 held-out prompts for `k` from 1 to every reader, the
+  computes the single-reader mean and zero ablations and the scores on the fit half, the offset
+  readers, the `R²_k` curves on 20,000 held-out prompts for `k` from 1 to every reader, the
   greedy paths, the supports and the offsets. It also reports how well the recomputed `y_w`
   matches the stored activations from the model.
 * **Applet data** (`build_app.py`, CPU job): grids at 8-bit resolution per component and
@@ -244,10 +239,9 @@ An interactive page shows the result for one block:
 
 ## 10. Limitations
 
-* **The reference point matters.** Integrated gradients from "all readers off" counts constant
-  readers as important. A different reference (for example every reader at its mean) would rank
-  only readers whose *variation* matters. The `R²_k` test does not depend on this choice, but the
-  order in which readers enter the support does.
+* **One reader at a time.** The score measures each reader alone. Readers that only matter
+  jointly (each replaceable while the other is known) can be ranked low; the greedy comparison
+  bounds how much this costs.
 * **Correlated readers share credit.** When two readers carry the same information, either can
   stand in for the other, so the support may name one where the model uses both. The greedy
   comparison shows how much this costs in `R²`, not which reader is "the real one".

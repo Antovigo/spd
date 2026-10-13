@@ -107,8 +107,10 @@ details.defs dt { color: var(--ink); font-family: ui-monospace, monospace; }
       <dt>G, H</dt><dd>gate and up pre-activations, vectors of length 14336: G = Σ over gate readers of s_r U_r, H = the same over up readers.</dd>
       <dt>V_w</dt><dd>writer w's read vector, length 14336.</dd>
       <dt>y_w</dt><dd>writer w's inner activation, y_w = V_w · (silu(G) ⊙ H), real; ⊙ is the element-wise product. Grids show y_w where w is on.</dd>
-      <dt>φ_r(w)</dt><dd>the integrated-gradients share of y_w attributed to reader r (path from all readers at 0); Σ_r φ_r(w) = y_w on every prompt.</dd>
-      <dt>share</dt><dd>E[φ_r(w)²] / Σ_r' E[φ_r'(w)²], expectations over prompts where w is on (fit half of the prompts). Readers are ranked by it.</dd>
+      <dt>s̄_r</dt><dd>mean of s_r over the prompts where w is on (fit half of the prompts); depends on w.</dd>
+      <dt>Δ_r(w)</dt><dd>change of y_w when s_r alone is replaced by s̄_r (mean ablation), computed exactly.</dd>
+      <dt>share</dt><dd>E[Δ_r(w)²] / Σ_r' E[Δ_r'(w)²], E the average over the fit half's prompts where w is on. Readers are ranked by it.</dd>
+      <dt>offset reader</dt><dd>reader r of writer w with E[Δ_r(w)²] < 1 % of Var(y_w) (its variation does not matter) but E[(y_w with s_r = 0 − y_w)²] > 1 % of E[y_w²] (switching it off does). "off-cost" = that last ratio.</dd>
       <dt>k</dt><dd>number of top-ranked readers kept (integer); the others are held at their mean s̄_r over prompts where w is on.</dd>
       <dt>R²_k</dt><dd>1 − E[(y_w − ŷ_w)²] / Var(y_w) on held-out prompts where w is on, ŷ_w the prediction with k readers.</dd>
       <dt>support</dt><dd>the writer's top k readers, k the smallest value reaching R²_k ≥ 0.9 (or 0.99, toggle). "not reached" marks writers where the target is never met; their support is the k of best R².</dd>
@@ -378,7 +380,7 @@ function r2Plot(w) {
   for (const y of [0, 0.5, 0.9, 1]) { ctx.beginPath(); ctx.moveTo(m.l, Y(y)); ctx.lineTo(W - m.r, Y(y)); ctx.stroke(); ctx.textAlign = "right"; ctx.fillText(y, m.l - 4, Y(y) + 4); }
   ctx.fillStyle = css("--ink"); ctx.textAlign = "center"; ctx.fillText("k (readers kept, log scale)", (m.l + W) / 2, Hh - 4);
   ctx.save(); ctx.translate(11, (m.t + Hh - m.b) / 2); ctx.rotate(-Math.PI / 2); ctx.fillText("held-out R²_k", 0, 0); ctx.restore();
-  const series = [["IG ranking", w.r2_ig, ks, "--series-ig"], ["weights-only ranking", w.r2_wt, ks, "--series-wt"]];
+  const series = [["mean-ablation ranking", w.r2_abl, ks, "--series-ig"], ["weights-only ranking", w.r2_wt, ks, "--series-wt"]];
   if (w.greedy) series.push(["greedy subset", w.greedy.r2, w.greedy.r2.map((_, i) => i + 1), "--series-gr"]);
   for (const [, ys, xs, c] of series) {
     ctx.strokeStyle = css(c); ctx.lineWidth = 2; ctx.beginPath(); let started = false;
@@ -409,6 +411,8 @@ function writerView(w) {
       h("span", {}, "support (R² ≥ 0.9) ", h("b", {}, w.k90), w.reached90 ? "" : h("span", { class: "warn" }, " not reached")),
       h("span", {}, "support (R² ≥ 0.99) ", h("b", {}, w.k99), w.reached99 ? "" : h("span", { class: "warn" }, " not reached")),
       h("span", { title: "R² on the 2000 plotted prompts of the predictor using the union of both supports, others at mean" }, "plotted-sample R² ", h("b", {}, fmt(w.r2_sample_support, 4)))),
+    h("div", { class: "chips" }, w.offsets.length ? `offset readers (${w.offsets.length}):` : "no offset readers",
+      [...w.offsets].sort((x, y) => y.frac_zero - x.frac_zero).map(o => h("span", { class: "chip", onclick: () => go("r", P_.readers[o.r].key), title: `off-cost ${pct(o.frac_zero)} of E[y²]; mean-ablation cost ${pct(o.frac_mean)} of Var(y)` }, `${P_.readers[o.r].key} · ${pct(o.frac_zero)}`))),
     h("div", { class: "row" }, gridPair(state.t, w.key), r2Plot(w)));
   const cards = sup.map((ri, rank) => {
     const r = P_.readers[ri];
@@ -433,6 +437,7 @@ function readerView(r) {
       h("span", {}, "kind ", h("b", {}, r.kind)), h("span", {}, "on ", h("b", {}, pct(r.p_on))),
       h("span", {}, "mean |s| ", h("b", {}, fmt(r.mean_abs))), h("span", {}, "std ", h("b", {}, fmt(r.std))),
       h("span", {}, "in the support of ", h("b", {}, ws.length), " writer(s)")),
+    h("div", { class: "chips" }, r.offset_for.length ? `offset reader of ${r.offset_for.length} writer(s):` : "offset reader of no writer", r.offset_for.map(writerChip)),
     gridPair(state.t, r.key));
   const cards = ws.map(wi => P_.writers[wi]).sort((x, y) => (y.share[ri] || 0) - (x.share[ri] || 0)).map(w => {
     const rank = supOf(w).indexOf(ri) + 1;
