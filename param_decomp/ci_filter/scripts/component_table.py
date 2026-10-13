@@ -4,7 +4,7 @@ the filters, and what the attribution says about it.
     python -m param_decomp.ci_filter.scripts.component_table --run_dir <run> [--step 40000]
 
 Writes `<run_dir>/analysis/ablations/step_<step>/components.tsv`, one row per component of
-`decomposition_alive.npz` there. Filters are the ACTIVE runs under `ci_filter/step_<step>/`
+`decomposition_alive.npz` there. Filters are the ACTIVE runs `<run_dir>/<id>-<step>/`
 (`Trash/` is ignored), named by their id minus the shared prefix. Columns:
 
 - `site`, `component` — the component's address, and `layer`, `kind` split out for grouping;
@@ -32,21 +32,25 @@ from pathlib import Path
 
 import numpy as np
 
-from param_decomp.ci_filter.paths import TRASH, ablation_source_dir, ablations_dir, ci_filter_dir
+from param_decomp.ci_filter.paths import (
+    ablation_source_dir,
+    ablations_dir,
+    filter_dir,
+    filter_dirs,
+    filter_id,
+)
 
 SWEPT_METRICS = ("kl", "integer_kl", "answer_ce", "accuracy")
 
 
 def _filters(run_dir: Path, step: int) -> dict[str, Path]:
     """`{short name: directory}` of the ACTIVE filtering runs (not `Trash/`), short names being
-    the ids with their shared prefix dropped (`addsub-05-filter-integers` -> `integers`)."""
-    root = ci_filter_dir(run_dir, step)
-    found = sorted(
-        d for d in root.iterdir() if d.name != TRASH and (d / "alive" / "max_ci.npz").exists()
-    )
-    prefix = os.path.commonprefix([d.name for d in found]) if len(found) > 1 else ""
+    the ids with their shared prefix dropped (`addsub-05-integers` -> `integers`)."""
+    ids = [filter_id(d, step) for d in filter_dirs(run_dir, step)]
+    ids = [i for i in ids if (filter_dir(run_dir, step, i) / "alive" / "max_ci.npz").exists()]
+    prefix = os.path.commonprefix(ids) if len(ids) > 1 else ""
     prefix = prefix[: prefix.rfind("-") + 1] if "-" in prefix else ""
-    return {d.name.removeprefix(prefix) or d.name: d for d in found}
+    return {i.removeprefix(prefix) or i: filter_dir(run_dir, step, i) for i in ids}
 
 
 def component_table(run_dir: Path, step: int) -> Path:

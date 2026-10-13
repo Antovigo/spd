@@ -5,11 +5,11 @@
 
 L0 here is the mean number of components with output CI above `alive_threshold` at one position
 of one prompt, per site. Sources: `run` (the decomposition's own CI fn) and every filtering run
-under `ci_filter/step_<step>/` outside `Trash/`, each with the constraints it trained under
+`<run_dir>/<id>-<step>/` (not `Trash/`), each with the constraints it trained under
 (ceilings and removed components). The prompt subset is fixed by the seed, so every source is
 scored on the same prompts.
 
-Writes `<run_dir>/analysis/ci_filter/step_<step>/l0_by_position.tsv`: one row per
+Writes `<run_dir>/analysis/ablations/step_<step>/l0_by_position.tsv`: one row per
 `(source, site, position)` with the mean L0."""
 
 import argparse
@@ -26,7 +26,7 @@ from jaxtyping import Array, Float, Int
 
 from param_decomp.ci_filter.checkpoint import trained_ci
 from param_decomp.ci_filter.config import CIFilterConfig, resolve_run_dir
-from param_decomp.ci_filter.paths import TRASH, ci_filter_dir
+from param_decomp.ci_filter.paths import ablations_dir, filter_dirs, filter_id
 from param_decomp.ci_filter.pool import build_pool, load_tokenizer
 from param_decomp.ci_filter.step import (
     UNCONSTRAINED,
@@ -75,13 +75,13 @@ def l0_by_position(config: CIFilterConfig, data_root: Path, prompts: int, batch_
     target = restored.deliverable.target
     assert isinstance(target, TargetConfig)
     placed, mesh, step = restored.placed, restored.mesh, restored.step
-    out = ci_filter_dir(run_dir, step) / "l0_by_position.tsv"
+    out = ablations_dir(run_dir, step) / "l0_by_position.tsv"
     pool = build_pool(config.pool, load_tokenizer(target.model_name))
-    filters = sorted(
-        d.name
-        for d in ci_filter_dir(run_dir, step).iterdir()
-        if d.name != TRASH and (d / "training" / "ci_fn").exists()
-    )
+    filters = [
+        filter_id(d, step)
+        for d in filter_dirs(run_dir, step)
+        if (d / "training" / "ci_fn").exists()
+    ]
     sources = ["run", *filters]
     logger.info(f"L0 by position for {sources} on {prompts} prompts -> {out}")
 

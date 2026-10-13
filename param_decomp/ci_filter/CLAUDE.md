@@ -42,7 +42,7 @@ switch off per prompt. Target stream only: no non-target pass, no hidden-activat
 - `checkpoint.py` — orbax save/restore of the fine-tuned CI fn (chains objective 2 onto 1), and
   `starting_ci` / `trained_ci`: the CI fn a filter starts from and the constraints capping it.
 - `paths.py` — the analysis layout, in its module docstring: filtering runs in
-  `<run_dir>/analysis/ci_filter/step_<step>/<cf-id>/` (retired ones in `Trash/`), and EVERY
+  `<run_dir>/<cf-id>-<step>/` (retired ones in `<run_dir>/Trash/`), and EVERY
   ablation study — screens, sweeps, model ablation, the non-target probe, mask ablations, the
   per-component table — in `<run_dir>/analysis/ablations/step_<step>/` (`ablations_dir`).
 - `scripts/run_ci_filter.py` — entry point.

@@ -3,7 +3,7 @@
 Runs both CI filter objectives (`param_decomp/ci_filter`) on `addsub-all-layers-4xh100-05`
 (`p-ba5a0c05`, step 40000): a 10-minute smoke, objective 1 (last-position KL), then objective
 2 (last-position integer KL) starting from objective 1's CI fn. Outputs land in
-`$DATA_ROOT/runs/p-ba5a0c05/analysis/ci_filter/step_40000/<cf-id>/` and are pulled back into
+`$DATA_ROOT/runs/p-ba5a0c05/<cf-id>-40000/` and are pulled back into
 the cluster copy of the run.
 
 ## Recipe
@@ -101,9 +101,9 @@ the first failing stage. What to look for in the log:
   `GRID_CHUNK=500`. Knobs are read when each stage's config is generated
   (`$DATA_ROOT/ci_filter/configs/`).
 
-The two filters are named `addsub-05-filter-last-pos` and `addsub-05-filter-integers` (output dir
+The two filters are named `addsub-05-last-pos` and `addsub-05-integers` (output dir `<id>-40000/`
 and wandb run; override with `OBJ1_ID` / `OBJ2_ID`). Restarting a single stage:
-`./run_pipeline.sh --only obj1`, or `./run_pipeline.sh --only obj2 --init-id addsub-05-filter-last-pos`.
+`./run_pipeline.sh --only obj1`, or `./run_pipeline.sh --only obj2 --init-id addsub-05-last-pos`.
 Every stage runs under the ceiling and prune constraints (`CIFilterConfig`); there is no switch.
 Output dirs fail closed: delete a failed stage's dir before rerunning it under the same name (its
 wandb run can stay or go; every launch gets a fresh wandb id). The smoke (`cf-smoke`) does not
@@ -115,5 +115,5 @@ log to wandb and removes its own dir.
 POD_HOST=<ip> POD_PORT=<port> KEY=~/.ssh/<key> ./pull_outputs.sh     # add --no-ci-fn to skip the ~3.9 GB CI fns
 ```
 
-They land in `~/out/pod-backup/p-ba5a0c05/analysis/ci_filter/step_40000/<cf-id>/` with the pod
-logs in `analysis/ci_filter/pod-logs/`. Open `<cf-id>/ab_grids/index.html` over `file://`.
+They land in `~/out/pod-backup/p-ba5a0c05/<cf-id>-40000/`, each with its stage
+log in `logs/`. Open `<cf-id>-40000/ab_grids/index.html` over `file://`.
