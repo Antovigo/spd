@@ -487,6 +487,7 @@ async function pickDataset(fileList) {
   dataset = { files, index, colOf };
   $("dsstatus").textContent = `${index.comp_site.length} alive components`;
   setPayload(curKey, cur);
+  $("view").value = "inner_alive";   // the page's purpose: switch to the alive-only view
 }
 
 const OP_CODES = { "+": 0, "-": 1, "×": 2 };
