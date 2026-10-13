@@ -1,0 +1,493 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reader–writer explorer</title>
+<style>
+:root {
+  --surface: #fcfcfb; --surface-2: #f3f2ef; --border: #dcdad4;
+  --ink: #0b0b0b; --ink-2: #52514e; --ink-3: #8a8983;
+  --accent: #2a78d6; --neg: #1c5cab; --mid: #f0efec; --pos: #c23b3a;
+  --hatch: #d9d7d0; --series-ig: #2a78d6; --series-wt: #eb6834; --series-gr: #1baf7a;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --surface: #1a1a19; --surface-2: #242423; --border: #3a3a37;
+    --ink: #ffffff; --ink-2: #c3c2b7; --ink-3: #8f8e86;
+    --accent: #3987e5; --neg: #3987e5; --mid: #383835; --pos: #e66767;
+    --hatch: #4a4a46; --series-ig: #3987e5; --series-wt: #d95926; --series-gr: #199e70;
+  }
+}
+:root[data-theme="dark"] {
+  --surface: #1a1a19; --surface-2: #242423; --border: #3a3a37;
+  --ink: #ffffff; --ink-2: #c3c2b7; --ink-3: #8f8e86;
+  --accent: #3987e5; --neg: #3987e5; --mid: #383835; --pos: #e66767;
+  --hatch: #4a4a46; --series-ig: #3987e5; --series-wt: #d95926; --series-gr: #199e70;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--surface); color: var(--ink);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+header { position: sticky; top: 0; z-index: 5; background: var(--surface-2);
+  border-bottom: 1px solid var(--border); padding: 8px 16px; display: flex; flex-wrap: wrap;
+  gap: 8px 16px; align-items: center; }
+header h1 { font-size: 15px; margin: 0 8px 0 0; }
+header label { color: var(--ink-2); font-size: 13px; display: flex; gap: 6px; align-items: center; }
+select, input, button { font: inherit; color: var(--ink); background: var(--surface);
+  border: 1px solid var(--border); border-radius: 6px; padding: 3px 6px; }
+button { cursor: pointer; }
+.tabs button[aria-pressed="true"] { background: var(--accent); color: #fff; border-color: var(--accent); }
+main { padding: 12px 16px 48px; max-width: 1800px; }
+.card { border: 1px solid var(--border); border-radius: 10px; padding: 12px; margin: 12px 0;
+  background: var(--surface); }
+.card.head { background: var(--surface-2); }
+.card h2, .card h3 { margin: 0 0 6px; font-size: 15px; }
+.card h2 { font-size: 17px; }
+.stats { color: var(--ink-2); font-size: 13px; display: flex; flex-wrap: wrap; gap: 4px 16px; margin-bottom: 8px; }
+.stats b { color: var(--ink); font-weight: 600; }
+.row { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-start; }
+.grid-box { display: flex; flex-direction: column; gap: 2px; }
+.grid-box .cap { font-size: 12px; color: var(--ink-2); }
+.grid-wrap { position: relative; display: grid; grid-template-columns: auto auto; }
+.grid-wrap .ylab { writing-mode: vertical-rl; transform: rotate(180deg); font-size: 11px;
+  color: var(--ink-3); text-align: center; }
+.grid-wrap .xlab { grid-column: 2; font-size: 11px; color: var(--ink-3); display: flex;
+  justify-content: space-between; }
+canvas.grid { image-rendering: pixelated; display: block; border: 1px solid var(--border);
+  background: repeating-linear-gradient(45deg, transparent 0 3px, var(--hatch) 3px 4px);
+  cursor: crosshair; }
+canvas.overlay { position: absolute; pointer-events: none; }
+.cbar { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--ink-2); }
+.cbar canvas { height: 10px; width: 120px; border-radius: 2px; }
+.chips { display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0 8px; font-size: 12px; color: var(--ink-2); align-items: center; }
+.chip { border: 1px solid var(--border); border-radius: 999px; padding: 1px 8px; cursor: pointer;
+  background: var(--surface-2); color: var(--ink); font-size: 12px; }
+.chip:hover { border-color: var(--accent); }
+.plot-box { display: flex; flex-direction: column; gap: 4px; }
+.plot-box .ctl { font-size: 12px; color: var(--ink-2); display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.legend { font-size: 12px; color: var(--ink-2); display: flex; flex-wrap: wrap; gap: 4px 12px; }
+.legend i { display: inline-block; width: 14px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 4px; }
+#tip { position: fixed; z-index: 10; pointer-events: none; background: var(--surface-2);
+  border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; font-size: 12px;
+  display: none; white-space: nowrap; }
+details.defs { margin: 8px 0; color: var(--ink-2); font-size: 13px; }
+details.defs summary { cursor: pointer; color: var(--ink); }
+details.defs dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 8px 0; }
+details.defs dt { color: var(--ink); font-family: ui-monospace, monospace; }
+.muted { color: var(--ink-3); }
+.warn { color: var(--pos); }
+@media (max-width: 700px) { header { position: static; } }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title">Reader–writer explorer</h1>
+  <span class="tabs"><button id="mode-w" aria-pressed="true">Writers</button>
+    <button id="mode-r" aria-pressed="false">Readers</button></span>
+  <label>Position <select id="pos"></select></label>
+  <label>Support <select id="sup"><option value="90">R² ≥ 0.9</option><option value="99">R² ≥ 0.99</option></select></label>
+  <label><span id="pick-label">Writer</span> <input id="pick" list="pick-list" size="18" placeholder="e.g. down7"></label>
+  <datalist id="pick-list"></datalist>
+  <label>Grid px <select id="gsize"><option>200</option><option>300</option><option selected>400</option><option>800</option></select></label>
+  <button id="theme" title="Toggle light/dark">◐</button>
+</header>
+<main>
+  <details class="defs">
+    <summary>Definitions</summary>
+    <dl>
+      <dt>a, b</dt><dd>the integer operands of the prompt "a op b =", each in 1..400; op is + or −.</dd>
+      <dt>t</dt><dd>token position (integer): 3 is the "b" token, 4 is the "=" token. Everything on the page is at the selected t.</dd>
+      <dt>reader r</dt><dd>a gate_proj or up_proj component of the block, labelled kind + component index (e.g. gate123).</dd>
+      <dt>writer w</dt><dd>a down_proj component of the block (e.g. down7).</dd>
+      <dt>m_r</dt><dd>mask of reader r on a prompt, 0 or 1: 1 when its output CI on the original model exceeds 0.01 (the CI filter's rounded-CI decomposed model).</dd>
+      <dt>s_r</dt><dd>reader r's masked inner activation, s_r = m_r · (x · V_r), real; x is the RMSNorm'd residual stream (vector, length 4096), V_r the component's read vector.</dd>
+      <dt>U_r</dt><dd>reader r's write vector into the block's d_mlp = 14336 pre-activations.</dd>
+      <dt>G, H</dt><dd>gate and up pre-activations, vectors of length 14336: G = Σ over gate readers of s_r U_r, H = the same over up readers.</dd>
+      <dt>V_w</dt><dd>writer w's read vector, length 14336.</dd>
+      <dt>y_w</dt><dd>writer w's inner activation, y_w = V_w · (silu(G) ⊙ H), real; ⊙ is the element-wise product. Grids show y_w where w is on.</dd>
+      <dt>φ_r(w)</dt><dd>the integrated-gradients share of y_w attributed to reader r (path from all readers at 0); Σ_r φ_r(w) = y_w on every prompt.</dd>
+      <dt>share</dt><dd>E[φ_r(w)²] / Σ_r' E[φ_r'(w)²], expectations over prompts where w is on (fit half of the prompts). Readers are ranked by it.</dd>
+      <dt>k</dt><dd>number of top-ranked readers kept (integer); the others are held at their mean s̄_r over prompts where w is on.</dd>
+      <dt>R²_k</dt><dd>1 − E[(y_w − ŷ_w)²] / Var(y_w) on held-out prompts where w is on, ŷ_w the prediction with k readers.</dd>
+      <dt>support</dt><dd>the writer's top k readers, k the smallest value reaching R²_k ≥ 0.9 (or 0.99, toggle). "not reached" marks writers where the target is never met; their support is the k of best R².</dd>
+      <dt>on</dt><dd>fraction of the 320,000 prompts (both ops) on which the component is on at t.</dd>
+      <dt>write share</dt><dd>writer's share of Σ_w P(on) · E[y_w² | on] · ‖U_w‖², U_w its write vector into the residual stream.</dd>
+      <dt>Grid colours</dt><dd>blue negative, grey 0, red positive, symmetric scale per grid (±max|value|); hatched cells: component off.</dd>
+      <dt>Pair plot</dt><dd>x = s_r, y = y_w, dots = 2000 random prompts where w is on, coloured by s_o of a second support reader o (same diverging scale); lines = the predictor with s_r swept, s_o fixed at its 10/30/50/70/90 % quantiles over those prompts, every other reader at its mean s̄.</dd>
+    </dl>
+  </details>
+  <div id="view"></div>
+</main>
+<div id="tip"></div>
+<script src="data/meta.js"></script>
+<script>
+"use strict";
+const META = window.RW_META;
+const $ = (sel, el = document) => el.querySelector(sel);
+const h = (tag, attrs = {}, ...kids) => {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "class") e.className = v; else if (k.startsWith("on")) e.addEventListener(k.slice(2), v);
+    else if (k === "style") e.style.cssText = v; else e.setAttribute(k, v);
+  }
+  for (const kid of kids.flat()) if (kid != null) e.append(kid.nodeType ? kid : document.createTextNode(String(kid)));
+  return e;
+};
+const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const fmt = (x, d = 3) => (x == null || !isFinite(x)) ? "–" : (Math.abs(x) >= 1000 || (Math.abs(x) < 0.01 && x !== 0) ? x.toExponential(2) : x.toFixed(d));
+const pct = (x) => (100 * x).toFixed(x < 0.1 ? 1 : 0) + "%";
+
+// ---------- data loading (JSONP over file://) ----------
+const cache = { grid: {}, vec: {}, writer: {} };
+window.rwGrid = (k, d) => { cache.grid[k] = d; };
+window.rwVec = (k, d) => { cache.vec[k] = d; };
+window.rwWriter = (k, d) => { cache.writer[k] = d; };
+const pending = {};
+function loadScript(src) {
+  if (!pending[src]) pending[src] = new Promise((res, rej) => {
+    const s = document.createElement("script"); s.src = src; s.onload = res;
+    s.onerror = () => rej(new Error("missing " + src)); document.head.append(s);
+  });
+  return pending[src];
+}
+function b64bytes(str) { const bin = atob(str); const u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i); return u; }
+const f32 = (str) => new Float32Array(b64bytes(str).buffer);
+async function getGrid(t, key) {
+  const k = t + ":" + key;
+  if (!cache.grid[k]) await loadScript(`data/pos${t}/grid_${key}.js`);
+  const d = cache.grid[k];
+  if (!d.dec) d.dec = Object.fromEntries(META.ops.map(op => [op, b64bytes(d[op])]));
+  return d;
+}
+async function getVec(key) {
+  if (!cache.vec[key]) await loadScript(`data/vec/${key}.js`);
+  const d = cache.vec[key]; if (!d.f) d.f = f32(d.v); return d.f;
+}
+async function getWriter(t, key) {
+  const k = t + ":" + key;
+  if (!cache.writer[k]) await loadScript(`data/pos${t}/w_${key}.js`);
+  const d = cache.writer[k]; if (!d.G0f) { d.G0f = f32(d.G0); d.H0f = f32(d.H0); } return d;
+}
+const gridValue = (g, op, idx) => { const c = g.dec[op][idx]; return c === 255 ? null : g.lo + c / 254 * (g.hi - g.lo); };
+
+// ---------- state ----------
+const state = { mode: "w", t: null, sup: "90", key: null, gsize: 400 };
+function readHash() {
+  const p = new URLSearchParams(location.hash.slice(1));
+  state.mode = p.get("m") || "w"; state.t = p.get("t") || Object.keys(META.positions).sort().reverse()[0];
+  state.sup = p.get("s") || "90"; state.key = p.get("k"); state.gsize = +(p.get("g") || 400);
+}
+function writeHash(push = true) {
+  const p = new URLSearchParams({ m: state.mode, t: state.t, s: state.sup, g: state.gsize, ...(state.key ? { k: state.key } : {}) });
+  const url = "#" + p.toString();
+  if (push && url !== location.hash) history.pushState(null, "", url); else history.replaceState(null, "", url);
+}
+const P = () => META.positions[state.t];
+const writerIdx = (key) => P().writers.findIndex(w => w.key === key);
+const readerIdx = (key) => P().readers.findIndex(r => r.key === key);
+const supOf = (w) => state.sup === "90" ? w.sup90 : w.sup99;
+const writersOf = (r) => state.sup === "90" ? r.writers90 : r.writers99;
+function go(mode, key) { state.mode = mode; state.key = key; writeHash(); render(); window.scrollTo(0, 0); }
+
+// ---------- colour ----------
+function hexRgb(hex) { const n = parseInt(hex.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+function diverging(x) { // x in [-1, 1]
+  const neg = hexRgb(css("--neg")), mid = hexRgb(css("--mid")), pos = hexRgb(css("--pos"));
+  const a = Math.min(1, Math.abs(x)), end = x < 0 ? neg : pos;
+  return mid.map((m, i) => Math.round(m + (end[i] - m) * a));
+}
+const rgbStr = (c) => `rgb(${c[0]},${c[1]},${c[2]})`;
+
+// ---------- hover sync ----------
+const hover = { op: null, idx: null };
+const hoverListeners = new Set();
+function setHover(op, idx) { hover.op = op; hover.idx = idx; for (const f of hoverListeners) f(); }
+const tip = $("#tip");
+function showTip(e, html) { tip.innerHTML = html; tip.style.display = "block"; tip.style.left = (e.clientX + 14) + "px"; tip.style.top = (e.clientY + 14) + "px"; }
+function hideTip() { tip.style.display = "none"; }
+
+// ---------- grids ----------
+function gridBox(t, key, op, label) {
+  const size = state.gsize;
+  const cv = h("canvas", { class: "grid", width: 400, height: 400, style: `width:${size}px;height:${size}px` });
+  const ov = h("canvas", { class: "overlay", width: size, height: size, style: `width:${size}px;height:${size}px;left:0;top:0` });
+  const holder = h("div", { style: "position:relative" }, cv, ov);
+  const cbar = h("div", { class: "cbar" });
+  const box = h("div", { class: "grid-box" },
+    h("div", { class: "cap" }, label),
+    h("div", { class: "grid-wrap" }, h("div", { class: "ylab" }, "a: 1 → 400 (down)"), holder,
+      h("div", { class: "xlab" }, h("span", {}, "b = 1"), h("span", {}, "→"), h("span", {}, "400"))),
+    cbar);
+  let g = null;
+  getGrid(t, key).then(d => {
+    g = d; const ctx = cv.getContext("2d"); const img = ctx.createImageData(400, 400);
+    const scale = Math.max(Math.abs(d.lo), Math.abs(d.hi)) || 1; const codes = d.dec[op];
+    const lut = new Array(255); for (let c = 0; c < 255; c++) lut[c] = diverging((d.lo + c / 254 * (d.hi - d.lo)) / scale);
+    for (let i = 0; i < codes.length; i++) {
+      const c = codes[i]; if (c === 255) continue; const col = lut[c];
+      img.data[4 * i] = col[0]; img.data[4 * i + 1] = col[1]; img.data[4 * i + 2] = col[2]; img.data[4 * i + 3] = 255;
+    }
+    ctx.putImageData(img, 0, 0);
+    const bar = h("canvas", { width: 120, height: 1 }); const bctx = bar.getContext("2d"); const bimg = bctx.createImageData(120, 1);
+    for (let i = 0; i < 120; i++) { const c = diverging(i / 59.5 - 1); bimg.data.set([...c, 255], 4 * i); }
+    bctx.putImageData(bimg, 0, 0);
+    cbar.append(h("span", {}, fmt(-scale)), bar, h("span", {}, fmt(scale)),
+      h("span", { class: "muted" }, `range ${fmt(d.lo)} … ${fmt(d.hi)}`));
+  }).catch(err => box.append(h("div", { class: "warn" }, err.message)));
+  cv.addEventListener("mousemove", (e) => {
+    const r = cv.getBoundingClientRect();
+    const bi = Math.min(399, Math.max(0, Math.floor((e.clientX - r.left) / r.width * 400)));
+    const ai = Math.min(399, Math.max(0, Math.floor((e.clientY - r.top) / r.height * 400)));
+    const idx = ai * 400 + bi; setHover(op, idx);
+    const v = g ? gridValue(g, op, idx) : null; const sym = op === "add" ? "+" : "−";
+    showTip(e, `${ai + 1} ${sym} ${bi + 1} = ${op === "add" ? ai + bi + 2 : ai - bi}<br>${key}: ${v == null ? "off" : fmt(v)}`);
+  });
+  cv.addEventListener("mouseleave", () => { setHover(null, null); hideTip(); });
+  const draw = () => {
+    const ctx = ov.getContext("2d"); ctx.clearRect(0, 0, size, size);
+    if (hover.idx == null) return;
+    const a = Math.floor(hover.idx / 400), b = hover.idx % 400, px = size / 400;
+    ctx.strokeStyle = hover.op === op ? css("--ink") : css("--ink-3"); ctx.lineWidth = 1; ctx.setLineDash(hover.op === op ? [] : [3, 3]);
+    ctx.beginPath(); ctx.moveTo((b + 0.5) * px, 0); ctx.lineTo((b + 0.5) * px, size);
+    ctx.moveTo(0, (a + 0.5) * px); ctx.lineTo(size, (a + 0.5) * px); ctx.stroke();
+  };
+  hoverListeners.add(draw); box._cleanup = () => hoverListeners.delete(draw);
+  return box;
+}
+function gridPair(t, key) {
+  return h("div", { class: "row" }, META.ops.map(op => gridBox(t, key, op, `${key} · ${op === "add" ? "a + b" : "a − b"}`)));
+}
+
+// ---------- predictor ----------
+const silu = (x) => x / (1 + Math.exp(-x));
+// y_w with readers `vary` = [{U, kind, mean, value}], every other reader at its mean
+function predict(wd, V, vary) {
+  const G = wd.G0f, H = wd.H0f; let y = 0;
+  for (let n = 0; n < V.length; n++) {
+    let g = G[n], u = H[n];
+    for (const r of vary) { const d = (r.value - r.mean) * r.U[n]; if (r.kind === "gate") g += d; else u += d; }
+    y += V[n] * silu(g) * u;
+  }
+  return y;
+}
+function quantile(sorted, q) { const i = (sorted.length - 1) * q, lo = Math.floor(i), hi = Math.ceil(i); return sorted[lo] + (sorted[hi] - sorted[lo]) * (i - lo); }
+
+// ---------- pair plot: writer w vs reader r ----------
+function pairPlot(t, w, rIdx) {
+  const P_ = P(), R = P_.readers, rd = R[rIdx];
+  const W = 440, Hh = 300, m = { l: 56, r: 12, t: 10, b: 38 };
+  const cv = h("canvas", { width: W * devicePixelRatio, height: Hh * devicePixelRatio, style: `width:${W}px;height:${Hh}px` });
+  const legend = h("div", { class: "legend" });
+  const ctl = h("div", { class: "ctl" });
+  const box = h("div", { class: "plot-box" }, ctl, cv, legend);
+  const others = supOf(w).filter(x => x !== rIdx);
+  let colorBy = others.length ? others[0] : null;
+  if (others.length > 1) {
+    const sel = h("select", { onchange: () => { colorBy = +sel.value; computed = null; draw(); } },
+      others.map(o => h("option", { value: o }, `${R[o].key} (share ${pct(w.share[o] || 0)})`)));
+    ctl.append("colour by", sel);
+  } else if (others.length === 1) ctl.append(`colour by ${R[others[0]].key} (the only other support reader)`);
+  else ctl.append(h("span", { class: "muted" }, "single-reader support: one curve, every other reader at its mean"));
+  let wd, V, U = {}, frame = null, computed = null;
+  const ready = Promise.all([getWriter(t, w.key), getVec(w.key), ...supOf(w).map(x => getVec(R[x].key).then(f => { U[x] = f; }))])
+    .then(([d, v]) => { wd = d; V = v; draw(); })
+    .catch(err => box.append(h("div", { class: "warn" }, err.message)));
+  function draw() {
+    if (!wd) return;
+    const ctx = cv.getContext("2d"); ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+    ctx.clearRect(0, 0, W, Hh);
+    const col = (x) => wd.readers.indexOf(x);
+    const xs = wd.s[col(rIdx)], ys = wd.y;
+    const cs = colorBy == null ? null : wd.s[col(colorBy)];
+    const kindOf = (x) => R[x].kind, meanOf = (x) => wd.mean[col(x)];
+    let xmin = Math.min(...xs), xmax = Math.max(...xs); if (xmin === xmax) { xmin -= 1; xmax += 1; }
+    const xsweep = Array.from({ length: 41 }, (_, i) => xmin + (xmax - xmin) * i / 40);
+    let curves = [];
+    if (cs) {
+      const sorted = [...cs].sort((p, q) => p - q);
+      curves = [0.1, 0.3, 0.5, 0.7, 0.9].map(q => ({ q, so: quantile(sorted, q) }));
+    } else curves = [{ q: null, so: null }];
+    if (!computed) {
+      for (const c of curves) c.y = xsweep.map(x => predict(wd, V, [
+        { U: U[rIdx], kind: kindOf(rIdx), mean: meanOf(rIdx), value: x },
+        ...(c.so == null ? [] : [{ U: U[colorBy], kind: kindOf(colorBy), mean: meanOf(colorBy), value: c.so }])]));
+      computed = curves;
+    }
+    curves = computed;
+    let ymin = Math.min(...ys, ...curves.flatMap(c => c.y)), ymax = Math.max(...ys, ...curves.flatMap(c => c.y));
+    if (ymin === ymax) { ymin -= 1; ymax += 1; }
+    const pad = (ymax - ymin) * 0.04; ymin -= pad; ymax += pad;
+    const X = (x) => m.l + (x - xmin) / (xmax - xmin) * (W - m.l - m.r);
+    const Y = (y) => Hh - m.b - (y - ymin) / (ymax - ymin) * (Hh - m.t - m.b);
+    frame = { X, Y };
+    // axes
+    ctx.strokeStyle = css("--border"); ctx.fillStyle = css("--ink-2"); ctx.font = "11px system-ui"; ctx.lineWidth = 1;
+    for (let i = 0; i <= 4; i++) {
+      const xv = xmin + (xmax - xmin) * i / 4, yv = ymin + (ymax - ymin) * i / 4;
+      ctx.beginPath(); ctx.moveTo(X(xv), m.t); ctx.lineTo(X(xv), Hh - m.b); ctx.moveTo(m.l, Y(yv)); ctx.lineTo(W - m.r, Y(yv)); ctx.stroke();
+      ctx.textAlign = "center"; ctx.fillText(fmt(xv, 2), X(xv), Hh - m.b + 14);
+      ctx.textAlign = "right"; ctx.fillText(fmt(yv, 2), m.l - 4, Y(yv) + 4);
+    }
+    ctx.textAlign = "center"; ctx.fillStyle = css("--ink");
+    ctx.fillText(`s of ${rd.key}`, (m.l + W - m.r) / 2, Hh - 6);
+    ctx.save(); ctx.translate(12, (m.t + Hh - m.b) / 2); ctx.rotate(-Math.PI / 2); ctx.fillText(`y of ${w.key}`, 0, 0); ctx.restore();
+    // points
+    const cscale = cs ? Math.max(...cs.map(Math.abs)) || 1 : 1;
+    for (let i = 0; i < xs.length; i++) {
+      ctx.fillStyle = cs ? rgbStr(diverging(cs[i] / cscale)) : css("--ink-3");
+      ctx.globalAlpha = 0.55; ctx.beginPath(); ctx.arc(X(xs[i]), Y(ys[i]), 2, 0, 2 * Math.PI); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    // curves, with a surface halo so they stay visible over the dots
+    for (const c of curves) {
+      const colr = c.so == null ? css("--ink") : rgbStr(diverging(c.so / cscale));
+      for (const [stroke, lw] of [[css("--surface"), 4], [colr, 2]]) {
+        ctx.strokeStyle = stroke; ctx.lineWidth = lw; ctx.beginPath();
+        xsweep.forEach((x, i) => i ? ctx.lineTo(X(x), Y(c.y[i])) : ctx.moveTo(X(x), Y(c.y[i]))); ctx.stroke();
+      }
+    }
+    legend.replaceChildren(
+      ...(cs ? [h("span", {}, `lines: ${R[colorBy].key} at quantile`), ...curves.map(c => h("span", {}, h("i", { style: `background:${rgbStr(diverging(c.so / cscale))}` }), `${Math.round(c.q * 100)}%: ${fmt(c.so, 2)}`)),
+        h("span", { class: "muted" }, `dots coloured by ${R[colorBy].key} (±${fmt(cscale, 2)})`)]
+        : [h("span", {}, h("i", { style: `background:${css("--ink")}` }), "predictor, other readers at mean")]));
+    // hovered grid cell: its (s_r, y_w) from the grids (8-bit codes), when both are loaded
+    const gr = cache.grid[t + ":" + rd.key], gw = cache.grid[t + ":" + w.key];
+    if (hover.idx != null && gr && gr.dec && gw && gw.dec) {
+      const xv = gridValue(gr, hover.op, hover.idx), yv = gridValue(gw, hover.op, hover.idx);
+      if (yv != null) {
+        ctx.strokeStyle = css("--ink"); ctx.lineWidth = 2; ctx.beginPath();
+        ctx.arc(X(xv == null ? 0 : xv), Y(yv), 6, 0, 2 * Math.PI); ctx.stroke();
+      }
+    }
+  }
+  const onHover = () => draw();
+  hoverListeners.add(onHover); box._cleanup = () => hoverListeners.delete(onHover);
+  cv.addEventListener("mousemove", (e) => {
+    if (!frame || !wd) return; const r = cv.getBoundingClientRect(); const mx = e.clientX - r.left, my = e.clientY - r.top;
+    const xs = wd.s[wd.readers.indexOf(rIdx)]; let best = -1, bd = 64;
+    for (let i = 0; i < xs.length; i++) { const d = (frame.X(xs[i]) - mx) ** 2 + (frame.Y(wd.y[i]) - my) ** 2; if (d < bd) { bd = d; best = i; } }
+    if (best < 0) return hideTip();
+    const p = wd.prompt[best], op = META.ops[Math.floor(p / 160000)], j = p % 160000, a = Math.floor(j / 400) + 1, b = j % 400 + 1;
+    const extra = colorBy == null ? "" : `<br>${R[colorBy].key}: ${fmt(wd.s[wd.readers.indexOf(colorBy)][best])}`;
+    showTip(e, `${a} ${op === "add" ? "+" : "−"} ${b}<br>${rd.key}: ${fmt(xs[best])}<br>${w.key}: ${fmt(wd.y[best])}${extra}`);
+  });
+  cv.addEventListener("mouseleave", hideTip);
+  return box;
+}
+
+// ---------- R² vs k ----------
+function r2Plot(w) {
+  const ks = P().ks, W = 380, Hh = 220, m = { l: 44, r: 10, t: 10, b: 34 };
+  const cv = h("canvas", { width: W * devicePixelRatio, height: Hh * devicePixelRatio, style: `width:${W}px;height:${Hh}px` });
+  const ctx = cv.getContext("2d"); ctx.scale(devicePixelRatio, devicePixelRatio);
+  const lx = (k) => Math.log(k), X = (k) => m.l + (lx(k) - lx(1)) / (lx(ks[ks.length - 1]) - lx(1)) * (W - m.l - m.r);
+  const ymin = 0, Y = (y) => Hh - m.b - (Math.max(ymin, y) - ymin) / (1 - ymin) * (Hh - m.t - m.b);
+  ctx.strokeStyle = css("--border"); ctx.fillStyle = css("--ink-2"); ctx.font = "11px system-ui";
+  for (const k of [1, 3, 10, 30, 100, 300].filter(k => k <= ks[ks.length - 1])) { ctx.beginPath(); ctx.moveTo(X(k), m.t); ctx.lineTo(X(k), Hh - m.b); ctx.stroke(); ctx.textAlign = "center"; ctx.fillText(k, X(k), Hh - m.b + 14); }
+  for (const y of [0, 0.5, 0.9, 0.99, 1]) { ctx.beginPath(); ctx.moveTo(m.l, Y(y)); ctx.lineTo(W - m.r, Y(y)); ctx.stroke(); ctx.textAlign = "right"; ctx.fillText(y, m.l - 4, Y(y) + 4); }
+  ctx.fillStyle = css("--ink"); ctx.textAlign = "center"; ctx.fillText("k (readers kept, log scale)", (m.l + W) / 2, Hh - 4);
+  ctx.save(); ctx.translate(11, (m.t + Hh - m.b) / 2); ctx.rotate(-Math.PI / 2); ctx.fillText("held-out R²_k", 0, 0); ctx.restore();
+  const series = [["IG ranking", w.r2_ig, ks, "--series-ig"], ["weights-only ranking", w.r2_wt, ks, "--series-wt"]];
+  if (w.greedy) series.push(["greedy subset", w.greedy.r2, w.greedy.r2.map((_, i) => i + 1), "--series-gr"]);
+  for (const [, ys, xs, c] of series) {
+    ctx.strokeStyle = css(c); ctx.lineWidth = 2; ctx.beginPath(); let started = false;
+    ys.forEach((y, i) => { if (y < -0.5) return; const px = X(xs[i]), py = Y(y); started ? ctx.lineTo(px, py) : ctx.moveTo(px, py); started = true; });
+    ctx.stroke();
+  }
+  const kk = state.sup === "90" ? w.k90 : w.k99;
+  ctx.strokeStyle = css("--ink"); ctx.setLineDash([4, 3]); ctx.beginPath(); ctx.moveTo(X(kk), m.t); ctx.lineTo(X(kk), Hh - m.b); ctx.stroke(); ctx.setLineDash([]);
+  return h("div", { class: "plot-box" }, cv, h("div", { class: "legend" },
+    series.map(([n, , , c]) => h("span", {}, h("i", { style: `background:${css(c)}` }), n)),
+    h("span", { class: "muted" }, `dashed: support size k = ${kk}`)));
+}
+
+// ---------- views ----------
+function lazy(el, build) {
+  const io = new IntersectionObserver((ents) => { if (ents.some(e => e.isIntersecting)) { io.disconnect(); el.replaceChildren(...build()); } }, { rootMargin: "600px" });
+  io.observe(el); return el;
+}
+const writerChip = (wi) => { const w = P().writers[wi]; return h("span", { class: "chip", onclick: () => go("w", w.key), title: `write share ${pct(w.write_share)}` }, w.key); };
+const readerChip = (ri) => { const r = P().readers[ri]; return h("span", { class: "chip", onclick: () => go("r", r.key) }, r.key); };
+
+function writerView(w) {
+  const P_ = P(), sup = supOf(w), reached = state.sup === "90" ? w.reached90 : w.reached99;
+  const head = h("section", { class: "card head" },
+    h("h2", {}, `Writer ${w.key}`),
+    h("div", { class: "stats" },
+      h("span", {}, "on ", h("b", {}, pct(w.p_on))), h("span", {}, "write share ", h("b", {}, pct(w.write_share))),
+      h("span", {}, "support (R² ≥ 0.9) ", h("b", {}, w.k90), w.reached90 ? "" : h("span", { class: "warn" }, " not reached")),
+      h("span", {}, "support (R² ≥ 0.99) ", h("b", {}, w.k99), w.reached99 ? "" : h("span", { class: "warn" }, " not reached")),
+      h("span", { title: "R² on the 2000 plotted prompts of the predictor using the union of both supports, others at mean" }, "plotted-sample R² ", h("b", {}, fmt(w.r2_sample_support, 4)))),
+    h("div", { class: "row" }, gridPair(state.t, w.key), r2Plot(w)));
+  const cards = sup.map((ri, rank) => {
+    const r = P_.readers[ri];
+    const alsoW = writersOf(r).filter(x => P_.writers[x].key !== w.key);
+    const card = h("section", { class: "card" });
+    const body = h("div", { style: `min-height:${state.gsize + 60}px` });
+    card.append(
+      h("h3", {}, `#${rank + 1} `, h("span", { class: "chip", onclick: () => go("r", r.key) }, r.key),
+        ` · share ${pct(w.share[ri] || 0)} · on ${pct(r.p_on)} · mean |s| ${fmt(r.mean_abs)} · std ${fmt(r.std)}`),
+      h("div", { class: "chips" }, alsoW.length ? `also in the support of ${alsoW.length} other writer(s):` : "in no other writer's support", alsoW.map(writerChip)),
+      lazy(body, () => [h("div", { class: "row" }, gridPair(state.t, r.key), pairPlot(state.t, w, ri))]));
+    return card;
+  });
+  return [head, h("h3", {}, `Support readers (${sup.length}, ${reached ? "" : "target not reached, "}ranked by share)`), ...cards];
+}
+
+function readerView(r) {
+  const P_ = P(), ri = readerIdx(r.key), ws = writersOf(r);
+  const head = h("section", { class: "card head" },
+    h("h2", {}, `Reader ${r.key}`),
+    h("div", { class: "stats" },
+      h("span", {}, "kind ", h("b", {}, r.kind)), h("span", {}, "on ", h("b", {}, pct(r.p_on))),
+      h("span", {}, "mean |s| ", h("b", {}, fmt(r.mean_abs))), h("span", {}, "std ", h("b", {}, fmt(r.std))),
+      h("span", {}, "in the support of ", h("b", {}, ws.length), " writer(s)")),
+    gridPair(state.t, r.key));
+  const cards = ws.map(wi => P_.writers[wi]).sort((x, y) => (y.share[ri] || 0) - (x.share[ri] || 0)).map(w => {
+    const rank = supOf(w).indexOf(ri) + 1;
+    const body = h("div", { style: `min-height:${state.gsize + 60}px` });
+    return h("section", { class: "card" },
+      h("h3", {}, h("span", { class: "chip", onclick: () => go("w", w.key) }, w.key),
+        ` · ${r.key} is #${rank} of ${supOf(w).length}, share ${pct(w.share[ri] || 0)} · write share ${pct(w.write_share)} · on ${pct(w.p_on)}`),
+      h("div", { class: "chips" }, "other support readers:", supOf(w).filter(x => x !== ri).map(readerChip)),
+      lazy(body, () => [h("div", { class: "row" }, gridPair(state.t, w.key), pairPlot(state.t, w, ri))]));
+  });
+  return [head, h("h3", {}, ws.length ? `Writers whose support contains ${r.key} (by its share)` : `${r.key} is in no writer's support at this target`), ...cards];
+}
+
+function render() {
+  for (const f of [...hoverListeners]) hoverListeners.delete(f);
+  const P_ = P();
+  $("#pos").value = state.t; $("#sup").value = state.sup; $("#gsize").value = state.gsize;
+  $("#mode-w").setAttribute("aria-pressed", state.mode === "w"); $("#mode-r").setAttribute("aria-pressed", state.mode === "r");
+  $("#pick-label").textContent = state.mode === "w" ? "Writer" : "Reader";
+  const list = state.mode === "w"
+    ? [...P_.writers].sort((x, y) => y.write_share - x.write_share).map(w => [w.key, `write ${pct(w.write_share)} · k ${state.sup === "90" ? w.k90 : w.k99}`])
+    : [...P_.readers].sort((x, y) => writersOf(y).length - writersOf(x).length).map(r => [r.key, `${r.kind} · ${writersOf(r).length} writers`]);
+  $("#pick-list").replaceChildren(...list.map(([k, d]) => h("option", { value: k }, d)));
+  const valid = state.mode === "w" ? writerIdx(state.key) >= 0 : readerIdx(state.key) >= 0;
+  if (!valid) { state.key = list[0][0]; writeHash(false); }
+  $("#pick").value = state.key;
+  const view = $("#view");
+  view.replaceChildren(...(state.mode === "w" ? writerView(P_.writers[writerIdx(state.key)]) : readerView(P_.readers[readerIdx(state.key)])));
+  document.title = `${state.key} · L${META.layer} t=${state.t} — Reader–writer explorer`;
+}
+
+// ---------- controls ----------
+$("#title").textContent = `L${META.layer} readers ↔ writers · ${META.run}`;
+$("#pos").replaceChildren(...Object.keys(META.positions).sort().reverse().map(t => h("option", { value: t }, `${t} ("${META.positions[t].label}")`)));
+$("#pos").onchange = (e) => { state.t = e.target.value; writeHash(); render(); };
+$("#sup").onchange = (e) => { state.sup = e.target.value; writeHash(); render(); };
+$("#gsize").onchange = (e) => { state.gsize = +e.target.value; writeHash(); render(); };
+$("#mode-w").onclick = () => { if (state.mode !== "w") go("w", null); };
+$("#mode-r").onclick = () => { if (state.mode !== "r") go("r", null); };
+$("#pick").onchange = (e) => { const k = e.target.value.trim(); if ((state.mode === "w" ? writerIdx(k) : readerIdx(k)) >= 0) go(state.mode, k); };
+$("#theme").onclick = () => {
+  const root = document.documentElement, dark = root.dataset.theme ? root.dataset.theme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+  root.dataset.theme = dark ? "light" : "dark"; render();
+};
+window.addEventListener("popstate", () => { readHash(); render(); });
+readHash(); render();
+</script>
+</body>
+</html>
