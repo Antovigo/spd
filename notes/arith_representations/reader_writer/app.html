@@ -46,10 +46,11 @@ main { padding: 12px 16px 48px; max-width: 1800px; }
 .stats { color: var(--ink-2); font-size: 13px; display: flex; flex-wrap: wrap; gap: 4px 16px; margin-bottom: 8px; }
 .stats b { color: var(--ink); font-weight: 600; }
 .row { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-start; }
+.row > .row { flex: 0 0 auto; flex-wrap: nowrap; }
 .grid-box { display: flex; flex-direction: column; gap: 2px; }
 .grid-box .cap { font-size: 12px; color: var(--ink-2); }
 .grid-wrap { position: relative; display: grid; grid-template-columns: auto auto; }
-.grid-wrap .ylab { writing-mode: vertical-rl; transform: rotate(180deg); font-size: 11px;
+.grid-wrap .ylab { writing-mode: vertical-rl; transform: rotate(180deg); font-size: 11px; width: 14px;
   color: var(--ink-3); text-align: center; }
 .grid-wrap .xlab { grid-column: 2; font-size: 11px; color: var(--ink-3); display: flex;
   justify-content: space-between; }
@@ -57,13 +58,14 @@ canvas.grid { image-rendering: pixelated; display: block; border: 1px solid var(
   background: repeating-linear-gradient(45deg, transparent 0 3px, var(--hatch) 3px 4px);
   cursor: crosshair; }
 canvas.overlay { position: absolute; pointer-events: none; }
-.cbar { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--ink-2); }
+.cbar { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 6px; font-size: 11px; color: var(--ink-2); }
 .cbar canvas { height: 10px; width: 120px; border-radius: 2px; }
 .chips { display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0 8px; font-size: 12px; color: var(--ink-2); align-items: center; }
 .chip { border: 1px solid var(--border); border-radius: 999px; padding: 1px 8px; cursor: pointer;
   background: var(--surface-2); color: var(--ink); font-size: 12px; }
 .chip:hover { border-color: var(--accent); }
-.plot-box { display: flex; flex-direction: column; gap: 4px; }
+.plot-box { display: flex; flex-direction: column; gap: 4px; width: min-content; }
+.plot-box .legend, .plot-box .ctl { max-width: 100%; }
 .plot-box .ctl { font-size: 12px; color: var(--ink-2); display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .legend { font-size: 12px; color: var(--ink-2); display: flex; flex-wrap: wrap; gap: 4px 12px; }
 .legend i { display: inline-block; width: 14px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 4px; }
@@ -112,6 +114,7 @@ details.defs dt { color: var(--ink); font-family: ui-monospace, monospace; }
       <dt>support</dt><dd>the writer's top k readers, k the smallest value reaching R²_k ≥ 0.9 (or 0.99, toggle). "not reached" marks writers where the target is never met; their support is the k of best R².</dd>
       <dt>on</dt><dd>fraction of the 320,000 prompts (both ops) on which the component is on at t.</dd>
       <dt>write share</dt><dd>writer's share of Σ_w P(on) · E[y_w² | on] · ‖U_w‖², U_w its write vector into the residual stream.</dd>
+      <dt>Grids</dt><dd>rows: a = 1 (top) to 400 (bottom); columns: b = 1 (left) to 400 (right); one pixel per prompt at 400 px.</dd>
       <dt>Grid colours</dt><dd>blue negative, grey 0, red positive, symmetric scale per grid (±max|value|); hatched cells: component off.</dd>
       <dt>Pair plot</dt><dd>x = s_r, y = y_w, dots = 2000 random prompts where w is on, coloured by s_o of a second support reader o (same diverging scale); lines = the predictor with s_r swept, s_o fixed at its 10/30/50/70/90 % quantiles over those prompts, every other reader at its mean s̄.</dd>
     </dl>
@@ -213,9 +216,9 @@ function gridBox(t, key, op, label) {
   const ov = h("canvas", { class: "overlay", width: size, height: size, style: `width:${size}px;height:${size}px;left:0;top:0` });
   const holder = h("div", { style: "position:relative" }, cv, ov);
   const cbar = h("div", { class: "cbar" });
-  const box = h("div", { class: "grid-box" },
+  const box = h("div", { class: "grid-box", style: `width:${size + 18}px` },
     h("div", { class: "cap" }, label),
-    h("div", { class: "grid-wrap" }, h("div", { class: "ylab" }, "a: 1 → 400 (down)"), holder,
+    h("div", { class: "grid-wrap" }, h("div", { class: "ylab" }, "a ↓ 1…400"), holder,
       h("div", { class: "xlab" }, h("span", {}, "b = 1"), h("span", {}, "→"), h("span", {}, "400"))),
     cbar);
   let g = null;
@@ -384,7 +387,7 @@ function r2Plot(w) {
   const ymin = 0, Y = (y) => Hh - m.b - (Math.max(ymin, y) - ymin) / (1 - ymin) * (Hh - m.t - m.b);
   ctx.strokeStyle = css("--border"); ctx.fillStyle = css("--ink-2"); ctx.font = "11px system-ui";
   for (const k of [1, 3, 10, 30, 100, 300].filter(k => k <= ks[ks.length - 1])) { ctx.beginPath(); ctx.moveTo(X(k), m.t); ctx.lineTo(X(k), Hh - m.b); ctx.stroke(); ctx.textAlign = "center"; ctx.fillText(k, X(k), Hh - m.b + 14); }
-  for (const y of [0, 0.5, 0.9, 0.99, 1]) { ctx.beginPath(); ctx.moveTo(m.l, Y(y)); ctx.lineTo(W - m.r, Y(y)); ctx.stroke(); ctx.textAlign = "right"; ctx.fillText(y, m.l - 4, Y(y) + 4); }
+  for (const y of [0, 0.5, 0.9, 1]) { ctx.beginPath(); ctx.moveTo(m.l, Y(y)); ctx.lineTo(W - m.r, Y(y)); ctx.stroke(); ctx.textAlign = "right"; ctx.fillText(y, m.l - 4, Y(y) + 4); }
   ctx.fillStyle = css("--ink"); ctx.textAlign = "center"; ctx.fillText("k (readers kept, log scale)", (m.l + W) / 2, Hh - 4);
   ctx.save(); ctx.translate(11, (m.t + Hh - m.b) / 2); ctx.rotate(-Math.PI / 2); ctx.fillText("held-out R²_k", 0, 0); ctx.restore();
   const series = [["IG ranking", w.r2_ig, ks, "--series-ig"], ["weights-only ranking", w.r2_wt, ks, "--series-wt"]];

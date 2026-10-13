@@ -64,8 +64,9 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--layer", type=int, required=True)
     ap.add_argument("--positions", type=int, nargs="+", default=[4, 3])
+    ap.add_argument("--run_dir", type=Path, default=RUN_DIR)
     args = ap.parse_args()
-    out = RUN_DIR / "analysis" / "reader_writer" / f"L{args.layer}"
+    out = args.run_dir / "analysis" / "reader_writer" / f"L{args.layer}"
     app = out / "app"
     (app / "data" / "vec").mkdir(parents=True, exist_ok=True)
     shutil.copy(Path(__file__).with_name("app.html"), app / "index.html")
@@ -81,7 +82,7 @@ def main() -> None:
         return comps["U_gate"][col] if col < n_gate else comps["U_up"][col - n_gate]
 
     written_vec: set[str] = set()
-    meta: dict = {"layer": args.layer, "run": RUN_DIR.name, "ops": list(OPS),
+    meta: dict = {"layer": args.layer, "run": args.run_dir.name, "ops": list(OPS),
                   "position_labels": list(POSITION_LABELS), "positions": {}}  # fmt: skip
     rng = np.random.default_rng(0)
     for t in args.positions:
