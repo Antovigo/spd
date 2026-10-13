@@ -14,7 +14,9 @@ Input: `extract_layer.py`'s OUT (inner.npy, masks.npy, comps.npz). Notation, at 
     w: score(r, w) = E[phi_r(w)^2 | m_w = 1] on the fit half of the prompts.
 (2) Validation: keep the k readers of largest score(r, w), replace every other s_r by its mean over the
     fit half's writer-on points, recompute y_w; R^2_k on held-out writer-on points.
-    Same with a weights-only ranking: rms(s_r) * ||V_w * U_r||_2.
+    Same with a weights-only ranking: rms(s_r) * ||V_w * U_r||_2. For k at R^2 >= 0.9 and 0.99,
+    the left-out readers' mean contribution is stored as offset_gate / offset_up (W, d_mlp), so
+    y_w can be predicted from its support readers alone.
 (3) Greedy forward selection (best R^2 subset, fit half) for the writers carrying the most of
     the block's write, to measure how far the IG ranking is from the best subset.
 
@@ -237,6 +239,27 @@ def run_position(out: Path, t: int, rng: np.random.Generator) -> dict:
             dest[w] = r2(yt[:, None], yh)
     print(f"t={t}: pass 2 {time.time() - t0:.0f}s", flush=True)
 
+    # per-writer predictor at the smallest k reaching R^2 >= target (IG ranking): the support
+    # (first k of rank_ig) and the offsets the left-out readers contribute at their means,
+    #   offset_gate[w] = sum_{gate r not in support} mean_s[w, r] U_r   (d_mlp,), same for up,
+    # so y_w ~ V_w . (silu(offset_gate[w] + sum_{gate r in S} s_r U_r) * (offset_up[w] + ...)).
+    predictors = {}
+    Ug_np, Uu_np = np.asarray(Ug), np.asarray(Uu)
+    for target in (0.9, 0.99):
+        hit = r2_ig >= target
+        k_at = np.where(hit.any(1), ks[np.argmax(hit, 1)], -1)
+        off_g = np.zeros((W, Ug_np.shape[1]), np.float32)
+        off_u = np.zeros((W, Uu_np.shape[1]), np.float32)
+        for w in range(W):
+            out_mask = np.ones(R, bool)
+            out_mask[rank_ig[w, : max(k_at[w], 0)]] = False
+            ms = np.where(out_mask, mean_s[w], 0.0)
+            off_g[w], off_u[w] = ms[:rg] @ Ug_np, ms[rg:] @ Uu_np
+        tag = f"r2_{round(target * 100)}"
+        predictors[f"k_{tag}"] = k_at
+        predictors[f"offset_gate_{tag}"] = off_g
+        predictors[f"offset_up_{tag}"] = off_u
+
     # writer weight: share of the block's write, E[y_w^2 | on] P(on) ||U_w||^2 (U_w not stored:
     # use the writer's own output norm from the run's index, else 1)
     p_on = mw.mean(0)
@@ -278,6 +301,7 @@ def run_position(out: Path, t: int, rng: np.random.Generator) -> dict:
         mean_s=mean_s, rms_s=rms_s, weight_score=weight_score, ks=ks, r2_ig=r2_ig, r2_wt=r2_wt,
         p_on=p_on, var_on=var_on, msq_on=msq_on, write=write, n_on_fit=cnt,
         reader_index=comps["index"][rcols], writer_index=comps["index"][wcols],
+        rank_ig=rank_ig, **predictors,
     )  # fmt: skip
     (out / f"greedy_pos{t}.json").write_text(json.dumps(greedy_res))
     return {"t": t, "n_gate": rg, "n_up": R - rg, "n_writers": W,
