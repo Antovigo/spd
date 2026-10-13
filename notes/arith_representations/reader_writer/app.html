@@ -116,7 +116,7 @@ details.defs dt { color: var(--ink); font-family: ui-monospace, monospace; }
       <dt>write share</dt><dd>writer's share of Σ_w P(on) · E[y_w² | on] · ‖U_w‖², U_w its write vector into the residual stream.</dd>
       <dt>Grids</dt><dd>rows: a = 1 (top) to 400 (bottom); columns: b = 1 (left) to 400 (right); one pixel per prompt at 400 px.</dd>
       <dt>Grid colours</dt><dd>blue negative, grey 0, red positive, symmetric scale per grid (±max|value|); hatched cells: component off.</dd>
-      <dt>Pair plot</dt><dd>x = s_r, y = y_w, dots = 2000 random prompts where w is on, coloured by s_o of a second support reader o (same diverging scale); lines = the predictor with s_r swept, s_o fixed at its 10/30/50/70/90 % quantiles over those prompts, every other reader at its mean s̄.</dd>
+      <dt>Pair plot</dt><dd>x = s_r swept over its range on prompts where w is on, y = the predicted y_w; one line per value of a second support reader o (s_o at its 10/30/50/70/90 % quantiles over those prompts, colour on the grids' diverging scale); every other reader at its mean s̄. The ring marks the hovered grid cell's (s_r, y_w).</dd>
     </dl>
   </details>
   <div id="view"></div>
@@ -278,7 +278,7 @@ function quantile(sorted, q) { const i = (sorted.length - 1) * q, lo = Math.floo
 // ---------- pair plot: writer w vs reader r ----------
 function pairPlot(t, w, rIdx) {
   const P_ = P(), R = P_.readers, rd = R[rIdx];
-  const W = 440, Hh = 300, m = { l: 56, r: 12, t: 10, b: 38 };
+  const W = 440, Hh = 300, m = { l: 62, r: 12, t: 10, b: 38 };
   const cv = h("canvas", { width: W * devicePixelRatio, height: Hh * devicePixelRatio, style: `width:${W}px;height:${Hh}px` });
   const legend = h("div", { class: "legend" });
   const ctl = h("div", { class: "ctl" });
@@ -300,16 +300,11 @@ function pairPlot(t, w, rIdx) {
     const ctx = cv.getContext("2d"); ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
     ctx.clearRect(0, 0, W, Hh);
     const col = (x) => wd.readers.indexOf(x);
-    const xs = wd.s[col(rIdx)], ys = wd.y;
-    const cs = colorBy == null ? null : wd.s[col(colorBy)];
+    const qr = wd.q[col(rIdx)], qo = colorBy == null ? null : wd.q[col(colorBy)];
     const kindOf = (x) => R[x].kind, meanOf = (x) => wd.mean[col(x)];
-    let xmin = Math.min(...xs), xmax = Math.max(...xs); if (xmin === xmax) { xmin -= 1; xmax += 1; }
-    const xsweep = Array.from({ length: 41 }, (_, i) => xmin + (xmax - xmin) * i / 40);
-    let curves = [];
-    if (cs) {
-      const sorted = [...cs].sort((p, q) => p - q);
-      curves = [0.1, 0.3, 0.5, 0.7, 0.9].map(q => ({ q, so: quantile(sorted, q) }));
-    } else curves = [{ q: null, so: null }];
+    let xmin = qr[0], xmax = qr[6]; if (xmin === xmax) { xmin -= 1; xmax += 1; }
+    const xsweep = Array.from({ length: 81 }, (_, i) => xmin + (xmax - xmin) * i / 80);
+    let curves = qo ? [0.1, 0.3, 0.5, 0.7, 0.9].map((q, i) => ({ q, so: qo[i + 1] })) : [{ q: null, so: null }];
     if (!computed) {
       for (const c of curves) c.y = xsweep.map(x => predict(wd, V, [
         { U: U[rIdx], kind: kindOf(rIdx), mean: meanOf(rIdx), value: x },
@@ -317,30 +312,25 @@ function pairPlot(t, w, rIdx) {
       computed = curves;
     }
     curves = computed;
-    let ymin = Math.min(...ys, ...curves.flatMap(c => c.y)), ymax = Math.max(...ys, ...curves.flatMap(c => c.y));
+    let ymin = Math.min(...curves.flatMap(c => c.y)), ymax = Math.max(...curves.flatMap(c => c.y));
     if (ymin === ymax) { ymin -= 1; ymax += 1; }
     const pad = (ymax - ymin) * 0.04; ymin -= pad; ymax += pad;
     const X = (x) => m.l + (x - xmin) / (xmax - xmin) * (W - m.l - m.r);
     const Y = (y) => Hh - m.b - (y - ymin) / (ymax - ymin) * (Hh - m.t - m.b);
-    frame = { X, Y };
+    frame = { X, Y, xs: xsweep };
     // axes
     ctx.strokeStyle = css("--border"); ctx.fillStyle = css("--ink-2"); ctx.font = "11px system-ui"; ctx.lineWidth = 1;
     for (let i = 0; i <= 4; i++) {
-      const xv = xmin + (xmax - xmin) * i / 4, yv = ymin + (ymax - ymin) * i / 4;
+      const snap = (v, span) => Math.abs(v) < 1e-6 * span ? 0 : v;
+      const xv = snap(xmin + (xmax - xmin) * i / 4, xmax - xmin), yv = snap(ymin + (ymax - ymin) * i / 4, ymax - ymin);
       ctx.beginPath(); ctx.moveTo(X(xv), m.t); ctx.lineTo(X(xv), Hh - m.b); ctx.moveTo(m.l, Y(yv)); ctx.lineTo(W - m.r, Y(yv)); ctx.stroke();
       ctx.textAlign = "center"; ctx.fillText(fmt(xv, 2), X(xv), Hh - m.b + 14);
       ctx.textAlign = "right"; ctx.fillText(fmt(yv, 2), m.l - 4, Y(yv) + 4);
     }
     ctx.textAlign = "center"; ctx.fillStyle = css("--ink");
     ctx.fillText(`s of ${rd.key}`, (m.l + W - m.r) / 2, Hh - 6);
-    ctx.save(); ctx.translate(12, (m.t + Hh - m.b) / 2); ctx.rotate(-Math.PI / 2); ctx.fillText(`y of ${w.key}`, 0, 0); ctx.restore();
-    // points
-    const cscale = cs ? Math.max(...cs.map(Math.abs)) || 1 : 1;
-    for (let i = 0; i < xs.length; i++) {
-      ctx.fillStyle = cs ? rgbStr(diverging(cs[i] / cscale)) : css("--ink-3");
-      ctx.globalAlpha = 0.55; ctx.beginPath(); ctx.arc(X(xs[i]), Y(ys[i]), 2, 0, 2 * Math.PI); ctx.fill();
-    }
-    ctx.globalAlpha = 1;
+    ctx.save(); ctx.translate(10, (m.t + Hh - m.b) / 2); ctx.rotate(-Math.PI / 2); ctx.fillText(`y of ${w.key}`, 0, 0); ctx.restore();
+    const cscale = qo ? Math.max(Math.abs(qo[0]), Math.abs(qo[6])) || 1 : 1;
     // curves, with a surface halo so they stay visible over the dots
     for (const c of curves) {
       const colr = c.so == null ? css("--ink") : rgbStr(diverging(c.so / cscale));
@@ -350,8 +340,8 @@ function pairPlot(t, w, rIdx) {
       }
     }
     legend.replaceChildren(
-      ...(cs ? [h("span", {}, `lines: ${R[colorBy].key} at quantile`), ...curves.map(c => h("span", {}, h("i", { style: `background:${rgbStr(diverging(c.so / cscale))}` }), `${Math.round(c.q * 100)}%: ${fmt(c.so, 2)}`)),
-        h("span", { class: "muted" }, `dots coloured by ${R[colorBy].key} (±${fmt(cscale, 2)})`)]
+      ...(qo ? [h("span", {}, `lines: ${R[colorBy].key} at quantile`), ...curves.map(c => h("span", {}, h("i", { style: `background:${rgbStr(diverging(c.so / cscale))}` }), `${Math.round(c.q * 100)}%: ${fmt(c.so, 2)}`)),
+        h("span", { class: "muted" }, `colour scale ±${fmt(cscale, 2)} (max |s| of ${R[colorBy].key} where ${w.key} is on)`)]
         : [h("span", {}, h("i", { style: `background:${css("--ink")}` }), "predictor, other readers at mean")]));
     // hovered grid cell: its (s_r, y_w) from the grids (8-bit codes), when both are loaded
     const gr = cache.grid[t + ":" + rd.key], gw = cache.grid[t + ":" + w.key];
@@ -366,13 +356,11 @@ function pairPlot(t, w, rIdx) {
   const onHover = () => draw();
   hoverListeners.add(onHover); box._cleanup = () => hoverListeners.delete(onHover);
   cv.addEventListener("mousemove", (e) => {
-    if (!frame || !wd) return; const r = cv.getBoundingClientRect(); const mx = e.clientX - r.left, my = e.clientY - r.top;
-    const xs = wd.s[wd.readers.indexOf(rIdx)]; let best = -1, bd = 64;
-    for (let i = 0; i < xs.length; i++) { const d = (frame.X(xs[i]) - mx) ** 2 + (frame.Y(wd.y[i]) - my) ** 2; if (d < bd) { bd = d; best = i; } }
-    if (best < 0) return hideTip();
-    const p = wd.prompt[best], op = META.ops[Math.floor(p / 160000)], j = p % 160000, a = Math.floor(j / 400) + 1, b = j % 400 + 1;
-    const extra = colorBy == null ? "" : `<br>${R[colorBy].key}: ${fmt(wd.s[wd.readers.indexOf(colorBy)][best])}`;
-    showTip(e, `${a} ${op === "add" ? "+" : "−"} ${b}<br>${rd.key}: ${fmt(xs[best])}<br>${w.key}: ${fmt(wd.y[best])}${extra}`);
+    if (!frame || !computed) return; const r = cv.getBoundingClientRect(); const mx = e.clientX - r.left;
+    const i = Math.round((mx - frame.X(frame.xs[0])) / (frame.X(frame.xs[80]) - frame.X(frame.xs[0])) * 80);
+    if (i < 0 || i > 80) return hideTip();
+    const rows = computed.map(c => `${c.so == null ? "y" : `${R[colorBy].key} = ${fmt(c.so, 2)}`}: ${fmt(c.y[i])}`).join("<br>");
+    showTip(e, `${rd.key} = ${fmt(frame.xs[i])}<br>${rows}`);
   });
   cv.addEventListener("mouseleave", hideTip);
   return box;

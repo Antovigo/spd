@@ -10,7 +10,7 @@ Writes OUT/app/ (open OUT/app/index.html over file://):
     data/vec/<key>.js          U_r (gate/up reader) or V_w (down writer), float32, d_mlp
     data/pos<t>/w_<key>.js     writer w: the pre-activations with EVERY reader at its mean over
                                w's on prompts (G0, H0, float32 d_mlp), those means (support readers),
-                               and a sample of on prompts (prompt id, support readers' s, y_w)
+                               and each support reader's quantiles over w's on prompts
 
 <key> is <kind><component index>, e.g. gate123, down7.
 
@@ -148,9 +148,8 @@ def main() -> None:
             jsonp(pdir / f"w_{key}.js", "rwWriter", f"{t}:{key}", {
                 "G0": b64(G0.astype(np.float32)), "H0": b64(H0.astype(np.float32)),
                 "readers": sup, "mean": [float(mean[r]) for r in sup],
-                "prompt": pick.astype(int).tolist(), "y": y.astype(float).round(5).tolist(),
-                "s": s[pick][:, sup].T.astype(float).round(5).tolist(),
-                "yhat_support99": yhat.astype(float).round(5).tolist(),
+                # per support reader, over ALL prompts where w is on: min, 10/30/50/70/90 %, max
+                "q": np.quantile(s[on][:, sup], [0, 0.1, 0.3, 0.5, 0.7, 0.9, 1], axis=0).T.astype(float).round(5).tolist(),
             })  # fmt: skip
             g = greedy.get(w)
             writers.append({
