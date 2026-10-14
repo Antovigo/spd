@@ -1,6 +1,6 @@
-# experiments/lm/pretrain — in-house target-LM pretraining (JAX)
+# lm/pretrain — target-LM pretraining (JAX)
 
-Pretrains the FROZEN in-house target LMs that the decomposition trainer (`param_decomp.experiments.lm.run`)
+Pretrains target LMs that the decomposition trainer (`param_decomp.experiments.lm.run`)
 then decomposes — e.g. the pile-pretrained `llama_simple_mlp` (target `t-9d2b8f02`). Small,
 simple ML: next-token CE, AdamW, cosine LR + warmup. JAX-native (equinox), torch-free.
 
@@ -19,7 +19,7 @@ The trainer is a library subpackage under `param_decomp/pretrain/`:
   - `config.py` — `PretrainConfig` (the self-contained run yaml schema).
   - `train.py` — `python -m param_decomp.pretrain.train <config.yaml>`: the composition root + only I/O layer. fp32
     masters, AdamW (decay on 2D weights only), cosine+warmup, grad clip, orbax sharded
-    checkpoints, SIGTERM→save→requeue→resume. Reuses `param_decomp.pretrain.batch_data` (offline
+    checkpoints, SIGTERM→save→requeue→resume. Reuses `param_decomp.lm.batch_data` (offline
     pre-tokenized parquet, never streamed) + `param_decomp.core.sharding`.
   - `cache.py` — writes the decomposition trainer's `pretrain_cache/<project>-<run_id>/`
     layout (safetensors + `model_config.yaml`) at every save.
@@ -51,11 +51,20 @@ target:
 is bit-identical to the decomposition loader's clean-forward round-trip — pinned by
 `param_decomp/tests/core/test_pretrain.py`.
 
+## Attention backend
+
+The run config requires `attention_implementation: flash | xla` alongside `dtype`.
+Initializers carry it into every attention module at construction. GPU bf16 runs can
+request cuDNN flash attention; CPU or fp32 runs explicitly select XLA. Unsupported
+cuDNN execution fails. This is a runtime choice, so the architecture config exported
+in `model_config.yaml` excludes it; a decomposition authors its own attention backend.
+
 ## Data
 
 Offline pre-tokenized parquet ONLY (the prestage tool's output;
-`param_decomp.pretrain.batch_data.ShardServer`). Shards are `block_size + 1` wide; the trainer serves
-the full row and splits `x = tokens[:, :block]`, `y = tokens[:, 1:]` inside the step. The
+`param_decomp.lm.batch_data.ShardServer`). Shards are `block_size + 1` wide; the trainer serves
+the full row and crops model inputs inside the step. Both token and document IDs
+travel together; CE excludes labels across document boundaries. The
 ported configs point at the staged `datasets/pile_neox_tok_512` (the torch configs'
 SimpleStories/streaming data is not staged — runtime tokenization is deliberately
 unsupported).

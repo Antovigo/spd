@@ -2,13 +2,69 @@
 
 Experiment glue + the per-domain COMPOSITION ROOTS, torch-free. Training is JAX through the
 generic core engine (`param_decomp.core.run.run_decomposition_training`, a pure library that reads
-the pydantic `PDConfig` / `Cadence` directly). Each toy domain's `run.py` and LM's `training.py` are composition roots: read the run YAML → build the target / data loader / `config.BuiltRun` → call the
-engine. LM runs through `python -m param_decomp.experiments.lm.run` in an allocation
-provided by the caller; the toy domains (TMS, ResidMLP) run on CPU
-in-process via their module mains (`python -m param_decomp.experiments.{tms,resid_mlp}.run`). The shared experiment YAML schema + the shared
-run-identity helper (`run_instance`) live in `experiments/config.py`; the toy CI-arch
-builder is `experiments/toy_config.py::build_toy_ci_arch`; each domain's `config.py`
-carries its own target/data schema + (for the LM) its `BuiltRun` build.
+the pydantic `PDConfig` / `Cadence` directly). Each toy domain's `run.py` and LM's
+`training.py` are composition roots: read the run YAML → build the target / data loader /
+`config.BuiltRun` → call the engine. LM runs through
+`python -m param_decomp.experiments.lm.run` in an allocation provided by the caller; the toy
+domains (TMS, ResidMLP) run on CPU in-process via their module mains
+(`python -m param_decomp.experiments.{tms,resid_mlp}.run`). The shared experiment YAML
+schema + the shared run-identity helper (`run_instance`) live in `experiments/config.py`;
+the toy CI-arch builder is `experiments/toy_config.py::build_toy_ci_arch`; each domain's
+`config.py` carries its own target/data schema + (for the LM) its `BuiltRun` build.
+
+## Training logs
+
+Training metrics log every 20 steps by default, plus the final step. Maintained
+configs omit `cadence.train_log_every` to use this shared default. Evaluation and
+checkpoint schedules are independent.
+
+## Runtime topology
+
+`RuntimeConfig.world_size` derives a `SingleNode | MultiNode` value from `runtime.mesh`.
+A single node has one to eight GPUs; multiple nodes each have eight GPUs and require
+at least two nodes. Unsupported mesh totals fail during runtime parsing. Consumers
+use `world_size.device_count` when they need the total as an integer. YAML continues
+to author only the logical mesh, so the physical world cannot disagree with it.
+
+## Attention implementations
+
+LM configurations name both `target.attention_implementation` and
+`decomposition.ci.attention.implementation` for transformer CI functions. Each field is
+required and accepts exactly `flash` or `xla`. Both MHA and GQA carry the CI choice through
+resolution to execution. The JAX boundary maps `flash` to its `cudnn` backend.
+Neither schema validation nor loading a stored run chooses a
+backend for missing fields; pins that omit the choice or spell `auto` must be updated
+explicitly before use.
+Transformer CI attention also requires an explicit `mask: bidirectional | causal`.
+The mask choice is independent of the backend and is carried unchanged into the CI architecture.
+
+GPU corpus configurations use `flash` where its shape and dtype requirements hold. An
+unsupported cuDNN request fails at the attention boundary. CPU runs and the short,
+unpadded Llama arithmetic prompts explicitly use `xla`. The full Qwen3.6 configurations
+retain their target `xla` setting and choose CI attention independently. Target and CI
+choices are construction inputs; loaders do not repair models after construction.
+
+MoE configurations also name `target.expert_implementation` and
+`decomposition.ci.expert_implementation` independently. Both use the same closed
+implementation set: `dense_masked`, `ragged_dot`, `tokamax`, or `tokamax_split_vjp`.
+Dense expert computation preserves the selected CI interface and pinned routing.
+
+## Shared evaluation batches
+
+Fresh PGD uses distinct training and evaluation config types. Training
+`PGDReconLossConfig` / `PGDReconSubsetLossConfig` require `bc | bsc` sources;
+`EvalPGDReconLossConfig` / `SlowPGDReconLossConfig` require `source_shape: c` and
+`init: random`. The training and evaluation unions select the appropriate schema
+for the `PGDReconLoss` YAML tag. Both evaluation cadences bind through the closed
+`AnyPGDEvalConfig` union to the same probe; their tags select the schedule and
+default metric name.
+
+The context step returns `LMBatchForwardProducts[TargetIn, PreparedT, Conditioning]`,
+a registered JAX dataclass containing one clean forward's tokens, output, requested
+captures, CI envelope, compute weights and conditioning. `LMBatchContext.forward`
+keeps these device values together alongside the batch index and persistent sources.
+The input type retains document layout; consumers read the product directly instead
+of interpreting a positional return tuple.
 
 ## `pd` optimizers
 
@@ -21,6 +77,13 @@ carries its own target/data schema + (for the LM) its `BuiltRun` build.
 | `adamw` | `AdamWOptimizerConfig` | the canonical one; `type` may be omitted (a `type`-less optimizer block validates as `adamw`) |
 | `muon` | `MuonOptimizerConfig` | experimental, must be spelled explicitly |
 
+Muon defaults to `ns_dtype: bfloat16` for Newton–Schulz orthogonalization; master
+weights and momentum remain FP32. Set `ns_dtype: float32` explicitly when FP32
+orthogonalization is required.
+
+`consistent_rms` defaults to `0.2`, approximately matching AdamW's empirical update
+RMS. Use `consistent_rms: null` explicitly for Optax's original width scaling.
+
 The literal is `adamw`, never `adam`. `adam` IS a valid literal elsewhere in the schema —
 `AdamPGDConfig.type`, the persistent-PGD adversary's own source optimizer
 (`pd.loss_metrics[].optimizer` under a `PersistentPGD*` term) — a different field with a
@@ -30,8 +93,8 @@ Both blocks are honored exactly as written: `run_state.build_optimizers` reads t
 `ScheduleConfig` (an arbitrary knot curve), both `betas` and `weight_decay`, and chains a
 global-norm clip only where `grad_clip_norm` is non-null. A schedule is `max_val` times a
 piecewise `frac` curve over normalized time `t = step / (total_steps - 1)`; a bare float
-is the constant schedule, so the seats spell the cosine decay out as knots. The shape
-below is the METHOD's recipe (SPEC S20) — what the maintained seats run, not a subspace
+is the constant schedule, so maintained configs spell the cosine decay out as knots. The shape
+below is the method's recipe, not a subspace
 the schema enforces:
 
 ```yaml
@@ -58,7 +121,7 @@ pd:
 
 ## Toy domains (TMS, ResidMLP)
 
-The TMS and ResidualMLP toys are LAB experiments that call the core engine as a library
+The TMS and ResidualMLP toys are small experiments that call the core engine as a library
 (the core itself has zero target-specific code). The toy *targets* live in the targets
 distribution — `param_decomp/targets/{tms,resid_mlp}.py`: the JAX `DecomposedModel`
 (sites, pure fns, MSE `recon_loss_fn`), the frozen target (`eqx.Module`), from-scratch
@@ -71,7 +134,7 @@ Each `experiments/{tms,resid_mlp}/` carries:
   (`config.run_instance` / `toy_config.build_toy_ci_arch`),
   pretrains + builds the target, and calls `run_decomposition_training` with a synthetic
   `sample_batch` plus domain-bound identity/PGD/UV eval operations. CPU, synchronous, no
-  SLURM — and no `runtime:` section in the YAML at all: a toy is single-device by
+  scheduler configuration — and no `runtime:` section in the YAML at all: a toy is single-device by
   construction (`sharding.single_device_mesh`, which asserts that world rather than
   absorbing whatever devices are visible), so the engine's substrate arguments are
   literals here (`ddp` placement, no remat, no `compiler_options`), not config.
@@ -83,11 +146,11 @@ Each `experiments/{tms,resid_mlp}/` carries:
   and renders the config-gated `UVPlots` figure when the run's `eval.metrics` names it
   (`toy_uv_eval.render_uv_metric`): the toys feed `UVPlots` their probe CI as the
   column-permutation source and their small on-host V/U, sharing `slow_eval.render_uv_figure`
-  / `plot_uv_matrices` with the LM in-loop tier (SPEC S28). Toy `eval:` is a domain-specific
+  / `plot_uv_matrices` with the LM in-loop tier. Toy `eval:` is a domain-specific
   closed schema: fresh `PGDReconLoss` runs against the target's own `recon_loss_fn` on
   independent synthetic batches; the optional `UVPlots` operation runs on the slow cadence —
   read off its own `slow` declaration, the same one the LM binder reads
-  (`eval_config.schedule_for`; SPEC S29), never a per-family choice. LM-only metrics
+  (`eval_config.schedule_for`), never a per-family choice. LM-only metrics
   (`CEandKLLosses`, `WellTemperedness`) refuse when toy evaluator construction reaches them. Ground-truth identity/dense CI scoring remains the
   toy runner's native validation pass on the train-log cadence.
 - `configs/*.yaml` — the canonical `experiments.{tms,resid_mlp}.config` schema (TMS: 5-2 /
@@ -95,7 +158,7 @@ Each `experiments/{tms,resid_mlp}/` carries:
 
 The TMS deeper variant (`n_hidden_layers>0`, the `-id` configs) and the toy `global_mlp`
 CI arch (`type: global_mlp`) are wired end-to-end (the global arch dispatches through the
-core `init_train_state` via `toy_config.build_toy_ci_arch`). The shipped ResidMLP configs
+core `init_pd_state` via `toy_config.build_toy_ci_arch`). The shipped ResidMLP configs
 all use per-site `layerwise_mlp` with `hidden_dims: [400]` at `C: 200` per site — wide
 enough to avoid the output bottleneck the `global_mlp` variant escapes.
 Toy offline consumers are not wired (`load_run` is LM-only).
@@ -104,7 +167,23 @@ Toy offline consumers are not wired (`load_run` is LM-only).
 
 `CIFn.has_position_axis` must equal the target's (`core.run_state.init_decomposition` asserts
 it). The chunkwise transformer is the positioned arch whose blocks self-attend OVER the
-position axis; the LM schema also admits `type: global_mlp` (the tPD paper's LM CI net) —
+position axis. The global transformer (`type: global_transformer`) runs one transformer
+over the selected taps of every decomposed block, with an output head per site; its blocks
+stack along `depth` and each semantic group's heads along `site`, which its `owner` rows
+own over `replicate`.
+`component_conditioning: {kind: affine_clipped_component_activation, output_scale_init: …,
+calibration: {min_n_tokens: …}}` on the global transformer config also
+conditions every site's CI on its own component activations `h = x @ V` of the clean site
+input: positive and negative arms clamping affine maps of `h` and `-h`, and a free bias.
+Every arm's output scale starts at `output_scale_init`; every arm's input scale starts at
+`1 / q`, `q` each component's exact 99.9th percentile of `|h|` over the whole step-0
+training batch. That batch must hold no padding, at least `min_n_tokens` tokens, and a
+whole number of the calibration's `CALIBRATION_CHUNK_TOKENS`-token chunks;
+targeted training calibrates on its non-target stream. Both fields are required
+(`experiments/lm/ci_fn_init.py`, the place for the LM's data-dependent CI init). V stays a
+component parameter; its CI gradient joins the component update. It requires a dense transformer target
+(GLU or SimpleMLP), whose anatomy names each site's input capture. The LM schema also admits
+`type: global_mlp` (the tPD paper's LM CI net) —
 ONE shared MLP over every decomposed block's `input_tap` taps, pointwise per token, so it
 is positioned with no cross-position read at all.
 
@@ -113,7 +192,7 @@ derived: a pair-shaped target (an AF2-style pair representation, where a positio
 PAIR) turns a 128-residue crop into 16384 positions — 16k×16k attention per chunk per forward,
 several times per step. Infeasible, not slow.
 
-**The answer is `LayerwiseMLPCIArch(has_position_axis=True)`.** The MLP arches were positionless by
+**The answer is `LayerwiseMLPCIFnArch(has_position_axis=True)`.** The MLP arches were positionless by
 DECLARATION, not by construction — `SiteMLP.__call__` is `[*leading, d_in] -> [*leading, C]`,
 pointwise over every leading axis, so the same weights serve `[batch, d]` and
 `[batch, position, d]` alike. The arch now carries the axis (the target's shape, not the MLP's
@@ -127,23 +206,28 @@ nonlinearity, no hidden layer, and **invariant to tap magnitude** (measured: `f(
 to 3.6e-7, where the MLP's outputs differ by 14). Use it as a cheap baseline, not as the
 position-local CI function.
 
-The LM schema (`ChunkwiseTransformerCiConfig.n_blocks`) stays `PositiveInt`: an LM's positions
+The LM schema (`ChunkwiseTransformerCIFnConfig.n_blocks`) stays `PositiveInt`: an LM's positions
 are tokens, cross-position CI is what that arch is for there, and 0 would be a typo rather than
-a choice. `n_blocks: 0` is available to any lab whose own schema admits it.
+a choice. `n_blocks: 0` is available to any domain whose own schema admits it.
 
 ## Layout
+
+Shared LM batches, input access, and shard loading live in `param_decomp/lm/`;
+`param_decomp/pretrain/` owns target-LM pretraining. These modules do not depend on
+experiment composition roots. The generic core does not import the LM package.
 
 The `ExperimentConfig` schema base (domain subclasses bind concrete
 `target`/`decomposition`/`data`) + the shared validation / run-identity helpers live in
 `experiments/config.py`; `EvalConfig` lives in `experiments/eval_config.py`; the toy
-authored CI configs (`LayerwiseMlpCiConfig` / `GlobalMlpCiConfig`) plus
-`build_toy_ci_arch` live in `experiments/toy_config.py` (`WandbConfig` / `ResumeProvenance` are
+authored CI configs (`LayerwiseMlpCIFnConfig` / `GlobalMlpCIFnConfig`) plus
+`build_toy_ci_fn_arch` live in `experiments/toy_config.py` (`WandbConfig` / `ResumeProvenance` are
 core, in `param_decomp.core.configs`; the engine's `BuiltRun` bundle is core, in
 `param_decomp.core.built_run`); the LM schema + LM build (`LMExperimentConfig`, `LMTargetConfig`,
-`LMDataConfig`, the `target.spec` union, the authored LM CI union (`LMCiConfig`:
-`ChunkwiseTransformerCiConfig` + its `attention`/`ffn` unions, and the LM `GlobalMlpCiConfig`
-— its own class, not the toy one: it selects taps via `ChunkInputTap`, resolved by
-`resolve_lm_ci_arch` over ALL decomposed blocks) AND the
+`LMDataConfig` (`lm/run_data.py`), the `target.spec` union, the authored LM CI union (`LMCIFnConfig`:
+`ChunkwiseTransformerCIFnConfig` and `GlobalTransformerCIFnConfig` over their shared
+`TransformerCIFnConfig` backbone + its `attention`/`ffn` unions, and the LM `GlobalMlpCIFnConfig`
+— its own class, not the toy one: it selects taps via `CIFnInputTapSelection`, resolved by
+`resolve_lm_ci_fn_arch` over ALL decomposed blocks) AND the
 tiled site specs + their resolution (`GluTransformerCSpec`/`SimpleMlpCSpec` over
 `LayerSelection`, keys typed by each target family's matrix vocabulary;
 `resolve_site_tree` → the block-structured `SiteTree` the chunkwise CI resolver consumes) —
@@ -157,14 +241,17 @@ target-anatomy vocabulary, so it lives in the domain that IS transformers —
 experiments/
 ├── lm/
 │   ├── run.py               # python -m param_decomp.experiments.lm.run — pre-JAX env bootstrap deferring to training.py, the LM composition root
-│   ├── run_targeted.py      # the tPD (SPEC §11) twin: bootstrap deferring to training_targeted.py; a targeted run is its own top-level config shape (LMTargetedExperimentConfig: prompts: + nontarget:), never a mode flag
-│   ├── targeted_data.py     # the tPD TARGET stream: kind-discriminated prompt pools, tokenized once at startup, unpadded at one shared prompt length (T8)
+│   ├── run_targeted.py      # the tPD twin: bootstrap deferring to training_targeted.py; a targeted run is its own top-level config shape (LMTargetedExperimentConfig: prompts: + nontarget:), never a mode flag
+│   ├── targeted_data.py     # the tPD TARGET stream: kind-discriminated prompt pools, tokenized once at startup, unpadded at one shared prompt length
 │   ├── resolved.py          # LM-only resolved data/run types (ResolvedLMData, LMRun)
 │   ├── eval.py              # token CE/KL + CI-L0 fast pass
 │   ├── attn_patterns_eval.py / arithmetic_eval.py
+│   ├── ci_position_eval.py  # the `CIActiveCountsPerPosition` slow metric: CI_L0's count at every sequence position (CI > 0 / 0.01 / 0.1), one native W&B line chart at `eval/l0/per_position`
+│   ├── router_divergence_eval.py  # the `RouterDivergence` metric: per MoE layer, the masked model's expert router vs the target's under the target's routing pinned everywhere
 │   ├── well_temperedness.py / well_temperedness_eval.py  # the `WellTemperedness` slow metric (kernel + operation)
-│   ├── data.py              # tokenize_and_concatenate (offline helper for prestage)
-│   ├── prestage_tokenized.py  # HF text -> int32 parquet shards for the JAX trainer
+│   ├── data.py              # pack encoded documents
+│   ├── llama3/              # Llama 3 preprocessing and staging
+│   ├── abstract_inputs.py   # abstract batches for trace and fit checks
 │   └── arithmetic_probe.py    # a x b arithmetic grid spec -> in-memory prompt grid (the tPD pool's layer) + eval probe (ArithmeticCIGrid, adds the single-token-answer premise)
 ├── tms/                     # TMS (CPU): run.py + configs/ (target: param_decomp/targets/tms.py; also the tPD engine's test fixture — no shipped toy tPD shape)
 └── resid_mlp/               # ResidMLP (CPU): run.py + configs/ (target: param_decomp/targets/resid_mlp.py)
@@ -177,8 +264,17 @@ preactivations damage reconstruction more when ablated one at a time, at sampled
 positions: components are compared across all heads and layers, separately for
 preactivations below 0, between 0 and 1, and above 1, and named `groups` add the same
 measurement for site subsets (attention vs MLP, say). It is LM-only — the kernel dispatches
-on the `LMOutput` edge (`PlacedModel[LMOutput]`) and needs a position axis — so
+on the `LMOutput` edge and needs a position axis — so
 `lm/eval_operations.py` binds it and the toy binder refuses it.
+
+## Router divergence evaluation
+
+`RouterDivergence` reports KL over all expert probabilities, top-k overlap and
+`weight_mae` over the selected mixing weights. Each strategy produces one router
+readout per batch; stochastic masking uses one draw. Sums normalize by tokens. A persistent `bc` or
+`bsc` source samples one complete training row per evaluation sequence, shared across
+sites, while `c` and `sc` sources broadcast directly. This row sampler is separate
+from grouped source pools; pooled terms are not accepted by this evaluation strategy.
 
 ## Sites and the family grammar
 
@@ -221,9 +317,15 @@ target:
     kind: hf                            # Qwen3-8B-Base (same vendored JAX target + QK-norm)
     model_class: transformers.Qwen3ForCausalLM
     model_name: Qwen/Qwen3-8B-Base
+
+# or
+target:
+  spec:
+    kind: pretrained_qwen35_moe         # a lab-pretrained Qwen35Moe toy on the qwen36_moe engine
+    run_path: <entity>/<project>/<run_id>       # the W&B pretrain run — arch from its model_config.yaml
 ```
 
-### `kind: pretrained` — `run_path`
+### `kind: pretrained` / `pretrained_qwen35_moe` — `run_path`
 
 `run_path` names the W&B pretrain run whose checkpoint is the target's weights — a name,
 never a location. It resolves to the local store entry
@@ -240,8 +342,13 @@ tag `torch-oracle` — conversion needs torch, which the library deliberately do
 
 `kind: hf`/`hf_weights_in_vendored` model names must be in `experiments/lm/config.py::HF_MODEL_VARIANTS`
 (Llama-3.1-8B; dense Qwen3 0.6B/1.7B/4B/8B/14B Base and post-trained) — anything else
-refuses at convert time. A Qwen3 run needs a Qwen3-tokenized prestaged dataset
-(`prestage_tokenized --tokenizer_name <the selected Qwen checkpoint>`).
+refuses at convert time. Each registry entry pairs its immutable architecture with a loader
+parameterized by that exact config type. Its load method resolves sites against that
+architecture and forwards the authored dtype, output edge, and attention implementation
+to construction. A dense Qwen3 run requires Qwen3-tokenized, document-aware shards: source IDs are
+preserved in standard training, targeted non-target batches and evaluation. Token-only
+Qwen3 inputs are rejected; historical replay uses its original pinned code and data.
+
 
 ## LM `target.output_edge`
 
@@ -249,9 +356,9 @@ Required on every LM config — a discriminated union on `kind`: `materialized` 
 forward forms its full `[B, S, vocab]` logits in the target's native dtype) or
 `streamed` (`n_vocab_chunks` chunks; the forward returns the factored
 `targets.lm_output.StreamedLinearOutput` package and every comparison streams over the
-vocab axis with fp32-accumulated chunk logits, `targets.losses`). Prefer `streamed`
-wherever the family supports it — today the qwen36_moe family; the GLU/Llama families
-refuse it at resolve.
+vocab axis with fp32-accumulated chunk logits, `targets.losses`). Both edges serve all
+LM families. The chunk count must divide the target vocabulary; Llama-3.1-8B accepts
+32 chunks of 4008 tokens, and Qwen3.6 accepts 32 chunks of 7760 tokens.
 
 ```yaml
 target:
@@ -281,45 +388,45 @@ data:
 ```
 
 A store name resolves to `<data_root>/datasets/<name>` (`infra.dataset_store`). Provision
-that directory before launch; `experiments.lm.prestage_tokenized` can create the shards and
-metadata. The dataset dir is self-describing:
-`meta.json` (`infra.dataset_store.DatasetMeta`) carries its seq_len and tokenizer, read
-at load time — prestage writes it alongside the shards. Tip reads pinned configs through
-this same strict schema; older shapes require their original revision or an external converter.
+that directory before running; `experiments.lm.llama3.prestage_tokenized` can create
+Llama shards and metadata. The dataset directory is self-describing:
+`meta.json` (`infra.dataset_store.DatasetMeta`) records its sequence length, tokenizer,
+and preprocessing policy. Document-aware shards pair token IDs with document IDs; Qwen3.6
+requires token-only shards. Tip reads pinned configs through this same strict schema; older shapes require their original revision or an external converter.
 
-The JAX prediction tensor is always the final logits (there is no `output_extract` —
-it was a torch-era field and current configs reject it). The `model_class` strings
+The JAX prediction is the final logits or their factored streamed representation
+(there is no `output_extract`; current configs reject that torch-era field). The `model_class` strings
 are NOT imported by the JAX trainer — `experiments/lm/config.py::resolve_decomposition`
 only asserts the class identity (`kind: hf` matches the family's full class string; the
 other kinds match the class-name suffix) and routes to its own vendored JAX arch
 (`pretrained` LlamaSimpleMLP -> the pretrain-cache loader, `hf_weights_in_vendored`
 Llama -> `target_ports`). The dotted `model_class` is a stable identifier only, never
-imported.
+imported. `pretrained_qwen35_moe` carries no `model_class`: its kind already names the
+engine, and the arch is read from the cache entry's `model_config.yaml`.
 
 The path schemas (`topology/path_schemas.py`) cover the pretrain (`GPT2*`,
-`LlamaSimple*`) and HF GLU (`Llama`, `Qwen3`) architectures used to name harvested
-sites consistently.
+`LlamaSimple*`) and HF GLU (`Llama`, `Qwen3`) architectures used to name model sites consistently.
 
 ## `runtime.launch_env` (rank env / XLA flags)
 
-The rank env (XLA client flags, NCCL/host-memory knobs) is config-driven via
+The rank environment (XLA client flags, NCCL/host-memory knobs) is config-driven via
 `runtime.launch_env` (`param_decomp.experiments.lm.runtime.LaunchEnv`), so `config.yaml`
-fully captures the environment a run executed with — A/B a flag in the YAML, not in
-the caller. `lm/run.py` exports `LaunchEnv.as_env(os.environ.get("XLA_FLAGS"))` before
-importing JAX, so it applies to direct module invocation. Existing `XLA_FLAGS` compose
-with the config rather than being replaced: disjoint flags append, identical duplicates
-dedupe, and conflicting values fail loudly. Machine-specific environment such as
-`LD_LIBRARY_PATH` belongs to the caller rather than the authored run configuration.
+fully captures authored settings. `lm/run.py` exports
+`LaunchEnv.as_env(os.environ.get("XLA_FLAGS"))` before importing JAX, so it applies to
+direct module invocation. Existing `XLA_FLAGS` compose with the config rather than being
+replaced: disjoint flags append, identical duplicates dedupe, and conflicting values fail
+loudly. Machine-specific environment such as `LD_LIBRARY_PATH` belongs to the caller rather
+than the authored run configuration.
 
 XLA *compiler* flags go through `runtime.compiler_options` instead (passed natively to
 every jit, in the compile-cache key). REQUIRED, no default, no merge — every run's
-flags trace to a visible authored token: `tuned-v2` = the frozen production set
+flags trace to a visible authored token: `tuned-v2` = the frozen tuned set
 (`TUNED_V2_COMPILER_OPTIONS` in `lm/runtime.py`, the one code copy — a changed tuned
 set is a new preset name, never an edit). It keeps while-loop double-buffering off
 (that pass keeps O(1) extra copies of the while tuple — fatal for the
 `*-replicated-resident` placements, whose loops carry whole-depth ÷tp weight stacks as
 xs), so the one set serves every placement. `tuned-v2-autotune1` = tuned-v2 plus
-`xla_gpu_autotune_level: 1` (`TUNED_V2_AUTOTUNE1_COMPILER_OPTIONS`) — the fast-iteration
+`xla_gpu_autotune_level: 1` (`TUNED_V2_AUTOTUNE1_COMPILER_OPTIONS`) — the faster-iteration
 preset: shorter first compile, and since autotune picks steer fusion, its arena
 and step time do not transfer to tuned-v2; `bare` = `{}` (true XLA
 defaults, the debugging baseline); or an explicit `xla_*`-keyed dict, used VERBATIM as
@@ -348,3 +455,27 @@ The TMS and ResidualMLP module mains accept `--group <id>` and `--tags a,b,c`
 - **`--group`** sets wandb's first-class `group` field — used by the UI's native
   collapsing and matched by workspace filters via `ws.Metric("Group")`.
 - **`--tags`** adds wandb tags — orthogonal to `group`, many per run, user-defined.
+
+## Auxiliary reconstruction comparisons
+
+Training and fresh-PGD evaluation use the same explicit `auxiliaries` groups. Each
+entry specifies `name`, `coeff`, and `comparisons: [{capture, distance}]`. Capture
+names come from the target; distance is `relative_squared_error` or
+`categorical_kl_from_logits`. Each group contributes its coefficient times its own
+mean, and its name determines only its logged metric prefix. An empty list gives
+output-only reconstruction. Evaluation accepts constant zero coefficients to retain
+readouts without changing ascent; training accepts positive constants or schedules.
+
+For router reconstruction, enumerate the Qwen target's `router_logits_capture_keys`
+with categorical KL, using the name `router_kl` to preserve existing metric paths.
+The router's frozen weights and clean expert selections are unchanged; the captured
+logits measure counterfactual scores under the ordinary masked forward. Hidden readouts
+use relative squared error and can retain the name `hidden_acts_reconstruction`.
+
+Stored configs using the former `hidden_acts_reconstruction: {coeff, points}` or
+`router_kl: {coeff}` syntax must be translated to these explicit groups before loading
+with this schema. No automatic compatibility conversion runs when loading a config.
+Current training checkpoints also store frequency estimators inside the algorithm-specific
+training-state record. Older training items require a one-off external migration before
+resume; there is no compatibility reader. The separately checkpointed `decomposition`
+item is unchanged.
