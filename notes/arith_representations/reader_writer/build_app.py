@@ -200,7 +200,8 @@ def main() -> None:
                 "greedy": None if g is None else {"chosen": g["chosen"], "r2": [round(x, 4) for x in g["r2_held"]]},
                 "r2_sample_support": r2_sample,
                 "offsets": [{"r": int(r), "frac_zero": float(at["frac_zero"][w, r]),
-                             "frac_mean": float(at["frac_mean"][w, r])}
+                             "frac_mean": float(at["frac_mean"][w, r]),
+                             "mean": float(at["mean_s"][w, r])}
                             for r in np.flatnonzero(at["offset"][w])],
             })  # fmt: skip
             max_dev = max(max_dev, 0.0 if r2_sample is None else 1 - r2_sample)
