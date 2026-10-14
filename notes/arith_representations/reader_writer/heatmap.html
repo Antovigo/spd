@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reader–writer heatmaps</title>
+<style>
+:root {
+  --page: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink2: #52514e; --muted: #8a8984;
+  --rule: #e4e3de; --gate: #2a78d6; --up: #eb6834; --offset: #d03b3b; --cross: rgba(11,11,11,.55);
+  --seq: #fcfcfb,#cde2fb,#9ec5f4,#6da7ec,#3987e5,#256abf,#184f95,#0d366b;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --page: #0d0d0d; --surface: #1a1a19; --ink: #ffffff; --ink2: #c3c2b7; --muted: #8f8e86;
+    --rule: #2e2e2b; --gate: #3987e5; --up: #d95926; --offset: #e66767; --cross: rgba(255,255,255,.6);
+    --seq: #1a1a19,#104281,#184f95,#256abf,#3987e5,#6da7ec,#9ec5f4,#cde2fb;
+  }
+}
+:root[data-theme="dark"] {
+  --page: #0d0d0d; --surface: #1a1a19; --ink: #ffffff; --ink2: #c3c2b7; --muted: #8f8e86;
+  --rule: #2e2e2b; --gate: #3987e5; --up: #d95926; --offset: #e66767; --cross: rgba(255,255,255,.6);
+  --seq: #1a1a19,#104281,#184f95,#256abf,#3987e5,#6da7ec,#9ec5f4,#cde2fb;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--page); color: var(--ink); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 1400px; margin: 0 auto; padding: 16px; }
+h1 { font-size: 20px; margin: 0 0 4px; }
+.sub { color: var(--ink2); margin: 0 0 12px; }
+.controls { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; margin-bottom: 10px; }
+.controls label { color: var(--ink2); display: flex; gap: 6px; align-items: center; }
+select, button { font: inherit; color: var(--ink); background: var(--surface); border: 1px solid var(--rule); border-radius: 6px; padding: 3px 8px; }
+button { cursor: pointer; }
+.stats { color: var(--ink2); margin: 0 0 8px; font-variant-numeric: tabular-nums; }
+.panel { background: var(--surface); border: 1px solid var(--rule); border-radius: 8px; padding: 12px; }
+.wrap { overflow: auto; max-height: 78vh; position: relative; }
+.stack { position: relative; display: inline-block; }
+canvas { display: block; image-rendering: pixelated; }
+#over { position: absolute; left: 0; top: 0; pointer-events: none; }
+#tip { position: fixed; pointer-events: none; background: var(--surface); color: var(--ink); border: 1px solid var(--rule);
+  border-radius: 6px; padding: 6px 8px; font-size: 12px; line-height: 1.4; box-shadow: 0 2px 8px rgba(0,0,0,.15);
+  display: none; z-index: 10; font-variant-numeric: tabular-nums; max-width: 320px; }
+#tip b { font-weight: 600; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 18px; align-items: center; margin-top: 10px; color: var(--ink2); font-size: 12px; }
+.bar { display: flex; align-items: center; gap: 6px; }
+#barc { border: 1px solid var(--rule); border-radius: 3px; }
+.sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; vertical-align: -1px; margin-right: 4px; }
+details { margin-top: 14px; }
+summary { cursor: pointer; font-weight: 600; }
+.defs p { margin: 6px 0; color: var(--ink2); }
+.defs code { color: var(--ink); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Reader–writer heatmaps</h1>
+  <p class="sub">One MLP block at a time: each cell shows how much writer <i>w</i>'s activation depends on reader <i>r</i>. Rows and columns are co-clustered so that connected components sit together near the diagonal. Click a cell to open that writer in the per-layer reader/writer applet.</p>
+  <div class="controls">
+    <label>Layer <button id="prev" aria-label="previous layer">‹</button><select id="layer"></select><button id="next" aria-label="next layer">›</button></label>
+    <label>Position <select id="pos"></select></label>
+    <label>Value <select id="metric">
+      <option value="frac_mean">mean ablation: share of Var(y_w) lost</option>
+      <option value="frac_zero">zero ablation: share of E[y_w²] lost</option>
+    </select></label>
+    <label>Order <select id="order"><option value="co">co-clustered</option><option value="index">component index</option></select></label>
+    <label><input type="checkbox" id="offs" checked> mark offset readers</label>
+    <label>Cell <select id="cell"><option value="0">fit</option><option>2</option><option>3</option><option>4</option><option>6</option><option>8</option></select></label>
+  </div>
+  <p class="stats" id="stats"></p>
+  <div class="panel">
+    <div class="wrap" id="wrap"><div class="stack"><canvas id="cv"></canvas><canvas id="over"></canvas></div></div>
+    <div class="legend">
+      <span class="bar"><span id="lo"></span><canvas id="barc" width="200" height="10"></canvas><span>≥ 1</span></span>
+      <span>Top strip: <span class="sw" style="background:var(--gate)"></span>gate reader <span class="sw" style="background:var(--up);margin-left:8px"></span>up reader</span>
+      <span><span class="sw" style="background:transparent;border:2px solid var(--offset)"></span>offset reader (dot)</span>
+      <span>Rows: writers. Columns: readers.</span>
+    </div>
+  </div>
+  <details class="defs" open>
+    <summary>Definitions</summary>
+    <p>The block is MLP layer <i>l</i> (integer 0–31) of the decomposed Llama model (run p-ba8b0c08, step 40000, CI filter addsub-08-last-pos). Prompts are "<i>a</i> op <i>b</i> =" with integer operands <i>a</i>, <i>b</i> in 1–400 and op ∈ {+, −}; the analysis position <i>t</i> is the token "=" (t = 4) or "b" (t = 3).</p>
+    <p>A <b>reader</b> <i>r</i> is a gate or up component; its masked activation <code>s_r</code> (real number) is its inner activation times its 0/1 mask. A <b>writer</b> <i>w</i> is a down component; <code>y_w</code> (real number) is its inner activation, computed exactly from the readers as <code>y_w = V_w · (silu(G) ⊙ H)</code>, where <code>G</code> and <code>H</code> (vectors of length 14336) are the sums of <code>s_r U_r</code> over gate and over up readers, <code>U_r</code> the reader's output vector and <code>V_w</code> the writer's input vector.</p>
+    <p><b>Mean ablation</b> sets <code>s_r</code> to its mean over the prompts where <i>w</i> is on and keeps every other reader; the cell value is the resulting mean squared change of <code>y_w</code> divided by <code>Var(y_w)</code>, both over those prompts. <b>Zero ablation</b> sets <code>s_r</code> to 0 instead and divides by <code>E[y_w²]</code>. Both are measured on the fit half of the prompt pool. Values are shown on a log scale from 10<sup>−4</sup> to 1; cells below 10<sup>−4</sup> show the surface colour.</p>
+    <p>An <b>offset reader</b> of <i>w</i> has mean-ablation value below 1 % and zero-ablation value above 10 %: <i>w</i> needs it switched on, but its variation does not matter.</p>
+    <p>Shown writers are those on in at least 50 held-out prompts (the others have no held-out <i>R</i>²). Shown readers have a mean-ablation value of at least 10<sup>−3</sup> for some shown writer, or are an offset reader of one. <code>p_on</code> is the share of prompts in which <i>w</i> is on; <code>k99</code> is the smallest number of top-ranked readers whose held-out <i>R</i>² (fraction of <code>Var(y_w)</code> explained with all other readers at their means) reaches 0.99, 0 when never reached.</p>
+    <p><b>Co-clustered order</b>: bipartite spectral co-clustering. With <code>A</code> the mean-ablation matrix clipped to [0, 1], writers and readers are embedded together by singular vectors 2 to <i>n</i>+1 of <code>D_w^−½ A D_r^−½</code> (<code>D_w</code>, <code>D_r</code> diagonal matrices of the row and column sums of <code>A</code>), then ordered by Ward clustering with optimal leaf ordering. "Diagonal mass" is the share of the sum of <code>A</code> lying within 10 % of the axis length of the diagonal; the number of singular vectors <i>n</i> (integer) is chosen among 4, 8 and 16 to maximise it, and "random order" is the same share after a random permutation of rows and columns.</p>
+  </details>
+</main>
+<div id="tip"></div>
+<script src="data/meta.js"></script>
+<script>
+const M = window.HM_META;
+const $ = (id) => document.getElementById(id);
+const cache = {};
+window.hmLayer = (doc) => { cache[doc.layer] = doc; };
+const state = { layer: M.layers.includes(18) ? 18 : M.layers[0], t: String(M.positions[0]), metric: "frac_mean", order: "co", offs: true, cell: 0 };
+
+function readHash() {
+  const p = new URLSearchParams(location.hash.slice(1));
+  if (p.get("l") && M.layers.includes(+p.get("l"))) state.layer = +p.get("l");
+  if (p.get("t")) state.t = p.get("t");
+  if (p.get("v")) state.metric = p.get("v");
+  if (p.get("o")) state.order = p.get("o");
+}
+function writeHash() {
+  history.replaceState(null, "", "#" + new URLSearchParams({ l: state.layer, t: state.t, v: state.metric, o: state.order }));
+}
+function decode(s) { const b = atob(s); const u = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) u[i] = b.charCodeAt(i); return u; }
+const codeValue = (c) => c === 0 ? 0 : Math.pow(10, M.log_min * (1 - (c - 1) / 254));
+function fmt(c) {
+  if (c === 0) return "< 1e−4";
+  if (c === 255) return "≥ 1";
+  const v = codeValue(c); return v >= 0.01 ? (v * 100).toPrecision(2) + " %" : v.toExponential(1);
+}
+function cssVar(n) { return getComputedStyle(document.documentElement).getPropertyValue(n).trim(); }
+function hexRgb(h) { h = h.replace("#", ""); return [0, 2, 4].map(i => parseInt(h.slice(i, i + 2), 16)); }
+function ramp() {
+  const stops = cssVar("--seq").split(",").map(s => hexRgb(s.trim()));
+  const lut = new Uint8Array(256 * 3);
+  for (let c = 0; c < 256; c++) {
+    const x = c === 0 ? 0 : 0.04 + 0.96 * (c - 1) / 254, f = x * (stops.length - 1), i = Math.min(Math.floor(f), stops.length - 2), k = f - i;
+    for (let j = 0; j < 3; j++) lut[c * 3 + j] = Math.round(stops[i][j] * (1 - k) + stops[i + 1][j] * k);
+  }
+  return lut;
+}
+
+function load(layer) {
+  return new Promise((res, rej) => {
+    if (cache[layer]) return res(cache[layer]);
+    const s = document.createElement("script"); s.src = `data/L${layer}.js`;
+    s.onload = () => res(cache[layer]); s.onerror = rej; document.head.appendChild(s);
+  });
+}
+
+let view = null;
+const STRIP = 4;
+async function render() {
+  writeHash();
+  const doc = await load(state.layer);
+  const P = doc.positions[state.t];
+  const W = P.writers.length, R = P.readers.length;
+  const vals = decode(P[state.metric]), offs = decode(P.offset);
+  let rows = [...Array(W).keys()], cols = [...Array(R).keys()];
+  if (state.order === "index") {
+    const num = (k) => +k.replace(/^\D+/, "");
+    rows.sort((x, y) => num(P.writers[x].key) - num(P.writers[y].key));
+    const kr = (k) => (k.startsWith("gate") ? 0 : 1e6) + num(k);
+    cols.sort((x, y) => kr(P.readers[x].key) - kr(P.readers[y].key));
+  }
+  const wrap = $("wrap");
+  const cs = state.cell || Math.max(1, Math.min(8, Math.floor((wrap.clientWidth - 2) / R)));
+  const strip = STRIP * Math.max(1, Math.round(cs / 2));
+  const cv = $("cv"), over = $("over"), dpr = window.devicePixelRatio || 1;
+  const wpx = R * cs, hpx = W * cs + strip + 2;
+  for (const c of [cv, over]) { c.width = wpx * dpr; c.height = hpx * dpr; c.style.width = wpx + "px"; c.style.height = hpx + "px"; }
+  const ctx = cv.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = cssVar("--surface"); ctx.fillRect(0, 0, wpx, hpx);
+  const gate = cssVar("--gate"), up = cssVar("--up");
+  cols.forEach((r, j) => { ctx.fillStyle = P.readers[r].key.startsWith("gate") ? gate : up; ctx.fillRect(j * cs, 0, cs, strip); });
+  const lut = ramp(), img = new ImageData(R, W);
+  rows.forEach((w, i) => cols.forEach((r, j) => {
+    const c = vals[w * R + r], o = (i * R + j) * 4;
+    img.data[o] = lut[c * 3]; img.data[o + 1] = lut[c * 3 + 1]; img.data[o + 2] = lut[c * 3 + 2]; img.data[o + 3] = 255;
+  }));
+  const tmp = document.createElement("canvas"); tmp.width = R; tmp.height = W; tmp.getContext("2d").putImageData(img, 0, 0);
+  ctx.imageSmoothingEnabled = false; ctx.drawImage(tmp, 0, strip + 2, wpx, W * cs);
+  if (state.offs) {
+    ctx.fillStyle = cssVar("--offset");
+    const rad = Math.max(1, cs * 0.35);
+    rows.forEach((w, i) => cols.forEach((r, j) => {
+      if (offs[w * R + r]) { ctx.beginPath(); ctx.arc(j * cs + cs / 2, strip + 2 + i * cs + cs / 2, rad, 0, 2 * Math.PI); ctx.fill(); }
+    }));
+  }
+  view = { P, rows, cols, cs, strip, vals, offs, W, R, wpx, hpx };
+  let nOff = 0; for (const x of offs) nOff += x;
+  $("stats").textContent = `Layer ${state.layer}, position "${P.label}": ${W} of ${P.n_writers_all} writers, ${R} of ${P.n_readers_all} readers, ${nOff} offset pairs. ` +
+    `Diagonal mass (co-clustered) ${(P.diag10 * 100).toFixed(0)} %, random order ${(P.diag10_random * 100).toFixed(0)} % (n = ${P.n_vec}).`;
+  $("lo").textContent = "10⁻⁴";
+  drawBar(lut);
+}
+function drawBar(lut) {
+  const c = $("barc"), x = c.getContext("2d");
+  for (let i = 0; i < 200; i++) { const code = 1 + Math.round(i / 199 * 254); x.fillStyle = `rgb(${lut[code * 3]},${lut[code * 3 + 1]},${lut[code * 3 + 2]})`; x.fillRect(i, 0, 1, 10); }
+}
+
+function hit(ev) {
+  if (!view) return null;
+  const rect = $("cv").getBoundingClientRect();
+  const x = ev.clientX - rect.left, y = ev.clientY - rect.top - view.strip - 2;
+  const j = Math.floor(x / view.cs), i = Math.floor(y / view.cs);
+  if (j < 0 || j >= view.R || i < 0 || i >= view.W) return null;
+  return { i, j, w: view.rows[i], r: view.cols[j] };
+}
+function drawCross(h) {
+  const o = $("over"), c = o.getContext("2d"), dpr = window.devicePixelRatio || 1;
+  c.setTransform(dpr, 0, 0, dpr, 0, 0); c.clearRect(0, 0, view.wpx, view.hpx);
+  if (!h) return;
+  c.strokeStyle = cssVar("--cross"); c.lineWidth = 1;
+  const y0 = view.strip + 2, cs = view.cs;
+  c.strokeRect(0.5, y0 + h.i * cs + 0.5, view.wpx - 1, Math.max(cs - 1, 1));
+  c.strokeRect(h.j * cs + 0.5, 0.5, Math.max(cs - 1, 1), view.hpx - 1);
+}
+$("cv").addEventListener("mousemove", (ev) => {
+  const h = hit(ev), tip = $("tip");
+  drawCross(h);
+  if (!h) { tip.style.display = "none"; return; }
+  const P = view.P, wr = P.writers[h.w], rd = P.readers[h.r], k = h.w * view.R + h.r;
+  const fm = decode(P.frac_mean)[k], fz = decode(P.frac_zero)[k];
+  tip.innerHTML = `<b>writer ${wr.key}</b> · reader <b>${rd.key}</b><br>mean ablation: ${fmt(fm)} of Var(y_w)<br>zero ablation: ${fmt(fz)} of E[y_w²]` +
+    (view.offs[k] ? `<br><b>offset reader</b>` : "") + `<br>writer p_on ${(wr.p_on * 100).toFixed(1)} %, k99 ${wr.k99 || "not reached"}`;
+  tip.style.display = "block";
+  const tx = Math.min(ev.clientX + 14, window.innerWidth - tip.offsetWidth - 8), ty = Math.min(ev.clientY + 14, window.innerHeight - tip.offsetHeight - 8);
+  tip.style.left = tx + "px"; tip.style.top = ty + "px";
+});
+$("cv").addEventListener("mouseleave", () => { $("tip").style.display = "none"; drawCross(null); });
+$("cv").addEventListener("click", (ev) => {
+  const h = hit(ev); if (!h) return;
+  window.open(`../L${state.layer}/app/index.html#m=w&t=${state.t}&s=99&k=${view.P.writers[h.w].key}`, "_blank");
+});
+
+readHash();
+$("layer").innerHTML = M.layers.map(l => `<option value="${l}">L${l}</option>`).join("");
+$("pos").innerHTML = M.positions.map(t => `<option value="${t}">"${M.position_labels[t]}" (t = ${t})</option>`).join("");
+$("layer").value = state.layer; $("pos").value = state.t; $("metric").value = state.metric; $("order").value = state.order;
+$("layer").onchange = (e) => { state.layer = +e.target.value; render(); };
+$("prev").onclick = () => { const i = M.layers.indexOf(state.layer); if (i > 0) { state.layer = M.layers[i - 1]; $("layer").value = state.layer; render(); } };
+$("next").onclick = () => { const i = M.layers.indexOf(state.layer); if (i < M.layers.length - 1) { state.layer = M.layers[i + 1]; $("layer").value = state.layer; render(); } };
+$("pos").onchange = (e) => { state.t = e.target.value; render(); };
+$("metric").onchange = (e) => { state.metric = e.target.value; render(); };
+$("order").onchange = (e) => { state.order = e.target.value; render(); };
+$("offs").onchange = (e) => { state.offs = e.target.checked; render(); };
+$("cell").onchange = (e) => { state.cell = +e.target.value; render(); };
+window.addEventListener("resize", () => { if (!state.cell) render(); });
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", render);
+render();
+</script>
+</body>
+</html>
