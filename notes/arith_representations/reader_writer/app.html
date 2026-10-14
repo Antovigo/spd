@@ -133,7 +133,7 @@ details.browse summary { cursor: pointer; font-weight: 600; }
       <dt>write share</dt><dd>writer's share of Σ_w P(on) · E[y_w² | on] · ‖U_w‖², U_w its write vector into the residual stream.</dd>
       <dt>Grids</dt><dd>rows: a = 1 (top) to 400 (bottom); columns: b = 1 (left) to 400 (right); one pixel per prompt at 400 px.</dd>
       <dt>Grid colours</dt><dd>blue negative, grey 0, red positive, symmetric scale per grid (±max|value|); hatched cells (masked view only): component off.</dd>
-      <dt>Pair plot</dt><dd>"show" picks predictor lines, prompts, or both. Lines: the predicted y_w (the formula above) as s_r is swept over the union of the ranges of s_r and a_r on the prompts where w is on; one line per value of a second support reader o, set to its 10/30/50/70/90 % quantiles over those prompts (of s_o, or of a_o when "Grid values" is full a); every other reader at its mean s̄. Points: up to 4000 random prompts where w is on, x = s_r (or a_r), y = the measured y_w, colour = s_o (or a_o); grey points: o off (masked view). Colour is viridis over o's range on those prompts, for lines and points alike. Point values come from the grids (8-bit, 255 levels across each grid's range). The ring marks the hovered grid cell.</dd>
+      <dt>Pair plot</dt><dd>"show" picks predictor lines, prompts, or both. Lines: the predicted y_w (the formula above) as s_r is swept over the union of the ranges of s_r and a_r on the prompts where w is on; one line per value of a second support reader o, set to its 10/30/50/70/90 % quantiles over those prompts (of s_o, or of a_o when "Grid values" is full a); every other reader at its mean s̄. Points: up to 4000 random prompts where w is on, x = s_r (or a_r), y = the measured y_w, colour = s_o (or a_o); in the masked view a reader that is off has s = 0 and is plotted there. Colour is viridis over o's range on those prompts, for lines and points alike. Point values come from the grids (8-bit, 255 levels across each grid's range). The ring marks the hovered grid cell.</dd>
     </dl>
   </details>
   <details class="browse" id="browse" open><summary id="browse-title">Browse</summary><div class="blist" id="blist"></div></details>
@@ -353,7 +353,8 @@ function pairPlot(t, w, rIdx) {
     }
     const curves = computed;
     const gw = cache.grid[t + ":" + w.key], gx = gk(rd.key), go_ = colorBy == null ? null : gk(R[colorBy].key);
-    const pts = showPts && gw && gx ? points().map(([op, i]) => [gridValue(gx, op, i), gridValue(gw, op, i), go_ ? gridValue(go_, op, i) : null]) : [];
+    const val = (g, op, i) => gridValue(g, op, i) ?? 0; // masked grids: off means s = 0
+    const pts = showPts && gw && gx ? points().map(([op, i]) => [val(gx, op, i), gridValue(gw, op, i), go_ ? val(go_, op, i) : null]) : [];
     const ys = [...(showLines ? curves.flatMap(c => c.y) : []), ...pts.map(p => p[1])];
     let ymin = Math.min(...ys), ymax = Math.max(...ys);
     if (!isFinite(ymin)) { ymin = -1; ymax = 1; }
@@ -377,8 +378,8 @@ function pairPlot(t, w, rIdx) {
     if (pts.length) {
       ctx.globalAlpha = 0.6;
       for (const [x, y, o] of pts) {
-        if (x == null || y == null) continue;
-        ctx.fillStyle = o == null ? (go_ ? css("--ink-3") : css("--accent")) : rgbStr(viridis(cnorm(o)));
+        if (y == null) continue;
+        ctx.fillStyle = o == null ? css("--accent") : rgbStr(viridis(cnorm(o)));
         ctx.fillRect(X(x) - 1.5, Y(y) - 1.5, 3, 3);
       }
       ctx.globalAlpha = 1;
@@ -392,7 +393,7 @@ function pairPlot(t, w, rIdx) {
     }
     const cname = colorBy == null ? null : R[colorBy].key, sym = full ? "a" : "s";
     legend.replaceChildren(
-      ...(showPts ? [h("span", {}, `points: ${pts.length} random prompts where ${w.key} is on (x = ${sym} of ${rd.key}, y = y of ${w.key}${cname ? `, colour = ${sym} of ${cname}` : ""}${go_ && !full ? "; grey: o off" : ""})`)] : []),
+      ...(showPts ? [h("span", {}, `points: ${pts.length} random prompts where ${w.key} is on (x = ${sym} of ${rd.key}, y = y of ${w.key}${cname ? `, colour = ${sym} of ${cname}` : ""}${full ? "" : "; an off reader has s = 0"})`)] : []),
       ...(showLines ? (qo ? [h("span", {}, `lines: predictor with ${cname} = ${sym} at quantile`), ...curves.map(c => h("span", {}, h("i", { style: `background:${rgbStr(viridis(cnorm(c.so)))}` }), `${Math.round(c.q * 100)}%: ${fmt(c.so, 2)}`))]
         : [h("span", {}, h("i", { style: `background:${css("--ink")}` }), "predictor, other readers at mean")]) : []),
       ...(cname ? [h("span", { class: "muted" }, `viridis: ${fmt(clo, 2)} (dark) … ${fmt(chi, 2)} (yellow) = range of ${sym} of ${cname} where ${w.key} is on`)] : []));
