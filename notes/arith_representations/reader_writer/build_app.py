@@ -7,12 +7,19 @@ Writes OUT/app/ (open OUT/app/index.html over file://):
                                supports (R^2 >= 0.9 and 0.99), scores, R^2-vs-k curves, greedy paths
     data/pos<t>/grid_<key>.js  the component's masked activation s = m a over the (a, b) grid of
                                each operation: uint8 codes 0..254 linear in [lo, hi], 255 = off
+    data/pos<t>/full_<key>.js  the same for the full inner activation a (before the mask), every
+                               prompt coded
     data/vec/<key>.js          U_r (gate/up reader) or V_w (down writer), float32, d_mlp
     data/pos<t>/w_<key>.js     writer w: the pre-activations with EVERY reader at its mean over
                                w's on prompts (G0, H0, float32 d_mlp), those means (support readers),
-                               and each support reader's quantiles over w's on prompts
+                               and each support reader's quantiles over w's on prompts (of s
+                               and of the full inner activation a)
 
 <key> is <kind><component index>, e.g. gate123, down7.
+
+meta.js also carries each component's mean CI at t: the CI filter's output CI averaged over the
+320,000 prompts, read from the filter's ab_grids slices (`mean_ci` of add_pos<t> and sub_pos<t>,
+each a mean over its 160,000 prompts, averaged).
 
 The browser predicts y_w(s_r, s_o) = V_w . (silu(G) * H) with G = G0 + sum over the two plotted
 readers of (s - mean) U (gate ones; up ones go into H the same way), every other reader at its
@@ -60,12 +67,34 @@ def grid_doc(s: np.ndarray, on: np.ndarray) -> dict:
             **{op: b64(code[i * n : (i + 1) * n]) for i, op in enumerate(OPS)}}  # fmt: skip
 
 
+def mean_ci_of(ab_grids: Path, layer: int, t: int) -> dict[str, np.ndarray]:
+    """kind -> mean CI (float32, every component index of the site) at position t, both ops."""
+    out: dict[str, np.ndarray] = {}
+    for op in OPS:
+        text = (ab_grids / f"{op}_pos{t}.js").read_text()
+        doc = json.loads(text[text.index("(") + 1 : text.rindex(")")])
+        for mod in doc["modules"]:
+            for kind in ("gate", "up", "down"):
+                if mod["name"] == f"layers.{layer}.mlp.{kind}_proj":
+                    x = np.frombuffer(base64.b64decode(mod["mean_ci"]), np.float32) / len(OPS)
+                    out[kind] = out[kind] + x if kind in out else x
+    assert set(out) == {"gate", "up", "down"}, (layer, t, sorted(out))
+    return out
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--layer", type=int, required=True)
     ap.add_argument("--positions", type=int, nargs="+", default=[4, 3])
     ap.add_argument("--run_dir", type=Path, default=RUN_DIR)
+    ap.add_argument(
+        "--ab_grids",
+        type=Path,
+        default=None,
+        help="CI filter ab_grids folder (default <run_dir>/addsub-08-last-pos-40000/ab_grids)",
+    )
     args = ap.parse_args()
+    ab_grids = args.ab_grids or args.run_dir / "addsub-08-last-pos-40000" / "ab_grids"
     out = args.run_dir / "analysis" / "reader_writer" / f"L{args.layer}"
     app = out / "app"
     (app / "data" / "vec").mkdir(parents=True, exist_ok=True)
@@ -95,9 +124,13 @@ def main() -> None:
         rcols, wcols, rg = at["reader_cols"], at["writer_cols"], int(at["n_gate"])
         R, W = rcols.size, wcols.size
         s = a[:, rcols] * m[:, rcols]
+        all_on = np.ones(a.shape[0], bool)
         for col in np.concatenate([rcols, wcols]):
             jsonp(pdir / f"grid_{keys[col]}.js", "rwGrid", f"{t}:{keys[col]}",
                   grid_doc(a[:, col] * m[:, col], m[:, col]))  # fmt: skip
+            jsonp(pdir / f"full_{keys[col]}.js", "rwGrid", f"{t}:full:{keys[col]}",
+                  grid_doc(a[:, col], all_on))  # fmt: skip
+        mci = mean_ci_of(ab_grids, args.layer, t)
         score = at["score"]
         share = score / np.maximum(score.sum(1, keepdims=True), 1e-30)
         # k at the target, or (target never reached) the k of the best held-out R^2
@@ -148,12 +181,15 @@ def main() -> None:
             jsonp(pdir / f"w_{key}.js", "rwWriter", f"{t}:{key}", {
                 "G0": b64(G0.astype(np.float32)), "H0": b64(H0.astype(np.float32)),
                 "readers": sup, "mean": [float(mean[r]) for r in sup],
-                # per support reader, over ALL prompts where w is on: min, 10/30/50/70/90 %, max
+                # per support reader, over ALL prompts where w is on: min, 10/30/50/70/90 %, max of
+                # its masked activation s (q) and of its full inner activation a (qa)
                 "q": np.quantile(s[on][:, sup], [0, 0.1, 0.3, 0.5, 0.7, 0.9, 1], axis=0).T.astype(float).round(5).tolist(),
+                "qa": np.quantile(a[on][:, rcols[sup]], [0, 0.1, 0.3, 0.5, 0.7, 0.9, 1], axis=0).T.astype(float).round(5).tolist(),
             })  # fmt: skip
             g = greedy.get(w)
             writers.append({
                 "key": key, "comp": int(index[col]), "p_on": float(at["p_on"][w]),
+                "mean_ci": float(mci["down"][index[col]]),
                 "write": float(at["write"][w]), "k90": int(k_of["r2_90"][w]),
                 "k99": int(k_of["r2_99"][w]), "reached90": bool(at["k_r2_90"][w] > 0),
                 "reached99": bool(at["k_r2_99"][w] > 0), "sup90": supports["r2_90"][w],
@@ -184,6 +220,7 @@ def main() -> None:
                 "key": key, "kind": str(kind[col]), "comp": int(index[col]),
                 "p_on": float(m[:, col].mean()),
                 "mean_abs": float(np.abs(s[:, r]).mean()), "std": float(s[:, r].std()),
+                "mean_ci": float(mci[str(kind[col])][index[col]]),
                 "writers90": [w for w in range(W) if r in supports["r2_90"][w]],
                 "writers99": [w for w in range(W) if r in supports["r2_99"][w]],
                 "offset_for": [int(w) for w in np.flatnonzero(at["offset"][:, r])],
