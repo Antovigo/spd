@@ -336,8 +336,10 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--layer", type=int, required=True)
     ap.add_argument("--positions", type=int, nargs="+", default=[4])
+    ap.add_argument("--root", type=Path, default=RUN_DIR / "analysis" / "reader_writer",
+                    help="folder holding L<layer>/ (inner.npy, masks.npy, comps.npz)")  # fmt: skip
     args = ap.parse_args()
-    out = RUN_DIR / "analysis" / "reader_writer" / f"L{args.layer}"
+    out = args.root / f"L{args.layer}"
     rng = np.random.default_rng(0)
     summary = [run_position(out, t, rng) for t in args.positions]
     (out / "attribute_summary.json").write_text(json.dumps(summary, indent=2))
