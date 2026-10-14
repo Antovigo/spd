@@ -82,6 +82,45 @@ def mean_ci_of(ab_grids: Path, layer: int, t: int) -> dict[str, np.ndarray]:
     return out
 
 
+def write_ci_grids(
+    ab_grids: Path, layer: int, t: int, pdir: Path, comps: list[tuple[str, int]]
+) -> int:
+    """data/pos<t>/ci_<key>.js: the component's output CI on every prompt, uint8 (CI * 255) per op,
+    copied from the CI filter's ab_grids. ab_grids keeps per-prompt CI only for components whose
+    mean CI is at least its mean_ci_floor (0.05); the others get no file. Returns files written."""
+    saved: dict[tuple[str, str], list[int]] = {}
+    for op in OPS:
+        text = (ab_grids / f"{op}_pos{t}.js").read_text()
+        doc = json.loads(text[text.index("(") + 1 : text.rindex(")")])
+        for mod in doc["modules"]:
+            for kind in ("gate", "up", "down"):
+                if mod["name"] == f"layers.{layer}.mlp.{kind}_proj":
+                    saved[(op, kind)] = list(mod["saved"])
+    ci: dict[tuple[str, str], np.ndarray] = {}
+    for (op, kind), idx in saved.items():
+        path = ab_grids / f"{op}_pos{t}" / f"layers.{layer}.mlp.{kind}_proj.js"
+        if not idx or not path.exists():
+            continue
+        text = path.read_text()
+        doc = json.loads(text[text.index("(") + 1 : text.rindex(")")])
+        ci[(op, kind)] = np.frombuffer(base64.b64decode(doc["ci"]), np.uint8).reshape(
+            len(idx), N_A * N_B
+        )
+    n = 0
+    for kind, comp in comps:
+        if not all((op, kind) in ci and comp in saved[(op, kind)] for op in OPS):
+            continue
+        rows = {op: ci[(op, kind)][saved[(op, kind)].index(comp)] for op in OPS}
+        jsonp(
+            pdir / f"ci_{kind}{comp}.js",
+            "rwCI",
+            f"{t}:{kind}{comp}",
+            {op: b64(rows[op]) for op in OPS},
+        )
+        n += 1
+    return n
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--layer", type=int, required=True)
@@ -93,10 +132,22 @@ def main() -> None:
         default=None,
         help="CI filter ab_grids folder (default <run_dir>/addsub-08-last-pos-40000/ab_grids)",
     )
+    ap.add_argument("--ci_only", action="store_true",
+                    help="only (re)write the per-prompt CI files and index.html, keep everything else")  # fmt: skip
     args = ap.parse_args()
     ab_grids = args.ab_grids or args.run_dir / "addsub-08-last-pos-40000" / "ab_grids"
     out = args.run_dir / "analysis" / "reader_writer" / f"L{args.layer}"
     app = out / "app"
+    if args.ci_only:
+        shutil.copy(Path(__file__).with_name("app.html"), app / "index.html")
+        comps = np.load(out / "comps.npz")
+        for t in args.positions:
+            at = np.load(out / f"attr_pos{t}.npz")
+            cols = np.concatenate([at["reader_cols"], at["writer_cols"]])
+            pairs = [(str(comps["kind"][c]), int(comps["index"][c])) for c in cols]
+            n = write_ci_grids(ab_grids, args.layer, t, app / "data" / f"pos{t}", pairs)
+            print(f"t={t}: CI files for {n} of {len(pairs)} components", flush=True)
+        return
     (app / "data" / "vec").mkdir(parents=True, exist_ok=True)
     shutil.copy(Path(__file__).with_name("app.html"), app / "index.html")
     comps = np.load(out / "comps.npz")
@@ -131,6 +182,9 @@ def main() -> None:
             jsonp(pdir / f"full_{keys[col]}.js", "rwGrid", f"{t}:full:{keys[col]}",
                   grid_doc(a[:, col], all_on))  # fmt: skip
         mci = mean_ci_of(ab_grids, args.layer, t)
+        n_ci = write_ci_grids(ab_grids, args.layer, t, pdir,
+                              [(str(kind[c]), int(index[c])) for c in np.concatenate([rcols, wcols])])  # fmt: skip
+        print(f"t={t}: CI files for {n_ci} of {rcols.size + wcols.size} components", flush=True)
         score = at["score"]
         share = score / np.maximum(score.sum(1, keepdims=True), 1e-30)
         # k at the target, or (target never reached) the k of the best held-out R^2
