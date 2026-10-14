@@ -18,6 +18,8 @@ optimal leaf ordering. n is taken from N_VECS, keeping the order with the larges
 (share of A within 10 % of the axis length of the diagonal). Writers and readers that connect to each other then sit at the same place
 along their axes, so connected blocks lie near the diagonal.
 
+Each layer gets the positions among --positions that `attribute.py` has analysed.
+
 Writes <root>/heatmap/index.html and <root>/heatmap/data/L<l>.js (window.hmLayer(...)).
 
     python build_heatmap.py
@@ -81,7 +83,7 @@ def diag_mass(A: np.ndarray, band: float) -> float:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", type=Path, default=ROOT)
-    ap.add_argument("--positions", type=int, nargs="+", default=[4, 3])
+    ap.add_argument("--positions", type=int, nargs="+", default=[4, 3, 2, 1, 0])
     args = ap.parse_args()
     out = args.root / "heatmap"
     (out / "data").mkdir(parents=True, exist_ok=True)
@@ -90,10 +92,11 @@ def main() -> None:
     layers = []
     for ldir in sorted(args.root.glob("L*"), key=lambda p: int(p.name[1:])):
         layer = int(ldir.name[1:])
-        if not all((ldir / f"attr_pos{t}.npz").exists() for t in args.positions):
+        positions = [t for t in args.positions if (ldir / f"attr_pos{t}.npz").exists()]
+        if not positions:
             continue
         doc: dict = {"layer": layer, "positions": {}}
-        for t in args.positions:
+        for t in positions:
             at = np.load(ldir / f"attr_pos{t}.npz")
             rg = int(at["n_gate"])
             evaluated = ~np.isnan(at["r2_abl"]).all(1)

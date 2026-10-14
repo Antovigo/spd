@@ -133,7 +133,7 @@ details.browse summary { cursor: pointer; font-weight: 600; }
       <dt>write share</dt><dd>writer's share of Σ_w P(on) · E[y_w² | on] · ‖U_w‖², U_w its write vector into the residual stream.</dd>
       <dt>Grids</dt><dd>rows: a = 1 (top) to 400 (bottom); columns: b = 1 (left) to 400 (right); one pixel per prompt at 400 px.</dd>
       <dt>Grid colours</dt><dd>blue negative, grey 0, red positive, symmetric scale per grid (±max|value|); hatched cells (masked view only): component off.</dd>
-      <dt>Pair plot</dt><dd>"show" picks predictor lines, prompts, or both. Lines: the predicted y_w (the formula above) as s_r is swept over the union of the ranges of s_r and a_r on the prompts where w is on; one line per value of a second support reader o, set to its 10/30/50/70/90 % quantiles over those prompts (of s_o, or of a_o when "Grid values" is full a); every other reader at its mean s̄. Points: 4000 random prompts out of all 320,000, x = s_r (or a_r), y = the writer's masked activation (or its full inner activation a_w), colour = s_o (or a_o), or the per-prompt output CI (in [0, 1]) of the plotted reader or writer, available for components with mean CI ≥ 0.05; filled squares: w on, hollow squares: w off. In the masked view an off component has s = 0 and is plotted there. The lines are the predictor of y_w and only apply where w is on. Colour is viridis over o's range on those prompts, for lines and points alike. Point values come from the grids (8-bit, 255 levels across each grid's range). The ring marks the hovered grid cell's prompt, on every prompt.</dd>
+      <dt>Pair plot</dt><dd>"show" picks predictor lines, prompts, or both. Lines: the predicted y_w (the formula above) as s_r is swept over the union of the ranges of s_r and a_r on the prompts where w is on; one line per value of a second support reader o, set to its 10/30/50/70/90 % quantiles over those prompts (of s_o, or of a_o when "Grid values" is full a); every other reader at its mean s̄. Points: 1000 prompts per writer w, 500 where w is on and 500 where it is off (when one case has fewer than 500 prompts, all of them and the other case up to 1000), the same for every plot of w, x = s_r (or a_r), y = the writer's masked activation (or its full inner activation a_w), colour = s_o (or a_o), or the per-prompt output CI (in [0, 1]) of the plotted reader or writer, available for components with mean CI ≥ 0.05, or the gradient ∂y_w/∂s_r of the plotted reader, computed in the page on those prompts: with G and H summed from every reader's s on that prompt, ∂y_w/∂s_r = V_w · (silu(G) ⊙ U_r) for an up reader and V_w · (silu′(G) ⊙ H ⊙ U_r) for a gate reader (s from the 8-bit grids, so approximate); filled squares: w on, hollow squares: w off. In the masked view an off component has s = 0 and is plotted there. The lines are the predictor of y_w and only apply where w is on. Colour is viridis over o's range on those prompts, for lines and points alike. Point values come from the grids (8-bit, 255 levels across each grid's range). The ring marks the hovered grid cell's prompt, on every prompt.</dd>
     </dl>
   </details>
   <details class="browse" id="browse" open><summary id="browse-title">Browse</summary><div class="blist" id="blist"></div></details>
@@ -307,7 +307,52 @@ function viridis(x) { // x in [0, 1]
   const f = Math.min(1, Math.max(0, x)) * (VIRIDIS.length - 1), i = Math.min(Math.floor(f), VIRIDIS.length - 2), k = f - i;
   return VIRIDIS[i].map((c, j) => Math.round(c + (VIRIDIS[i + 1][j] - c) * k));
 }
-const N_POINTS = 4000;
+// ---------- per-writer prompt sample and in-browser gradients ----------
+const N_SIDE = 500, N_TOTAL = 1000;
+const wcache = {};
+function seededRandom(str) { // mulberry32 seeded by a string hash: the same sample on every reload
+  let h_ = 2166136261; for (const ch of str) h_ = Math.imul(h_ ^ ch.charCodeAt(0), 16777619);
+  return () => { h_ = (h_ + 0x6D2B79F5) | 0; let x = Math.imul(h_ ^ (h_ >>> 15), 1 | h_); x = (x + Math.imul(x ^ (x >>> 7), 61 | x)) ^ x; return ((x ^ (x >>> 14)) >>> 0) / 4294967296; };
+}
+// 1000 prompts: 500 where w is on and 500 where it is off; when one case has fewer than 500,
+// all of it plus the other case up to 1000. Needs w's masked grid loaded.
+function writerSample(t, w) {
+  const k = t + ":" + w.key; if (!wcache[k]) wcache[k] = {};
+  const c = wcache[k]; if (c.sample) return c.sample;
+  const gw = cache.grid[k], on = [], off = [];
+  for (const op of META.ops) gw.dec[op].forEach((code, i) => (code !== 255 ? on : off).push([op, i]));
+  const rnd = seededRandom(k);
+  const pickN = (arr, n) => { for (let i = 0; i < n; i++) { const j = i + Math.floor(rnd() * (arr.length - i)); [arr[i], arr[j]] = [arr[j], arr[i]]; } return arr.slice(0, n); };
+  let nOn = Math.min(on.length, N_SIDE), nOff = Math.min(off.length, N_SIDE);
+  if (nOn < N_SIDE) nOff = Math.min(off.length, N_TOTAL - nOn); else if (nOff < N_SIDE) nOn = Math.min(on.length, N_TOTAL - nOff);
+  c.nOn = nOn; c.nOff = nOff;
+  return (c.sample = [...pickN(on, nOn), ...pickN(off, nOff)]);
+}
+// dy_w/ds_r on the writer's sample, for every reader in its supports (R^2 >= 0.9 and 0.99).
+// G, H (length d_mlp) = sum of s_r U_r over gate / up readers, s_r from the masked grids (8-bit);
+// up reader: V_w . (silu(G) * U_r); gate reader: V_w . (silu'(G) * H * U_r).
+function writerGrads(t, w, onProgress) {
+  const k = t + ":" + w.key; writerSample(t, w);
+  const c = wcache[k]; if (c.grads) return Promise.resolve(c.grads); if (c.pending) return c.pending;
+  const R = P().readers, sup = [...new Set([...w.sup90, ...w.sup99])];
+  c.pending = Promise.all([getVec(w.key), ...R.map(r => getVec(r.key)), ...R.map(r => getGrid(t, r.key))]).then(async ([V, ...Us]) => {
+    const d = V.length, G = new Float32Array(d), H = new Float32Array(d), ag = new Float32Array(d), au = new Float32Array(d);
+    const grids = R.map(r => cache.grid[t + ":" + r.key]), gate = R.map(r => r.kind === "gate");
+    const out = Object.fromEntries(sup.map(r => [r, new Float32Array(c.sample.length)]));
+    for (let j = 0; j < c.sample.length; j++) {
+      const [op, i] = c.sample[j]; G.fill(0); H.fill(0);
+      for (let r = 0; r < R.length; r++) {
+        const sv = gridValue(grids[r], op, i); if (!sv) continue;
+        const U = Us[r], tgt = gate[r] ? G : H; for (let n = 0; n < d; n++) tgt[n] += sv * U[n];
+      }
+      for (let n = 0; n < d; n++) { const sg = 1 / (1 + Math.exp(-G[n])); au[n] = V[n] * G[n] * sg; ag[n] = V[n] * sg * (1 + G[n] * (1 - sg)) * H[n]; }
+      for (const r of sup) { const U = Us[r], a = gate[r] ? ag : au; let acc = 0; for (let n = 0; n < d; n++) acc += a[n] * U[n]; out[r][j] = acc; }
+      if (j % 25 === 24) { onProgress?.(j + 1, c.sample.length); await new Promise(res => setTimeout(res, 0)); }
+    }
+    return (c.grads = out);
+  });
+  return c.pending;
+}
 function pairPlot(t, w, rIdx) {
   const P_ = P(), R = P_.readers, rd = R[rIdx], full = state.vals === "f";
   const W = 440, Hh = 300, m = { l: 62, r: 12, t: 10, b: 38 };
@@ -316,11 +361,17 @@ function pairPlot(t, w, rIdx) {
   const ctl = h("div", { class: "ctl" });
   const box = h("div", { class: "plot-box" }, ctl, cv, legend);
   const others = supOf(w).filter(x => x !== rIdx);
-  // colorBy: a support reader's index, or "ci:r" / "ci:w" (per-prompt CI of the plotted reader / writer)
-  let colorBy = others.length ? others[0] : "ci:r", ciGrid = null, ciNote = "";
+  // colorBy: a support reader's index, "ci:r" / "ci:w" (per-prompt CI of the plotted reader / writer),
+  // or "grad" (dy_w/ds_r of the plotted reader, computed here on the writer's sample)
+  let colorBy = others.length ? others[0] : "ci:r", ciGrid = null, ciNote = "", grad = null;
   const ciKey = (c) => c === "ci:r" ? rd.key : w.key;
   function loadCI() {
-    ciGrid = null; ciNote = "";
+    ciGrid = null; ciNote = ""; grad = null;
+    if (colorBy === "grad") {
+      ciNote = "computing gradients…";
+      return writerGrads(t, w, (j, n) => { ciNote = `computing gradients… ${j}/${n} prompts`; draw(); })
+        .then(g => { grad = g[rIdx]; ciNote = ""; }).catch(err => { ciNote = err.message; });
+    }
     if (typeof colorBy !== "string") return Promise.resolve();
     return getCI(t, ciKey(colorBy)).then(d => { ciGrid = d; })
       .catch(() => { ciNote = `per-prompt CI of ${ciKey(colorBy)} is not stored (the CI filter keeps it only for components with mean CI ≥ 0.05)`; });
@@ -329,9 +380,10 @@ function pairPlot(t, w, rIdx) {
     [["lines", "predictor lines"], ["points", "prompts"], ["both", "both"]].map(([v, n]) => h("option", { value: v }, n)));
   showSel.value = state.pair;
   ctl.append("show", showSel);
-  const sel = h("select", { onchange: () => { colorBy = sel.value.startsWith("ci:") ? sel.value : +sel.value; computed = null; loadCI().then(draw); } },
+  const sel = h("select", { onchange: () => { colorBy = /^(ci:|grad)/.test(sel.value) ? sel.value : +sel.value; computed = null; loadCI().then(draw); } },
     [...others.map(o => h("option", { value: o }, `${R[o].key} (share ${pct(w.share[o] || 0)})`)),
-     h("option", { value: "ci:r" }, `CI of ${rd.key} (reader)`), h("option", { value: "ci:w" }, `CI of ${w.key} (writer)`)]);
+     h("option", { value: "ci:r" }, `CI of ${rd.key} (reader)`), h("option", { value: "ci:w" }, `CI of ${w.key} (writer)`),
+     h("option", { value: "grad" }, `gradient ∂y/∂s of ${w.key} wrt ${rd.key}`)]);
   sel.value = String(colorBy);
   ctl.append("colour by", sel);
   let wd, V, U = {}, frame = null, computed = null, sample = null;
@@ -340,12 +392,7 @@ function pairPlot(t, w, rIdx) {
     ...others.map(o => getGrid(t, R[o].key, full)), ...supOf(w).map(x => getVec(R[x].key).then(f => { U[x] = f; }))])
     .then(([d, v]) => { wd = d; V = v; return loadCI(); }).then(draw)
     .catch(err => box.append(h("div", { class: "warn" }, err.message)));
-  function points() { // random sample of all prompts (both ops): [op, idx]
-    if (sample) return sample;
-    const n = META.ops.length * 160000, pick = new Set();
-    while (pick.size < Math.min(N_POINTS, n)) pick.add(Math.floor(Math.random() * n));
-    return (sample = [...pick].map(k => [META.ops[Math.floor(k / 160000)], k % 160000]));
-  }
+  const points = () => writerSample(t, w);
   function draw() {
     if (!wd) return;
     const ctx = cv.getContext("2d"); ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
@@ -372,7 +419,8 @@ function pairPlot(t, w, rIdx) {
     const gw = cache.grid[t + ":" + w.key], gy = gk(w.key), gx = gk(rd.key), go_ = isCI ? null : gk(R[colorBy].key);
     const val = (g, op, i) => gridValue(g, op, i) ?? 0; // masked grids: off means s = 0
     // [x, y, colour value, w on]; y = y_w where w is on, else 0 (masked) or w's full inner activation
-    const pts = showPts && gw && gy && gx ? points().map(([op, i]) => [val(gx, op, i), val(gy, op, i), isCI ? (ciGrid ? ciGrid.dec[op][i] / 255 : null) : val(go_, op, i), gridValue(gw, op, i) != null]) : [];
+    const colourOf = (op, i, j) => colorBy === "grad" ? (grad ? grad[j] : null) : isCI ? (ciGrid ? ciGrid.dec[op][i] / 255 : null) : val(go_, op, i);
+    const pts = showPts && gw && gy && gx ? points().map(([op, i], j) => [val(gx, op, i), val(gy, op, i), colourOf(op, i, j), gridValue(gw, op, i) != null]) : [];
     const ys = [...(showLines ? curves.flatMap(c => c.y) : []), ...pts.map(p => p[1])];
     let ymin = Math.min(...ys), ymax = Math.max(...ys);
     if (!isFinite(ymin)) { ymin = -1; ymax = 1; }
@@ -392,7 +440,9 @@ function pairPlot(t, w, rIdx) {
     ctx.textAlign = "center"; ctx.fillStyle = css("--ink");
     ctx.fillText(`${full ? "a" : "s"} of ${rd.key}${showLines && full ? " (lines: s)" : ""}`, (m.l + W - m.r) / 2, Hh - 6);
     ctx.save(); ctx.translate(10, (m.t + Hh - m.b) / 2); ctx.rotate(-Math.PI / 2); ctx.fillText(`${showPts && full ? "a" : "y"} of ${w.key}`, 0, 0); ctx.restore();
-    const clo = qo ? qo[0] : 0, chi = qo ? qo[6] : 1, cnorm = (v) => chi > clo ? (v - clo) / (chi - clo) : 0.5;
+    let clo = qo ? qo[0] : 0, chi = qo ? qo[6] : 1;
+    if (colorBy === "grad" && grad) { clo = Math.min(...grad); chi = Math.max(...grad); }
+    const cnorm = (v) => chi > clo ? (v - clo) / (chi - clo) : 0.5;
     if (pts.length) {
       ctx.globalAlpha = 0.6;
       for (const [x, y, o, won] of pts) {
@@ -409,12 +459,13 @@ function pairPlot(t, w, rIdx) {
         xsweep.forEach((x, i) => i ? ctx.lineTo(X(x), Y(c.y[i])) : ctx.moveTo(X(x), Y(c.y[i]))); ctx.stroke();
       }
     }
-    const sym = full ? "a" : "s", cname = isCI ? `CI of ${ciKey(colorBy)}` : `${sym} of ${R[colorBy].key}`;
+    const sym = full ? "a" : "s", cname = colorBy === "grad" ? `∂y/∂s of ${w.key} wrt ${rd.key}` : isCI ? `CI of ${ciKey(colorBy)}` : `${sym} of ${R[colorBy].key}`;
     legend.replaceChildren(
-      ...(showPts ? [h("span", {}, `points: ${pts.length} random prompts (x = ${sym} of ${rd.key}, y = ${sym} of ${w.key}${isCI && !ciGrid ? "" : `, colour = ${cname}`}; filled: ${w.key} on, hollow: ${w.key} off${full ? "" : "; an off component has s = 0"})`)] : []),
+      ...(showPts ? [h("span", {}, `points: ${pts.length} prompts, ${wcache[t + ":" + w.key]?.nOn ?? "?"} with ${w.key} on and ${wcache[t + ":" + w.key]?.nOff ?? "?"} off (x = ${sym} of ${rd.key}, y = ${sym} of ${w.key}${isCI && !ciGrid && !grad ? "" : `, colour = ${cname}`}; filled: ${w.key} on, hollow: ${w.key} off${full ? "" : "; an off component has s = 0"})`)] : []),
       ...(showLines ? (qo ? [h("span", {}, `lines: predictor with ${cname} at quantile`), ...curves.map(c => h("span", {}, h("i", { style: `background:${rgbStr(viridis(cnorm(c.so)))}` }), `${Math.round(c.q * 100)}%: ${fmt(c.so, 2)}`))]
         : [h("span", {}, h("i", { style: `background:${css("--ink")}` }), "predictor, other readers at mean")]) : []),
-      ...(isCI ? (ciGrid ? [h("span", { class: "muted" }, `viridis: CI 0 (dark) … 1 (yellow)`)] : [h("span", { class: "warn" }, ciNote)])
+      ...(colorBy === "grad" ? (grad ? [h("span", { class: "muted" }, `viridis: ${fmt(clo, 2)} (dark) … ${fmt(chi, 2)} (yellow); exact formula, inputs s from the 8-bit grids`)] : [h("span", { class: "muted" }, ciNote)])
+        : isCI ? (ciGrid ? [h("span", { class: "muted" }, `viridis: CI 0 (dark) … 1 (yellow)`)] : [h("span", { class: "warn" }, ciNote)])
         : [h("span", { class: "muted" }, `viridis: ${fmt(clo, 2)} (dark) … ${fmt(chi, 2)} (yellow) = range of ${cname} where ${w.key} is on`)]));
     // hovered grid cell: its (x, y_w) from the grids (8-bit codes)
     // on every prompt: x and y in the current view (masked: an off component sits at s = 0)

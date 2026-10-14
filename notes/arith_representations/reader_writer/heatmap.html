@@ -137,6 +137,10 @@ const STRIP = 4;
 async function render() {
   writeHash();
   const doc = await load(state.layer);
+  const avail = M.positions.filter(t => doc.positions[String(t)]).map(String);
+  $("pos").innerHTML = avail.map(t => `<option value="${t}">"${M.position_labels[t]}" (t = ${t})</option>`).join("");
+  if (!avail.includes(state.t)) state.t = avail[0];
+  $("pos").value = state.t; writeHash();
   const P = doc.positions[state.t];
   const W = P.writers.length, R = P.readers.length;
   const vals = decode(P[state.metric]), offs = decode(P.offset);
@@ -221,7 +225,7 @@ $("cv").addEventListener("click", (ev) => {
 
 readHash();
 $("layer").innerHTML = M.layers.map(l => `<option value="${l}">L${l}</option>`).join("");
-$("pos").innerHTML = M.positions.map(t => `<option value="${t}">"${M.position_labels[t]}" (t = ${t})</option>`).join("");
+
 $("layer").value = state.layer; $("pos").value = state.t; $("metric").value = state.metric; $("order").value = state.order;
 $("layer").onchange = (e) => { state.layer = +e.target.value; render(); };
 $("prev").onclick = () => { const i = M.layers.indexOf(state.layer); if (i > 0) { state.layer = M.layers[i - 1]; $("layer").value = state.layer; render(); } };
