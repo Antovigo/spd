@@ -110,7 +110,7 @@ details.defs dt { color: var(--ink); font-family: ui-monospace, monospace; }
       <dt>s̄_r</dt><dd>mean of s_r over the prompts where w is on (fit half of the prompts); depends on w.</dd>
       <dt>Δ_r(w)</dt><dd>change of y_w when s_r alone is replaced by s̄_r (mean ablation), computed exactly.</dd>
       <dt>share</dt><dd>E[Δ_r(w)²] / Σ_r' E[Δ_r'(w)²], E the average over the fit half's prompts where w is on. Readers are ranked by it.</dd>
-      <dt>offset reader</dt><dd>reader r of writer w with E[Δ_r(w)²] < 1 % of Var(y_w) (its variation does not matter) but E[(y_w with s_r = 0 − y_w)²] > 1 % of E[y_w²] (switching it off does). "off-cost" = that last ratio.</dd>
+      <dt>offset reader</dt><dd>reader r of writer w with E[Δ_r(w)²] < 1 % of Var(y_w) (its variation does not matter) but E[(y_w with s_r = 0 − y_w)²] > 10 % of E[y_w²] (switching it off does). "off-cost" = that last ratio.</dd>
       <dt>k</dt><dd>number of top-ranked readers kept (integer); the others are held at their mean s̄_r over prompts where w is on.</dd>
       <dt>R²_k</dt><dd>1 − E[(y_w − ŷ_w)²] / Var(y_w) on held-out prompts where w is on, ŷ_w the prediction with k readers.</dd>
       <dt>support</dt><dd>the writer's top k readers, k the smallest value reaching R²_k ≥ 0.9 (or 0.99, toggle). "not reached" marks writers where the target is never met; their support is the k of best R².</dd>

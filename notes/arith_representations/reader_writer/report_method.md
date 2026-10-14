@@ -145,7 +145,7 @@ them we also switch each reader off (`s_r → 0`) and measure the squared change
 `𝔼[(y_w(s_r → 0) − y_w)² | m_w = 1]`. A reader is an **offset reader** of writer `w` when
 
 * holding it at its mean costs less than 1 % of `Var(y_w)`, and
-* switching it off costs more than 1 % of `𝔼[y_w² | m_w = 1]`.
+* switching it off costs more than 10 % of `𝔼[y_w² | m_w = 1]`.
 
 Both thresholds are first guesses, to be set from the layer-18 results. In the predictor of
 section 7, offset readers are folded into the constant offsets.

@@ -37,11 +37,14 @@ import numpy as np
 jax.config.update("jax_default_matmul_precision", "highest")
 
 RUN_DIR = Path("/mnt/nw/home/a.vigouroux/out/pod-backup/p-ba8b0c08")
-K_GRID = (1, 2, 3, 4, 5, 6, 8, 10, 12, 15, 20, 25, 30, 40, 50, 75, 100, 150, 200, 320)
+K_GRID = (*range(1, 51), 60, 75, 100, 125, 150, 200, 250, 300, 400)
 N_EVAL = 20000
+"""Max held-out writer-on prompts per writer (sampled from the whole held-out half)."""
+MIN_EVAL = 50
+"""Writers with fewer held-out on prompts are not evaluated (R^2 curves NaN)."""
 BATCH = 100
 OFFSET_MEAN_MAX = 0.01
-OFFSET_ZERO_MIN = 0.01
+OFFSET_ZERO_MIN = 0.1
 N_GREEDY_FIT = 1500
 N_GREEDY_WRITERS = 30
 K_GREEDY = 15
@@ -107,6 +110,15 @@ def padded(fn, x, size, *args):  # noqa: ANN001, ANN002, ANN201
 
 def recompute_cols(x, rg, Ug, Uu, Vd):  # noqa: ANN001, ANN201
     return recompute(x[:, :rg], x[:, rg:], Ug, Uu, Vd)
+
+
+def eval_rows(on, rng):  # noqa: ANN001, ANN201
+    """Held-out rows where the writer is on: all of them up to N_EVAL (else a sorted sample);
+    None when fewer than MIN_EVAL."""
+    rows = np.flatnonzero(on)
+    if rows.size < MIN_EVAL:
+        return None
+    return np.sort(rng.choice(rows, N_EVAL, replace=False)) if rows.size > N_EVAL else rows
 
 
 def r2(y, yhat):  # noqa: ANN001, ANN201
@@ -177,7 +189,7 @@ def run_position(out: Path, t: int, rng: np.random.Generator) -> dict:
 
     perm = rng.permutation(N)
     fit, held = np.sort(perm[: N // 2]), perm[N // 2 :]
-    ev = np.sort(held[:N_EVAL])
+    ev = np.sort(held)
 
     # pass 1a (fit half): per-writer means and rms of the readers over writer-on prompts
     w8_fit = mw[fit].astype(np.float64)
@@ -237,8 +249,8 @@ def run_position(out: Path, t: int, rng: np.random.Generator) -> dict:
     sc_ev = jnp.asarray(s_ev)
     y_rec[:] = padded(recompute_cols, sc_ev, 500, rg, Ug, Uu, Vd)
     for w in range(W):
-        rows = np.flatnonzero(on_ev[:, w])
-        if rows.size < 20:
+        rows = eval_rows(on_ev[:, w], rng)
+        if rows is None:
             continue
         dev = jnp.asarray(s_ev[rows] - mean_s[w], jnp.float32)
         yt = y_rec[rows, w]
@@ -290,8 +302,8 @@ def run_position(out: Path, t: int, rng: np.random.Generator) -> dict:
     for w in order[:N_GREEDY_WRITERS]:
         rows_fit = fit[mw[fit, w]]
         rows_fit = rng.choice(rows_fit, min(N_GREEDY_FIT, rows_fit.size), replace=False)
-        rows_ev = np.flatnonzero(on_ev[:, w])
-        if rows_fit.size < 50 or rows_ev.size < 20:
+        rows_ev = eval_rows(on_ev[:, w], rng)
+        if rows_fit.size < 50 or rows_ev is None:
             continue
         sf = jnp.asarray(s[rows_fit])
         yf = recompute(sf[:, :rg], sf[:, rg:], Ug, Uu, Vd[:, w : w + 1])[:, 0]
