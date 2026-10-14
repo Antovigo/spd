@@ -133,7 +133,7 @@ details.browse summary { cursor: pointer; font-weight: 600; }
       <dt>write share</dt><dd>writer's share of Σ_w P(on) · E[y_w² | on] · ‖U_w‖², U_w its write vector into the residual stream.</dd>
       <dt>Grids</dt><dd>rows: a = 1 (top) to 400 (bottom); columns: b = 1 (left) to 400 (right); one pixel per prompt at 400 px.</dd>
       <dt>Grid colours</dt><dd>blue negative, grey 0, red positive, symmetric scale per grid (±max|value|); hatched cells (masked view only): component off.</dd>
-      <dt>Pair plot</dt><dd>"show" picks predictor lines, prompts, or both. Lines: the predicted y_w (the formula above) as s_r is swept over the union of the ranges of s_r and a_r on the prompts where w is on; one line per value of a second support reader o, set to its 10/30/50/70/90 % quantiles over those prompts (of s_o, or of a_o when "Grid values" is full a); every other reader at its mean s̄. Points: 4000 random prompts out of all 320,000, x = s_r (or a_r), y = the writer's masked activation (or its full inner activation a_w), colour = s_o (or a_o), or the per-prompt output CI (in [0, 1]) of the plotted reader or writer, available for components with mean CI ≥ 0.05; filled squares: w on, hollow squares: w off. In the masked view an off component has s = 0 and is plotted there. The lines are the predictor of y_w and only apply where w is on. Colour is viridis over o's range on those prompts, for lines and points alike. Point values come from the grids (8-bit, 255 levels across each grid's range). The ring marks the hovered grid cell.</dd>
+      <dt>Pair plot</dt><dd>"show" picks predictor lines, prompts, or both. Lines: the predicted y_w (the formula above) as s_r is swept over the union of the ranges of s_r and a_r on the prompts where w is on; one line per value of a second support reader o, set to its 10/30/50/70/90 % quantiles over those prompts (of s_o, or of a_o when "Grid values" is full a); every other reader at its mean s̄. Points: 4000 random prompts out of all 320,000, x = s_r (or a_r), y = the writer's masked activation (or its full inner activation a_w), colour = s_o (or a_o), or the per-prompt output CI (in [0, 1]) of the plotted reader or writer, available for components with mean CI ≥ 0.05; filled squares: w on, hollow squares: w off. In the masked view an off component has s = 0 and is plotted there. The lines are the predictor of y_w and only apply where w is on. Colour is viridis over o's range on those prompts, for lines and points alike. Point values come from the grids (8-bit, 255 levels across each grid's range). The ring marks the hovered grid cell's prompt, on every prompt.</dd>
     </dl>
   </details>
   <details class="browse" id="browse" open><summary id="browse-title">Browse</summary><div class="blist" id="blist"></div></details>
@@ -417,9 +417,10 @@ function pairPlot(t, w, rIdx) {
       ...(isCI ? (ciGrid ? [h("span", { class: "muted" }, `viridis: CI 0 (dark) … 1 (yellow)`)] : [h("span", { class: "warn" }, ciNote)])
         : [h("span", { class: "muted" }, `viridis: ${fmt(clo, 2)} (dark) … ${fmt(chi, 2)} (yellow) = range of ${cname} where ${w.key} is on`)]));
     // hovered grid cell: its (x, y_w) from the grids (8-bit codes)
-    if (hover.idx != null && gw && gx) {
-      const xv = gridValue(gx, hover.op, hover.idx), yv = gridValue(gw, hover.op, hover.idx);
-      if (yv != null) { ctx.strokeStyle = css("--ink"); ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(X(xv == null ? 0 : xv), Y(yv), 6, 0, 2 * Math.PI); ctx.stroke(); }
+    // on every prompt: x and y in the current view (masked: an off component sits at s = 0)
+    if (hover.idx != null && gy && gx) {
+      const xv = val(gx, hover.op, hover.idx), yv = val(gy, hover.op, hover.idx);
+      ctx.strokeStyle = css("--ink"); ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(X(xv), Y(yv), 6, 0, 2 * Math.PI); ctx.stroke();
     }
   }
   const onHover = () => draw();
