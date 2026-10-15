@@ -20,8 +20,9 @@ dense decomposition target (torch's `-id` configs); they are initialized to iden
 frozen-random per `TMSConfig.hidden_layer_init` and never trained.
 """
 
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import Literal
 
 import equinox as eqx
 import jax
@@ -29,26 +30,35 @@ import jax.numpy as jnp
 import numpy as np
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
-from jaxtyping import Array, Float
+from jaxtyping import Array, Bool, Float
 
-from param_decomp.core.ci_fn import AnyCI, output_ci
+from param_decomp.core.ci_fn.interface import CIFn, output_ci
 from param_decomp.core.components import (
     ComponentStacks,
     SiteC,
+    SiteCI,
     SiteDims,
     SiteSpec,
-    site_slots_for,
+    require_full_emission,
+    site_stack_indices_for,
 )
-from param_decomp.core.decomposed_linear import site_out
+from param_decomp.core.decomposed_linear import SiteWeights, site_out
 from param_decomp.core.masking import materialize_masking
 from param_decomp.core.model import (
     EMPTY_CAPTURE_KEYS,
     CaptureKeys,
     ForwardResult,
     Masking,
+    MaterializedMasking,
+    PlacedModel,
+    SiteRoutes,
+    StochasticMasking,
+    validate_routes,
 )
-from param_decomp.core.nonlinearity import Neurons
-from param_decomp.core.placement import CIFnPlacement, PlacementRules
+from param_decomp.core.nonlinearity import Neurons, NonlinearityAlignment
+from param_decomp.core.placement import PlacementRules
+from param_decomp.core.pytree import ShardingTree
+from param_decomp.core.sharding import batch_shard_leading
 from param_decomp.targets.linear_site_capture import site_output_key
 
 LINEAR1 = "linear1"
@@ -121,18 +131,6 @@ def _record_capture(
     key = requested.get(index)
     if key is not None:
         captures[key] = value
-
-
-class CIFnCallable(Protocol):
-    """The CI-fn surface the TMS target-CI probe needs: `__call__(taps) -> CI` plus the
-    `capture_keys` the probe feeds (satisfied by `ci_fn.LayerwiseMLPCIFn` / `GlobalMLPCIFn`)."""
-
-    @property
-    def capture_keys(self) -> CaptureKeys: ...
-
-    def __call__(
-        self, taps: dict[str, Array], *, remat: bool, placement: CIFnPlacement | None
-    ) -> AnyCI: ...
 
 
 @dataclass(frozen=True)
@@ -225,11 +223,11 @@ def site_specs(cfg: TMSConfig, site_cs: tuple[SiteC, ...]) -> tuple[SiteSpec, ..
         specs.append(
             SiteSpec(
                 name=site.name,
-                d_in=dims.d_in,
-                d_out=dims.d_out,
-                C=site.C,
+                factorization=dims.dense(site.C),
                 group=site.name,
-                nonlinearity_partition=Neurons() if site.name == LINEAR2 else None,
+                alignment=NonlinearityAlignment("output", Neurons())
+                if site.name == LINEAR2
+                else None,
             )
         )
     return tuple(specs)
@@ -253,14 +251,14 @@ def _frozen_hidden_forward(target: TMSTarget, hidden: Array) -> Array:
 
 
 def clean_output(target: TMSTarget, resid: Float[Array, "B n_features"]) -> Array:
-    """The all-frozen forward — the recon target (SPEC S3). `resid` is the raw input `x`."""
+    """The all-frozen forward — the recon target. `resid` is the raw input `x`."""
     hidden = resid @ target.W1.T
     hidden = _frozen_hidden_forward(target, hidden)
     return jax.nn.relu(hidden @ target.W2.T + target.b2)
 
 
 def site_inputs(target: TMSTarget, resid: Float[Array, "B n_features"]) -> dict[str, Array]:
-    """Clean CI inputs per site (SPEC S4): each site reads the frozen output of the chain
+    """Clean CI inputs per site: each site reads the frozen output of the chain
     up to it — `linear1` reads `x`, `hidden_layers.{i}` reads the frozen output through
     `hidden_layers.{i-1}`, `linear2` reads the frozen output through the last hidden layer."""
     inputs: dict[str, Array] = {LINEAR1: resid}
@@ -277,10 +275,15 @@ def clean_forward(
     resid: Float[Array, "B n_features"],
     capture_keys: tuple[str, ...],
     capture_sources: TMSCaptureSources,
-) -> ForwardResult:
+) -> ForwardResult[Array, Array]:
     if not capture_keys:
         return ForwardResult.from_producer(
-            output=clean_output(target, resid), capture_keys=(), capture_values=()
+            leading_shape=resid.shape[:-1],
+            output=clean_output(target, resid),
+            capture_keys=(),
+            capture_values=(),
+            conditioning=resid,
+            sequence=None,
         )
     requested = _capture_key_by_index(capture_keys, capture_sources)
     captures: dict[str, Array] = {}
@@ -295,9 +298,12 @@ def clean_forward(
     _record_capture(captures, requested, len(target.hidden) + 2, linear2)
     assert set(captures) == set(capture_keys), (sorted(captures), sorted(capture_keys))
     return ForwardResult.from_producer(
+        leading_shape=resid.shape[:-1],
         output=jax.nn.relu(linear2 + target.b2),
         capture_keys=capture_keys,
         capture_values=tuple(captures[key] for key in capture_keys),
+        conditioning=resid,
+        sequence=None,
     )
 
 
@@ -305,13 +311,13 @@ def _run_masked(
     target: TMSTarget,
     components: ComponentStacks,
     resid: Float[Array, "B n_features"],
-    component_masks: dict[str, Array],
-    weight_delta_masks: dict[str, Array] | None,
-    routes: dict[str, Array] | None,
+    component_masks: Mapping[str, Array],
+    weight_delta_masks: Mapping[str, Array] | None,
+    routes: Mapping[str, Bool[Array, "*leading"]] | None,
     capture_keys: tuple[str, ...],
     capture_sources: TMSCaptureSources,
     placement: PlacementRules | None,
-) -> ForwardResult:
+) -> ForwardResult[Array, Array]:
     """Masked forward plus requested captures; every downstream site sees prior changes.
 
     Every site the forward visits is decomposed (`canonical_site_cs` pins the site set to
@@ -327,14 +333,10 @@ def _run_masked(
         site_components = components.site(site_name)
         return site_out(
             site_input,
-            site_components.V,
-            site_components.U,
-            W,
+            SiteWeights(W, site_components.V, site_components.U, None, placement),
             component_masks[site_name],
             None if weight_delta_masks is None else weight_delta_masks[site_name],
             None if routes is None else routes[site_name],
-            placement,
-            None,
         )
 
     hidden = masked_site_output(LINEAR1, target.W1, resid)
@@ -347,21 +349,24 @@ def _run_masked(
     pre_relu = pre_relu + target.b2
     assert set(captures) == set(capture_keys), (sorted(captures), sorted(capture_keys))
     return ForwardResult.from_producer(
+        leading_shape=resid.shape[:-1],
         output=jax.nn.relu(pre_relu),
         capture_keys=capture_keys,
         capture_values=tuple(captures[key] for key in capture_keys),
+        conditioning=resid,
+        sequence=None,
     )
 
 
 def weight_deltas_fp32(target: TMSTarget, components: ComponentStacks) -> dict[str, Array]:
     """fp32 `W − (V@U)ᵀ` per persistence stack, slot-aligned with `components.stacks`
-    (SPEC N2; faithfulness input) — whole-stack einsum, never per-site `site()` slices."""
+    (faithfulness input) — whole-stack einsum, never per-site `site()` slices."""
     out: dict[str, Array] = {}
     for shape, (Vs, Us) in components.stacks.items():
         Ws = jnp.stack(
             [
                 _frozen_site_weight(target, name)
-                for name, s, _slot in components.site_slots
+                for name, s, _slot in components.site_stack_indices
                 if s == shape
             ]
         )
@@ -383,7 +388,7 @@ def tms_mse(
 
 
 class TMSDecomposedModel(eqx.Module):
-    """The TMS `DecomposedModel` (the `model.py` contract; SPEC §1), positionless.
+    """The TMS `DecomposedModel` (the `model.py` contract), positionless.
 
     Carries the FROZEN `TMSTarget` weights as a field — threaded into the jitted step as a
     pytree arg, weights traced not baked. The TRAINABLE V/U (`vu: ComponentStacks`) is an explicit
@@ -397,23 +402,22 @@ class TMSDecomposedModel(eqx.Module):
     def site_names(self) -> tuple[str, ...]:
         return tuple(s.name for s in self.sites)
 
-    def shardings(self, placement: PlacementRules) -> "TMSDecomposedModel":
+    def shardings(self, placement: PlacementRules) -> ShardingTree:
         """Replicate every frozen leaf on the `dp` mesh — TMS weights are tiny."""
         repl = NamedSharding(placement.mesh, P())
         return jax.tree.map(lambda _a: repl, self)
 
     @staticmethod
-    def recon_loss_fn(
-        masked_output: Float[Array, "B n_features"], clean_output: Float[Array, "B n_features"]
-    ) -> Array:
+    def recon_loss_fn(masked_output: Array, clean_output: Array) -> Float[Array, ""]:
         return tms_mse(masked_output, clean_output)
+
+    @staticmethod
+    def pin_output_batch(output: Array, mesh: Mesh | None) -> Array:
+        return batch_shard_leading(output, mesh)
 
     def site_output_keys(self, sites: tuple[str, ...]) -> tuple[str, ...]:
         assert set(sites) <= set(self.site_names), (sites, self.site_names)
         return tuple(site_output_key(site) for site in sites)
-
-    def assert_hidden_acts_reconstruction_points(self, keys: tuple[str, ...]) -> None:
-        _resolve_capture(self.site_names, keys)
 
     def clean_forward(
         self,
@@ -421,7 +425,7 @@ class TMSDecomposedModel(eqx.Module):
         capture_keys: CaptureKeys = EMPTY_CAPTURE_KEYS,
         *,
         placement: PlacementRules | None,
-    ) -> ForwardResult:
+    ) -> ForwardResult[Array, Array]:
         del placement
         ordered_capture_keys = tuple(sorted(capture_keys))
         capture_sources = _resolve_capture(self.site_names, ordered_capture_keys)
@@ -440,16 +444,27 @@ class TMSDecomposedModel(eqx.Module):
         inputs: Array,
         /,
         *,
+        sites: tuple[str, ...],
         capture_keys: CaptureKeys,
         placement: PlacementRules | None,
-    ) -> tuple[ForwardResult, dict[str, Array]]:
-        del prepared_weights, inputs, capture_keys, placement
+    ) -> tuple[ForwardResult[Array, Array], dict[str, SiteCI]]:
+        del prepared_weights, inputs, sites, capture_keys, placement
         raise NotImplementedError(
             f"{type(self).__name__} does not support component-activation harvest"
         )
 
-    def stack_ci(self, ci_lower: dict[str, Array]) -> dict[str, Array]:
-        return ci_lower
+    @staticmethod
+    def prepare_masking(masking: Masking) -> MaterializedMasking:
+        return materialize_masking(masking)
+
+    @staticmethod
+    def prepare_stochastic_masking(
+        ci: Mapping[str, SiteCI],
+    ) -> Callable[[Array], MaterializedMasking]:
+        def draw(draw_key: Array) -> MaterializedMasking:
+            return materialize_masking(StochasticMasking(ci=ci, draw_key=draw_key))
+
+        return draw
 
     def masked_forward(
         self,
@@ -457,22 +472,23 @@ class TMSDecomposedModel(eqx.Module):
         resid: Float[Array, "B n_features"],
         /,
         *,
-        masking: Masking,
+        masking: MaterializedMasking,
+        routes: SiteRoutes | None,
         placement: PlacementRules | None,
         capture_keys: CaptureKeys = EMPTY_CAPTURE_KEYS,
         remat: bool,
-    ) -> ForwardResult:
+    ) -> ForwardResult[Array, Array]:
+        validate_routes(routes, self.site_names)
         ordered_capture_keys = tuple(sorted(capture_keys))
         capture_sources = _resolve_capture(self.site_names, ordered_capture_keys)
-        explicit_masking = materialize_masking(masking)
 
         def forward(
             vu: ComponentStacks,
             resid: Array,
-            component_masks: dict[str, Array],
-            weight_delta_masks: dict[str, Array] | None,
-            routes: dict[str, Array] | None,
-        ) -> ForwardResult:
+            component_masks: Mapping[str, Array],
+            weight_delta_masks: Mapping[str, Array] | None,
+            routes: Mapping[str, Bool[Array, "*leading"]] | None,
+        ) -> ForwardResult[Array, Array]:
             return _run_masked(
                 self.target,
                 vu,
@@ -489,16 +505,17 @@ class TMSDecomposedModel(eqx.Module):
         return forward(
             prepared_weights,
             resid,
-            explicit_masking.component_masks,
-            explicit_masking.weight_delta_masks,
-            explicit_masking.routes,
+            # this target's sites are dense-only; a narrow mask has no arm here
+            {name: require_full_emission(m) for name, m in masking.component_masks.items()},
+            masking.weight_delta_masks,
+            routes,
         )
 
     def target_weight_sq_norms(self) -> dict[str, Array]:
         """Per-slot `‖W_s‖²` of each frozen stack, slot-aligned with `weight_deltas`
-        (the S17 relative-error scales, read once at setup)."""
+        (the relative-error scales, read once at setup)."""
         norms: dict[str, list[Array]] = {}
-        for name, group, _slot in site_slots_for(self.sites):
+        for name, group, _slot in site_stack_indices_for(self.sites):
             frozen_weight = _frozen_site_weight(self.target, name)
             norms.setdefault(group, []).append(jnp.sum(frozen_weight.astype(jnp.float32) ** 2))
         return {group: jnp.stack(per_slot) for group, per_slot in norms.items()}
@@ -595,7 +612,7 @@ def scatter_features(
     x_active: Float[Array, "B n_active"], active_indices: tuple[int, ...], n_features: int
 ) -> Float[Array, "B n_features"]:
     """Embed a batch sampled over ONLY the target features into full feature width — a
-    targeted (tPD) run's TARGET stream (SPEC T2). The generator runs at `n_active` width
+    targeted (tPD) run's TARGET stream. The generator runs at `n_active` width
     so its generation type means what it says over the target features ("exactly one
     active" = one active TARGET feature; restricting a full-width sample after the fact
     would mostly produce empty rows). Non-target columns are identically zero."""
@@ -735,20 +752,25 @@ def single_feature_probe(n_features: int) -> Float[Array, "n_features n_features
 
 def single_feature_ci(
     model: TMSDecomposedModel,
-    ci_fn: "CIFnCallable",
+    ci_fn: CIFn[Array],
+    components: ComponentStacks,
     n_features: int,
-) -> dict[str, Array]:
-    """Feed the single-feature probe and read the `lower_leaky` CI per site,
-    `{site: [n_features, C]}`."""
+) -> tuple[dict[str, Array], dict[str, Array]]:
+    """Feed the single-feature probe and read the `(lower_leaky, upper_leaky)` CI per
+    site, each `{site: [n_features, C]}`."""
     probe = single_feature_probe(n_features)
-    # Output role: the probe's claim is about reconstructing the target's OUTPUT.
-    return output_ci(
-        ci_fn(
-            model.clean_forward(probe, ci_fn.capture_keys, placement=None).captures,
-            remat=False,
-            placement=None,
+    clean = model.clean_forward(probe, ci_fn.capture_keys, placement=None)
+    prepared_components = PlacedModel(model, None).prepare_compute_weights(components)
+    # The probe's claim is about reconstructing the target's OUTPUT: read that role.
+    ci = output_ci(
+        ci_fn.prepare()(
+            clean.captures, clean.conditioning, prepared_components, sequence=None, remat=False
         )
-    ).lower
+    )
+    return (
+        {site: require_full_emission(value) for site, value in ci.lower.items()},
+        {site: require_full_emission(value) for site, value in ci.upper.items()},
+    )
 
 
 # ----------------------------- visualizations -----------------------------

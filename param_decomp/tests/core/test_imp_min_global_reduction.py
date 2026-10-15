@@ -1,4 +1,4 @@
-"""Imp-min global-sum-inside-log2 is device-count invariant (SPEC S7/S8/D2).
+"""Imp-min global-sum-inside-log2 is device-count invariant.
 
 The eval-path imp-min value reuses the SAME `importance_minimality_terms` as the
 train path (there is one impl in JAX — `losses.py`). Its correctness hinges on the
@@ -45,7 +45,7 @@ def test_imp_min_global_reduction_invariant_to_device_count():
     n_positions = sample.shape[0] * sample.shape[1]
 
     activity_single, freq_single = importance_minimality_terms(
-        ci_upper, gamma, reference_datapoint_count=n_positions
+        ci_upper, gamma, reference_datapoint_count=n_positions, normalize_at_one=False
     )
 
     mesh = hsdp_mesh(1, jax.device_count(), 1)
@@ -56,7 +56,9 @@ def test_imp_min_global_reduction_invariant_to_device_count():
             site: jax.sharding.reshard(v, NamedSharding(mesh, P(("replicate", "fsdp"), None, None)))
             for site, v in ci.items()
         }
-        return importance_minimality_terms(ci, gamma, reference_datapoint_count=n_positions)
+        return importance_minimality_terms(
+            ci, gamma, reference_datapoint_count=n_positions, normalize_at_one=False
+        )
 
     ci_sharded = {site: shard_batch(v, mesh, batch_axis=0) for site, v in ci_upper.items()}
     activity_sharded, freq_sharded = sharded_terms(ci_sharded)
@@ -71,5 +73,5 @@ def test_imp_min_global_reduction_invariant_to_device_count():
         assert rel <= 1e-4, (
             f"imp-min {name} diverged across shardings (n={mesh.devices.size}): "
             f"single {single_f!r} vs sharded {sharded_f!r} rel {rel:.2e} — "
-            "global per-component sum not formed before log2 (SPEC S8/D2)"
+            "global per-component sum not formed before log2"
         )

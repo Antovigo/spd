@@ -34,9 +34,11 @@ A good default which we have recently settled on:
 
 - `FaithfulnessLoss`
 - `ImportanceMinimalityLoss` + `frequency` term
-- `MergedStochasticSubsetPPGDReconLoss` — a compound loss combining adversarial (PPGD) and stochastic (StochasticSubset) reconstruction into one pass.
+- `MergedStochasticSubsetPooledPPGDReconLoss` — the same compound loss, with one persistent minipool of cross-site adversarial particles per batch element. `pool: {size_per_batch_element: K}` is the entire pool configuration: each batch index owns K particles, samples one, and uses its per-site vectors at every position. Minipools shard with the batch across data axes; particles remain local and component/expert columns retain TP placement. Global storage contains `pd.batch_size * K` particles. The 4L-Pile reference uses `pool: {size_per_batch_element: 32}` and source LR `0.02` (2× the former dense-source LR).
 
-The 4L-Pile reference config (`param_decomp/experiments/lm/configs/pile_llama_simple_mlp-4L.yaml`) carries this recipe with tuned coefficients; the toy reference configs carry the same shape at their own coefficients. In general you should start with a reference config nearest your target.
+  Migrate old `pool: {size, group_size}` configs using `size_per_batch_element = old_size // old_batch_size`, where `old_batch_size` is the original `pd.batch_size`. Require exact divisibility to preserve the total number of particles; `group_size` does not determine the new value. For the 4L reference, `2048 // 64 = 32`. Previous pools with multiple batch elements per group change particle ownership and stored shape under this migration. Changing the training batch size also changes the pool shape; use a fresh run when changing it.
+
+The 4L-Pile reference config (`param_decomp/experiments/lm/configs/pile_llama_simple_mlp-4L.yaml`) carries this pooled recipe with tuned coefficients; the toy reference configs retain the dense merged strategy at their own coefficients. In general you should start with a reference config nearest your target.
 
 The most important hyperparameters are not knowable a priori, so **the default arc is to sweep the importance-minimality coefficient** (`ImportanceMinimalityLoss.coeff`). Depending on the pathologies this surfaces, sweep `frequency.coeff` or the subcomponent budget `C` separately. Runs must go to convergence — analyzing or comparing unconverged decompositions is almost always worthless.
 
@@ -48,24 +50,24 @@ Fresh LM decompositions are usually compute-heavy and often need several sweep r
 
 | Hyperparameter | Reference value | When to change |
 | :---- | :---- | :---- |
-| **Importance-minimality coeff** — `pd.loss_metrics[ImportanceMinimalityLoss].coeff` | `8e-4` (TMS 5→2); `6e-5` (TMS 40→10); `2e-4` (4L-Pile flagship) | **Most sensitive — sweep this first.** Too high → CI collapses below 1 and recon blows up; too low → too many subcomponents fire per input. |
-| **Component / CI learning rate** — `pd.components_optimizer.lr_schedule.start_val` and `pd.ci_fn_optimizer.lr_schedule.start_val` | `1e-3` both (TMS); `5e-5` both (4L-Pile flagship; cosine →10%) | Standard LR tuning. The flagship keeps the two equal; we vaguely think components at ~3× the CI-fn LR is a good starting point in LMs — unswept, a hunch rather than a tuned fact. |
-| **Frequency-minimality coeff** — `...[ImportanceMinimalityLoss].frequency.coeff` | `4e-4` (TMS 5→2); `3e-5` (TMS 40→10); `1e-4` (4L flagship) | Keep near half the importance-minimality coeff initially. Lower → fewer, more polysemantic subcomponents. **This is an independent loss coefficient; there is no frequency `beta` like in the paper.** |
-| **Smooth-L0 width schedule** — `...[ImportanceMinimalityLoss].gamma` | linear `1.0 → 0.01` | Annealing sharpens the smooth active-count proxy over training. Copy the whole schedule from the flagship config unless intentionally studying it. |
+| **Importance-minimality coeff** — `pd.loss_metrics[ImportanceMinimalityLoss].coeff` | `8e-4` (TMS 5→2); `6e-5` (TMS 40→10); `2e-4` (4L-Pile canonical) | **Most sensitive — sweep this first.** Too high → CI collapses below 1 and recon blows up; too low → too many subcomponents fire per input. |
+| **Component / CI learning rate** — `pd.components_optimizer.lr_schedule.max_val` and `pd.ci_fn_optimizer.lr_schedule.max_val` | `1e-3` both (TMS); `5e-5` both (4L-Pile flagship; cosine →10% over the first 90%, then held) | Standard LR tuning. The flagship keeps the two equal; we vaguely think components at ~3× the CI-fn LR is a good starting point in LMs — unswept, a hunch rather than a tuned fact. |
+| **Frequency-minimality coeff** — `...[ImportanceMinimalityLoss].frequency.coeff` | `4e-4` (TMS 5→2); `3e-5` (TMS 40→10); `6.6e-5` with EMA half-life `200` (4L canonical) | Keep near half the importance-minimality coeff initially. Lower → fewer, more polysemantic subcomponents. **This is an independent loss coefficient; there is no frequency `beta` like in the paper.** |
+| **Smooth-L0 width schedule** — `...[ImportanceMinimalityLoss].gamma` | linear `1.0 → 0.01` over the first 90%, then held | Annealing sharpens the smooth active-count proxy over training. Copy the whole schedule from the flagship config unless intentionally studying it. |
 | **Subcomponents `C`** — toy `decomposition.sites.sites[*].C`; LM `decomposition.sites.cs.<matrix>` | TMS 5→2: `20` per site; TMS 40→10: `100`; LM: see the C table below | Start from the matching shipped config. For LMs, calibrate down from a converged `CIMeanPerComponent` spectrum; usually keep C at or above the matrix rank — below rank, exact faithfulness is structurally impossible. |
-| **Δ-L2 parameter-faithfulness coeff** — `pd.loss_metrics[FaithfulnessLoss].coeff` | `1` (TMS); `1e7` (4L flagship) | Insensitive; raise 10× until `kl_unmasked` is negligible. Overshooting is safe within reason, but an excessively large value can still impair optimization — stop raising once `kl_unmasked` is flat. |
+| **Relative parameter-faithfulness coeff** — `pd.loss_metrics[FaithfulnessLoss].coeff` | `1` (TMS); `1e3` (4L flagship) | Insensitive; raise 10× until `kl_unmasked` is negligible. Overshooting is safe within reason, but an excessively large value can still impair optimization — stop raising once `kl_unmasked` is flat. |
 
 Each decomposed matrix gets a subcomponent budget at `decomposition.sites.cs.<matrix>`. The matrix names are the site vocabulary of `decomposition.sites.kind`. The shipped 4-layer simple-MLP reference (`d_resid = 768`; scale with width) uses:
 
 | Module | `C` per layer |
 | --- | ---: |
 | `c_fc` (MLP up, 768×3072) | 3072 |
-| `down_proj` (MLP down, 3072×768) | 3584 |
+| `down_proj` (MLP down, 3072×768) | 3072 |
 | `q_proj`, `k_proj` (768×768) | 768 |
-| `v_proj` (768×768) | 1024 |
-| `o_proj` (768×768) | 1024 |
+| `v_proj` (768×768) | 768 |
+| `o_proj` (768×768) | 768 |
 
-The shipped 32-layer GLU-transformer reference (`d_model = 4096`) uses `q: 2048`, `k: 2048`, `v: 4096`, `o: 4096`, `gate: 8192`, `up: 8192`, and `down: 10240` per layer; see [`llama8b_full32L_HSDP_b64_dp64.yaml`](../param_decomp/experiments/lm/configs/llama8b_full32L_HSDP_b64_dp64.yaml). These are reference budgets, not universal defaults: scale them for the target width and architecture, and start from the matching shipped config when one exists.
+The shipped 32-layer GLU-transformer reference (`d_model = 4096`) uses `q: 2048`, `k: 2048`, `v: 4096`, `o: 4096`, `gate: 8192`, `up: 8192`, and `down: 10240` per layer; the config seat that carried these was retired from the committed registry, so they are recorded here directly. These are reference budgets, not universal defaults: scale them for the target width and architecture, and start from the matching shipped config when one exists.
 
 In general, we think a safe approach early in tuning is to make C slightly larger than the maximum dimension of a given matrix. It certainly should be larger, usually, than the rank of the matrix, otherwise faithfulness becomes structurally impossible.
 
@@ -73,7 +75,7 @@ So, for an LM with no close reference, over-provision and do a converged run, th
 
 For toy models, do not use this LM heuristic. E.g. for TMS we use `20` per site for 5→2 and `100` for 40→10, which deliberately exceeds the known feature count.
 
-`initialization: neuron_aligned` accepts any positive `C` up to the matrix entry count. If `C` is below the number of nonlinearity-facing coordinates, it samples distinct neurons or attention-head channels without replacement; this is not initially parameter-faithful, so keep a normal faithfulness warmup. At exact width it uses the canonical one-coordinate factorization. Above width it assigns every coordinate at least one component and partitions randomly selected coordinate vectors across the surplus components, preserving the target matrix exactly; no faithfulness warmup is needed solely for initialization in the exact- or overcomplete cases.
+`initialization: nonlinearity_aligned` accepts any positive `C` up to the matrix entry count. If `C` is below the number of nonlinearity-facing coordinates, it samples distinct neurons or attention-head channels without replacement; this is not initially parameter-faithful, so keep a normal faithfulness warmup. At exact width it uses the canonical one-coordinate factorization. Above width it assigns every coordinate at least one component and partitions randomly selected coordinate vectors across the surplus components, preserving the target matrix exactly; no faithfulness warmup is needed solely for initialization in the exact- or overcomplete cases.
 
 `decomposition.sites.initialization` selects the V/U seeding. `random` is the default target-blind init. `zero_u` takes the target-coupled seed's `V` and zeroes `U`, so the component sum is exactly zero at init and the delta carries all of `W`: a subcomponent acquires norm only as the reconstruction losses demand it, rather than starting with `W`-scale weight a mask adversary could switch on. `neuron_aligned` is the data-free aligned one described above. `neuron_aligned_targeted` (targeted runs only, SPEC T13) is its data-driven twin: instead of sampling coordinates it takes the **top C by activity on the target prompt pool**, per site kind — MLP neurons by write energy `E[h²]·‖W_down[:, i]‖²`, q and k channels by their own projection-output energy, o channels by `E[z²]·‖W_o[:, j]‖²`, and v channels by that summed over the GQA group. It requires `C ≤ the site's coordinate count` (refused at parse) and a `neuron_ranks` artifact, harvested once per (model, pool) pair by `python -m param_decomp.experiments.lm.harvest_neuron_ranks --config <run.yaml> --data_root <root> --out_dir <abs> --local_device_count N --layers all`; publish it as `<data_root>/neuron_ranks/<name>` and reference it as `neuron_ranks: {kind: name, name: <name>}`. Provenance (target model + pool token fingerprint + every decomposed block) is asserted at load, so a drifted artifact refuses rather than silently misaligning. Read the step-0 coverage the run prints (and writes to `<run_dir>/neuron_alignment.json`) to see whether `C` is enough for that pool.
 
@@ -82,7 +84,7 @@ For toy models, do not use this LM heuristic. E.g. for TMS we use `20` per site 
 Fix the following decisions before launching an experiment:
 
 - **Domain and runtime** — identify the target model. Confirm that the public JAX package can be installed in the execution environment. TMS and ResidMLP run on CPU and need no GPU; any non-toy experiments will normally need GPU compute.
-- **LM target** (`target`) — `weights_dtype` (required, no default) plus a `spec`. Use `bfloat16` unless you have a reason not to: `float32` works, but it drops off cuDNN flash attention, so an 8B target materialises the `[B, H, T, T]` scores and will likely OOM rather than error.
+- **LM target** (`target`) — `weights_dtype`, `attention_implementation`, and a `spec` are required. Use `bfloat16` with `flash` for flash attention. Unsupported flash execution errors; `float32` requires explicitly choosing `xla`, which materialises the `[B, H, T, T]` scores. Transformer CI attention independently requires its own `implementation: flash` or `xla` choice.
 - **Data distribution**
 - **Base config** — the reference config plus the values for hyperparameters that matter
 - **Sweep grid (optional)** — the axes and their values (see step 2).
@@ -126,18 +128,40 @@ For agents: If the new sweep materially changes or expands the approved compute 
 
 ### Eval metrics: the canonical block
 
-The eval pass is **authored-only**: exactly the metrics listed in `eval.metrics` run, and nothing silently re-adds one you drop. LM runs should keep the flagship's full **metric list**; the block's sizing knobs are yours — `eval.batch_size` is a **global** batch (scale it to your allocation, like the training batch). Four gates the schema enforces: each metric's logged identity must be unique — its `name` if it has one, otherwise its `type`, so a second `PGDReconLoss` probe at different `n_steps` is fine provided you `name` it — eval entries must not set a `coeff` (training-only), `CI_L0` requires `groups` (write `groups: null` for none), and the cadences must nest — `eval.every` a multiple of `cadence.train_log_every`, and `eval.slow_every` a multiple of `eval.every`.
+The eval pass is **authored-only**: exactly the metrics listed in `eval.metrics` run, and nothing silently re-adds one you drop. LM runs should keep the flagship's full **metric list**; the block's sizing knobs are yours — `eval.batch_size` is a **global** batch (scale it to your allocation, like the training batch). Four gates the schema enforces: each metric type appears at most once — eval entries must not set a `coeff` (training-only), `CI_L0` requires `groups` (write `groups: null` for none), and `eval.slow_every` must be a multiple of `eval.every`. Training logs default to every 20 steps, independently of the evaluation cadences.
 
 | Metric | What it logs | How to read it |
 | :---- | :---- | :---- |
 | `CEandKLLosses` | Output-level faithfulness battery under `eval/ce_kl/`: `kl_<variant>` for all six variants — `unmasked`, `ci_masked`, `rounded_masked` (CI binarised at the required `rounding_threshold`), `stoch_masked`, `random_masked`, `zero_masked` — plus `ce_difference_<variant>` for the same set *minus* `zero_masked`, so six `kl_` keys and five `ce_difference_` keys. LM-only: these keys read next-token CE and KL over a categorical output distribution. The toy binding refuses the metric outright, but the LM binding's only construction-time guard is `has_position_axis` — a positioned non-categorical target clears it and logs meaningless numbers, so omit this metric unless your target emits logits. | The workhorse. `kl_unmasked ≈ 0` = parameter faithfulness holds. `kl_stoch_masked` = the headline average-case recon number for comparing runs. `kl_rounded_masked` low = the binarised causally-important set alone suffices. For cross-model comparison, normalize the `kl_` numbers against the `kl_zero_masked` ceiling yourself (there is no `ce_difference_zero_masked` to normalize against). |
-| `PGDReconLoss` (`init: random`, `n_steps: 20`, `step_size: 0.1`, `source_shape: c`) | Fresh 20-step adversarial attack at eval, with one source shared across batch and positions. `step_size` is required, and only `init: random` with `source_shape: c` executes — anything else asserts at construction. An optional `name` sets the logged key (the flagship logs `eval/loss/PGDReconLoss_20step`). Copy the whole entry from the flagship. | The strict quality bar (see "What a good result looks like"). By far the *noisiest* metric — read the plateau/trend, never a single point. The 20-step budget is pragmatism, not principle: the working assumption is that robustness to 20 steps is enough, and at large scale the attack is still climbing well past 20 steps — treat absolute levels with suspicion. |
+| `PGDReconLoss` (`init: random`, `n_steps: 20`, `step_size: 0.1`, `source_shape: c`) | Fresh 20-step adversarial attack at eval, with one source shared across batch and positions. `step_size` is required, and only `init: random` with `source_shape: c` executes — anything else asserts at construction. It logs as `eval/loss/PGDReconLoss_<n_steps>step` (the flagship's `PGDReconLoss_20step`). The canonical entry also carries an auxiliary group named `hidden_acts_reconstruction` over every residual boundary with `coeff: 0.0`: this logs the aggregate and per-boundary relative errors without changing the output-only attack. Copy the whole entry from the flagship even when hidden reconstruction is not a training loss. | The strict quality bar (see "What a good result looks like"). By far the *noisiest* metric — read the plateau/trend, never a single point. The 20-step budget is pragmatism, not principle: the working assumption is that robustness to 20 steps is enough, and at large scale the attack is still climbing well past 20 steps — treat absolute levels with suspicion. |
+| `SlowPGDReconLoss` (the `PGDReconLoss` fields, with a strictly ascending `read_out_steps` list in place of `n_steps`) | One fresh attack, run on `eval.slow_every` instead of `eval.every` and read out after each listed step count; the read-out at step `n` logs as `SlowPGDReconLoss_<n>step` (earlier versions logged these as `PGDReconLoss_<n>step`). The canonical 4L block carries `read_out_steps: [40, 80, 160, 320, 640, 1280]` (keys `SlowPGDReconLoss_40step` … `SlowPGDReconLoss_1280step`, `step_size: 0.1`) beside the fast 20-step probe. Each read-out is exactly the first `n` steps of the deepest read-out's attack, so the ladder is directly comparable across step counts. | The plateau of the reported value across attack steps. A 20-step value that keeps climbing at 1280 means the fast probe understates reachable damage; read the ladder's settled level, not its endpoint (long trajectories are not monotone). Cost is one attack to the deepest rung, and memory is flat (a `lax.scan`). |
 | `CI_L0` (per-layer `groups` + `total`) | Mean active CI values per position | Compare runs on the **Pareto plot of L0 versus reconstruction KL**. Runs on the same tight Pareto front represent similar-quality hyperparameter tradeoffs. |
+| `CIActiveCountsPerPosition` | One native line chart (`eval/l0/per_position`): `CI_L0`'s active count per token at every sequence position, summed over all sites, three lines (CI > 0, > 0.01, > 0.1), using the same input-dtype comparison as `CI_L0`. Slow cadence. Refuses contexts above 3,333 positions under W&B's current 10,000-row media limit rather than truncating. | Position 0 is the packed-window start, not a document start. A profile that falls or rises along the context says whether the decomposition spends more components early or deep in context; a wide gap between the CI > 0 and CI > 0.1 lines means many barely-on components. The panel shows the latest eval pass; switch its query to `historyTable` in the UI for a step slider. |
 | `CIMeanPerComponent` | Sorted mean-CI-per-component spectrum (linear + log) | Sharp alive/dead cutoff ≈ true component count → calibrates `C` (see the C table above). No values near 1 → imp-min coeff too high. |
 | `ComponentActivationDensity` | Per-layer histogram of each component's firing density | Alive-vs-dead split; a smear with no bimodality = components aren't specializing. |
 | `CIHistograms` | Per-layer histograms of CI values (lower-leaky + pre-sigmoid) | Want mass piled at 0 and near 1; everything pinned strictly below 1 = CI collapse (coeff too high). |
 
 Check every metric above and record the anomalies you find. If one shows the run is broken, launch another sweep that tests a fix rather than stopping at the breakage alone.
+
+Router reconstruction is an auxiliary group on a reconstruction loss. For a Qwen
+target, list the desired `router_logits.<layer>` captures explicitly, for example:
+
+```yaml
+auxiliaries:
+  - name: router_kl
+    coeff: 0.1
+    comparisons:
+      - {capture: router_logits.0, distance: categorical_kl_from_logits}
+      - {capture: router_logits.1, distance: categorical_kl_from_logits}
+```
+
+The coefficient scales KL from the clean router distribution to the masked router
+distribution, averaged over tokens and the listed captures, using that loss's existing
+masks and draws. Expert identities stay fixed to clean routing; mixing weights are
+recomputed. `adversary_objective: e2e` keeps source optimization output-only;
+`adversary_objective: term` includes the auxiliary group. With this group name, metrics
+appear under `loss/<term>/router_kl` and
+`loss/<term>/router_kl/router_logits.<layer>`.
 
 ## Analysis of a decomposition
 
@@ -155,4 +179,4 @@ Another standard analysis you should consider performing is running inference on
 
 The [parameter-decomposition handbook](handbook.md) carries the science and cites the literature — the method implemented here is VPD, from *Interpreting Language Model Parameters* (Bushnaq et al. 2026: [https://static.goodfire.ai/vpd-blog-post/post.md](https://static.goodfire.ai/vpd-blog-post/post.md)).
 
-**From subcomponents to components.** A run produces rank-1 *subcomponents*. The *components* (the learned "mechanisms" this skill keeps referring to) come from clustering co-activating subcomponents — a separate step via the clustering pipeline (MDL clustering + stochastic hierarchical merging; you pick the merge threshold α), needed when the analysis wants mechanism-level objects. "Components" are groups of subcomponents that tend to be 'used' together by the network. But subcomponents are often useful objects for interpretability by themselves.
+**From subcomponents to components.** A run produces rank-1 *subcomponents*. The *components* (the learned "mechanisms" this skill keeps referring to) come from clustering co-activating subcomponents — a separate step (MDL clustering + stochastic hierarchical merging; you pick the merge threshold α), needed when the analysis wants mechanism-level objects. The clustering method is described here, but this release does not include a clustering pipeline. "Components" are groups of subcomponents that tend to be 'used' together by the network. But subcomponents are often useful objects for interpretability by themselves.

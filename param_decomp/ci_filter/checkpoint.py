@@ -16,19 +16,18 @@ from jaxtyping import Array
 
 from param_decomp.ci_filter.config import CIFilterConfig, InitFromCIFilter, InitFromRun
 from param_decomp.ci_filter.paths import CIFilterOutputs
-from param_decomp.ci_filter.step import UNCONSTRAINED, CIConstraints
-from param_decomp.core.ci_fn import PlacedCIFn
+from param_decomp.ci_filter.step import UNCONSTRAINED, CIConstraints, FilterCIFn
 from param_decomp.core.precision import COMPUTE_DT, cast_floating
 
 
-def save_ci_fn(path: Path, ci_fn: PlacedCIFn) -> None:
+def save_ci_fn(path: Path, ci_fn: FilterCIFn) -> None:
     leaves: list[Array] = jax.tree.leaves(eqx.filter(ci_fn, eqx.is_array))
     with ocp.StandardCheckpointer() as checkpointer:
         checkpointer.save(path.resolve(), {f"{i:05d}": leaf for i, leaf in enumerate(leaves)})
         checkpointer.wait_until_finished()
 
 
-def restore_ci_fn(path: Path, like: PlacedCIFn) -> PlacedCIFn:
+def restore_ci_fn(path: Path, like: FilterCIFn) -> FilterCIFn:
     """`like`'s structure with the saved leaves, placed like `like`'s leaves."""
     arrays, static = eqx.partition(like, eqx.is_array)
     leaves: list[Array]
@@ -45,8 +44,8 @@ def restore_ci_fn(path: Path, like: PlacedCIFn) -> PlacedCIFn:
 
 
 def starting_ci(
-    config: CIFilterConfig, run_dir: Path, step: int, run_ci_fn: PlacedCIFn
-) -> tuple[PlacedCIFn, CIConstraints]:
+    config: CIFilterConfig, run_dir: Path, step: int, run_ci_fn: FilterCIFn
+) -> tuple[FilterCIFn, CIConstraints]:
     """The CI fn a filter trains from and the constraints it starts under: the starting point's
     own (none for `init: run`) plus a frozen copy of the starting CI fn as one more ceiling. The
     pruning is applied later, from the starting CI's pool evaluation."""
@@ -61,8 +60,8 @@ def starting_ci(
 
 
 def trained_ci(
-    run_dir: Path, step: int, filter_id: str, run_ci_fn: PlacedCIFn
-) -> tuple[PlacedCIFn, CIConstraints]:
+    run_dir: Path, step: int, filter_id: str, run_ci_fn: FilterCIFn
+) -> tuple[FilterCIFn, CIConstraints]:
     """A finished filter's trained CI fn with the constraints it trained under: its ceilings
     (re-resolved from its pinned config) and its removed components (`alive/kept.npz`), i.e.
     everything needed to reproduce the CI it reports."""

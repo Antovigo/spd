@@ -1,155 +1,105 @@
-"""The pure loss terms (SPEC §2) and their schedules — fp32 reductions, no state."""
+"""Pure loss calculations and frequency estimators with fp32 reductions."""
 
 import math
-import os
 from collections import defaultdict
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, replace
-from typing import Any, Literal, NamedTuple
+from dataclasses import replace
+from typing import Literal, NamedTuple
 
 import einops
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
 from beartype import beartype
 from jax.sharding import PartitionSpec as P
-from jaxtyping import Array, Float, jaxtyped
+from jaxtyping import Array, Float, Float32, Int32, jaxtyped
 
 from param_decomp.core.components import (
     ComponentStacks,
+    SelectedCI,
+    SiteCI,
     SiteSpec,
+    aligned_component_vectors,
+    block_selection_counts,
+    selected_component_sums,
+    site_ci_leading,
 )
 from param_decomp.core.configs import (
     BATCH_HIDDEN_ACTS_NORMALIZATION,
     BatchHiddenActsNormalization,
+    CaptureReconstruction,
     FrequencyMinimalityConfig,
     HiddenActsNormalization,
-    HiddenActsReconstruction,
     ImportanceMinimalityLossConfig,
-    LossCoeff,
     PerPositionHiddenActsNormalization,
 )
 from param_decomp.core.nonlinearity import (
+    DeltaNetHeads,
     KVHeads,
     Neurons,
+    NonlinearityAlignment,
     NonlinearityPartition,
     NonlinearityUnitKind,
     QueryHeads,
 )
 from param_decomp.core.recon import (
+    AuxiliaryReconstruction,
     ForwardObservations,
-    HiddenActsAndOutputReconstruction,
-    HiddenActsOnlyReconstruction,
-    OutputAndHiddenActsReconstruction,
-    OutputOnlyReconstruction,
+    HiddenReconstruction,
     ReconstructionSpec,
 )
-from param_decomp.core.schedule import Knot, ScheduleConfig
-
-
-def _interval_frac_traced(prev: Knot, knot: Knot, t: Array) -> Array:
-    u = (t - prev.at) / (knot.at - prev.at)
-    match knot.interp:
-        case "linear":
-            return prev.frac + (knot.frac - prev.frac) * u
-        case "cosine":
-            return prev.frac + (knot.frac - prev.frac) * 0.5 * (1 - jnp.cos(jnp.pi * u))
-        case "hold":
-            return jnp.where(u >= 1.0, knot.frac, prev.frac)
-
-
-def scheduled_value_at(train_frac: Array, config: ScheduleConfig) -> Array:
-    """Evaluate a schedule at one traced fraction of the run."""
-    assert train_frac.shape == (), train_frac.shape
-    points = config.points
-    t = train_frac
-    frac = _interval_frac_traced(points[0], points[1], t)
-    for prev, knot in zip(points[1:], points[2:], strict=False):
-        frac = jnp.where(t >= prev.at, _interval_frac_traced(prev, knot, t), frac)
-    return jnp.asarray(config.max_val * frac, jnp.float32)
-
-
-def train_frac_at(step: Array, total_steps: int) -> Array:
-    """Map update ``0 .. total_steps - 1`` to fraction-time ``0 .. 1`` (SPEC S20)."""
-    assert total_steps > 0, f"total_steps must be positive, got {total_steps}"
-    if total_steps == 1:
-        return jnp.zeros((), jnp.float32)
-    return step.astype(jnp.float32) / jnp.asarray(total_steps - 1, jnp.float32)
-
-
-def scheduled_value_traced(step_f32: Array, total_steps: int, config: ScheduleConfig) -> Array:
-    """Compatibility boundary for optax and host probes that naturally own a count."""
-    train_frac = jnp.minimum(train_frac_at(step_f32, total_steps), 1.0)
-    return scheduled_value_at(train_frac, config)
-
-
-def coeff_at(train_frac: Array, coeff: LossCoeff) -> Float[Array, ""] | float:
-    """Resolve one loss coefficient from the step's fraction-time scalar."""
-    match coeff:
-        case ScheduleConfig():
-            return scheduled_value_at(train_frac, coeff)
-        case float() | int():
-            return coeff
-
-
-def reconstruction_spec_at(
-    hidden_acts_reconstruction: HiddenActsReconstruction | None,
-    train_frac: Array,
-) -> ReconstructionSpec:
-    """Resolve the S35 hidden-activation reconstruction at this fraction-time."""
-    if hidden_acts_reconstruction is None:
-        return OutputOnlyReconstruction()
-    return OutputAndHiddenActsReconstruction(
-        coeff_at(train_frac, hidden_acts_reconstruction.coeff),
-        hidden_acts_reconstruction.points,
-        hidden_acts_reconstruction.normalization,
-    )
 
 
 @jaxtyped(typechecker=beartype)
 def relative_squared_error(
-    masked: Float[Array, "*leading d"],
-    clean: Float[Array, "*leading d"],
+    masked: Float[Array, "batch *positions d"],
+    clean: Float[Array, "batch *positions d"],
     *,
     valid_row_mask: Float[Array, " batch"] | None = None,
     normalization: HiddenActsNormalization = BATCH_HIDDEN_ACTS_NORMALIZATION,
 ) -> Float[Array, ""]:
-    """The relative squared error at ONE measurement point, in fp32 (SPEC S35).
+    """The relative squared error at ONE measurement point, in fp32.
 
     `batch`: `Σ_{b,t,d}(masked−clean)² / Σ_{b,t,d}clean²` — one ratio over the batch, every
     entry's absolute error against the batch's total clean energy.
     `per_position`: `mean_{b,t} ‖masked−clean‖²_{b,t} / (‖clean‖²_{b,t} + floor)` with
     `floor = floor_fraction · median_{b,t}‖clean‖²` (the mean when the median is zero, plus
-    fp32 tiny) — each (batch, position) entry against its own clean scale (S35 amended
-    2026-09-11). The mean over entries keeps the per-token
-    weight at `1/(B·T)`, matching `kl_per_position` and the imp-min terms.
+    fp32 tiny) — each (batch, position) entry against its own clean scale. The mean over
+    entries keeps the per-token weight at `1/(B·T)`, matching `kl_per_position` and the
+    imp-min terms.
 
     Per point, not over a stacked point axis: points need not share a width, and each
     divides by its own clean scale. Callers stack the resulting scalars, never the
     activations. `valid_row_mask` drops padded batch rows from every sum, mean and median."""
     masked_f32 = masked.astype(jnp.float32)
     clean_f32 = clean.astype(jnp.float32)
-    entry_error = jnp.sum((masked_f32 - clean_f32) ** 2, axis=-1)  # [*leading]
-    entry_clean = jnp.sum(clean_f32**2, axis=-1)  # [*leading]
-    if valid_row_mask is not None:
-        valid = valid_row_mask.reshape(valid_row_mask.shape[0], *((1,) * (clean.ndim - 2))) > 0
-        valid = jnp.broadcast_to(valid, entry_clean.shape)
-    else:
-        valid = jnp.ones(entry_clean.shape, dtype=bool)
     match normalization:
         case BatchHiddenActsNormalization():
-            return jnp.sum(jnp.where(valid, entry_error, 0.0)) / jnp.sum(
-                jnp.where(valid, entry_clean, 0.0)
-            )
+            squared_error = (masked_f32 - clean_f32) ** 2
+            squared_clean = clean_f32**2
+            if valid_row_mask is not None:
+                mask = valid_row_mask.reshape(valid_row_mask.shape[0], *((1,) * (clean.ndim - 1)))
+                squared_error = squared_error * mask
+                squared_clean = squared_clean * mask
+            return jnp.sum(squared_error) / jnp.sum(squared_clean)
         case PerPositionHiddenActsNormalization(floor_fraction=floor_fraction):
+            entry_error = jnp.sum((masked_f32 - clean_f32) ** 2, axis=-1)  # [*leading]
+            entry_clean = jnp.sum(clean_f32**2, axis=-1)  # [*leading]
+            if valid_row_mask is not None:
+                valid = (
+                    valid_row_mask.reshape(valid_row_mask.shape[0], *((1,) * (clean.ndim - 2))) > 0
+                )
+                valid = jnp.broadcast_to(valid, entry_clean.shape)
+            else:
+                valid = jnp.ones(entry_clean.shape, dtype=bool)
             n_valid = jnp.sum(valid)
             # The median lowers to `lax.sort`, which REFUSES a sharded sort dimension: the
-            # per-entry energies carry the batch axis's `('replicate', 'fsdp')` spec, so on
-            # any mesh with fsdp > 1 this raises `ShardingTypeError` at trace time (measured
-            # on the 4x H100 seat, 2026-09-11 — the per-position mode could not run at all).
-            # Replicate the statistic first: it is one scalar per (batch, position) entry —
-            # 32 KB at batch 128 x 64 positions — so the gather costs nothing next to the
-            # forward that produced it, and every rank then computes the identical scale.
+            # per-entry energies carry the batch axis's data sharding, so on any mesh that
+            # shards the batch this raises `ShardingTypeError` at trace time. Replicate the
+            # statistic first: it is one scalar per (batch, position) entry, so the gather
+            # costs nothing next to the forward that produced it, and every rank then
+            # computes the identical scale.
             energies, energies_valid = entry_clean, valid
             if not jax.sharding.get_abstract_mesh().empty:
                 replicated = P(*((None,) * entry_clean.ndim))
@@ -168,151 +118,161 @@ def relative_squared_error(
             return jnp.sum(jnp.where(valid, ratio, 0.0)) / n_valid
 
 
-class OutputOnlyReconstructionLoss(NamedTuple):
-    total: Array
-
-
-class OutputAndHiddenActsReconstructionLoss(NamedTuple):
-    total: Array
-    output: Array
-    hidden_acts_by_point: dict[str, Array]
-
-
-class HiddenActsOnlyReconstructionLoss(NamedTuple):
-    """The hidden pass's result (SPEC T12): `total` IS the point mean — there is no e2e
-    component to separate out, so unlike the rider's result this carries no `output` field."""
-
-    total: Array
-    hidden_acts_by_point: dict[str, Array]
-
-
-class HiddenActsAndOutputReconstructionLoss(NamedTuple):
-    """The hidden pass's result WITH the e2e rider (T12 amended 2026-09-11): `total` is
-    `mean_points + output_coeff · output`; `output` is the bare KL so it can be logged as
-    `e2e` next to the point breakdown, exactly as the S35 rider's result does."""
-
-    total: Array
-    output: Array
-    hidden_acts_by_point: dict[str, Array]
-
-
-type ReconstructionLoss = (
-    OutputOnlyReconstructionLoss
-    | OutputAndHiddenActsReconstructionLoss
-    | HiddenActsOnlyReconstructionLoss
-    | HiddenActsAndOutputReconstructionLoss
-)
-
-
-def reconstruction_loss(
-    recon_loss_fn: Callable[[Any, Any], Array],
+@jaxtyped(typechecker=beartype)
+def categorical_kl_from_logits(
+    masked_logits: Float[Array, "batch *positions categories"],
+    clean_logits: Float[Array, "batch *positions categories"],
     *,
-    masked: ForwardObservations,
-    clean: ForwardObservations,
-    reconstruction: ReconstructionSpec,
-    valid_row_mask: Array | None = None,
-) -> ReconstructionLoss:
-    """The closed forms of one recon comparison (SPEC S35 / T12)."""
+    valid_row_mask: Float[Array, " batch"] | None = None,
+) -> Float[Array, ""]:
+    """KL(clean || masked), averaged over positions, with a frozen clean target."""
+    clean_logp = jax.nn.log_softmax(
+        jax.lax.stop_gradient(clean_logits).astype(jnp.float32), axis=-1
+    )
+    masked_logp = jax.nn.log_softmax(masked_logits.astype(jnp.float32), axis=-1)
+    per_token = jnp.sum(jnp.exp(clean_logp) * (clean_logp - masked_logp), axis=-1)
+    if valid_row_mask is None:
+        return jnp.mean(per_token)
+    weights = valid_row_mask.reshape(valid_row_mask.shape[0], *((1,) * (per_token.ndim - 1)))
+    token_count = jnp.sum(valid_row_mask) * math.prod(per_token.shape[1:])
+    return jnp.sum(jnp.where(weights > 0, per_token * weights, 0)) / jnp.maximum(token_count, 1)
 
-    def per_point_errors(
-        points: tuple[str, ...], normalization: HiddenActsNormalization
-    ) -> dict[str, Array]:
-        return {
-            point: relative_squared_error(
-                masked.hidden_acts_by_point[point],
-                clean.hidden_acts_by_point[point],
+
+def _capture_reconstruction_loss(
+    comparison: CaptureReconstruction,
+    masked: Array,
+    clean: Array,
+    valid_row_mask: Float[Array, " batch"] | None,
+) -> Float[Array, ""]:
+    match comparison.distance:
+        case "relative_squared_error":
+            return relative_squared_error(
+                masked,
+                clean,
                 valid_row_mask=valid_row_mask,
-                normalization=normalization,
+                normalization=comparison.normalization,
             )
-            for point in points
+        case "categorical_kl_from_logits":
+            return categorical_kl_from_logits(masked, clean, valid_row_mask=valid_row_mask)
+
+
+class ReconstructionLoss(NamedTuple):
+    total: Array
+    output: Array | None
+    """The bare model-output comparison; `None` on a pure hidden pass, which has none."""
+    auxiliaries: dict[str, dict[str, Array]]
+
+
+def reconstruction_loss[Out](
+    recon_loss_fn: Callable[[Out, Out], Array],
+    *,
+    masked: ForwardObservations[Out],
+    clean: ForwardObservations[Out],
+    reconstruction: ReconstructionSpec,
+    valid_row_mask: Float[Array, " batch"] | None = None,
+) -> ReconstructionLoss:
+    def scored(auxiliary: AuxiliaryReconstruction) -> dict[str, Array]:
+        return {
+            comparison.capture: _capture_reconstruction_loss(
+                comparison,
+                masked.captures[comparison.capture],
+                clean.captures[comparison.capture],
+                valid_row_mask,
+            )
+            for comparison in auxiliary.comparisons
         }
 
     match reconstruction:
-        case OutputOnlyReconstruction():
-            return OutputOnlyReconstructionLoss(recon_loss_fn(masked.output, clean.output))
-        case OutputAndHiddenActsReconstruction(
-            coeff=coeff, points=points, normalization=normalization
+        case HiddenReconstruction(
+            points=points,
+            output_coeff=output_coeff,
+            log_alternate_normalization=log_alternate_normalization,
         ):
-            output_loss = recon_loss_fn(masked.output, clean.output)
-            per_point = per_point_errors(points, normalization)
-            aggregate = jnp.mean(jnp.stack(tuple(per_point.values())))
-            return OutputAndHiddenActsReconstructionLoss(
-                output_loss + coeff * aggregate, output_loss, per_point
-            )
-        case HiddenActsOnlyReconstruction(points=points, normalization=normalization):
-            # `recon_loss_fn` is NOT called: the hidden pass has no e2e term, so the KL over
-            # the full vocabulary (and its backward) never enters this pass's graph.
-            per_point = per_point_errors(points, normalization)
-            total = jnp.mean(jnp.stack(tuple(per_point.values())))
-            # DIAGNOSTIC ONLY (`PD_LOG_ALT_HIDDEN_NORM=1`): also measure every point under the
-            # OTHER normalization and log it beside the real one, so the ratio between the two
-            # can be read off a live run. Merged AFTER `total` so the loss is untouched — the
-            # alt values enter the metric dict and nothing else. Used to calibrate the
-            # per-position coefficients against the L18 recipe's batch-normalized exchange
-            # rate (2026-09-11); delete once that number is pinned.
-            if os.environ.get("PD_LOG_ALT_HIDDEN_NORM") == "1":
-                alt_kind: HiddenActsNormalization = (
-                    BATCH_HIDDEN_ACTS_NORMALIZATION
-                    if isinstance(normalization, PerPositionHiddenActsNormalization)
-                    else PerPositionHiddenActsNormalization(floor_fraction=0.01)
+            values = scored(points)
+            total = jnp.mean(jnp.stack(tuple(values.values())))
+            # DIAGNOSTIC ONLY (`pd.hidden.log_alternate_normalization`): also measure every
+            # point under the OTHER normalization and log it beside the real one, so the ratio
+            # between the two can be read off a live run. Merged AFTER `total`, so the loss is
+            # untouched.
+            if log_alternate_normalization:
+                values = values | _alternate_normalization_values(
+                    points, masked, clean, valid_row_mask
                 )
-                per_point = per_point | {
-                    f"{point}__altnorm": value
-                    for point, value in per_point_errors(points, alt_kind).items()
-                }
-            return HiddenActsOnlyReconstructionLoss(total, per_point)
-        case HiddenActsAndOutputReconstruction(
-            points=points, normalization=normalization, output_coeff=output_coeff
-        ):
-            # The hidden pass WITH its e2e rider (T12 amended 2026-09-11): the same masked
-            # forward scores both, so the KL costs the unembed + log-softmax, not a forward.
+            if output_coeff is None:
+                # `recon_loss_fn` is NOT called: the pure hidden pass has no e2e term, so the
+                # KL over the full vocabulary (and its backward) never enters its graph.
+                return ReconstructionLoss(total, None, {points.name: values})
             output_loss = recon_loss_fn(masked.output, clean.output)
-            per_point = per_point_errors(points, normalization)
-            aggregate = jnp.mean(jnp.stack(tuple(per_point.values())))
-            return HiddenActsAndOutputReconstructionLoss(
-                aggregate + output_coeff * output_loss, output_loss, per_point
+            return ReconstructionLoss(
+                total + output_coeff * output_loss, output_loss, {points.name: values}
             )
+        case tuple():
+            output_loss = recon_loss_fn(masked.output, clean.output)
+            total = output_loss
+            auxiliary_losses: dict[str, dict[str, Array]] = {}
+            for auxiliary in reconstruction:
+                values = scored(auxiliary)
+                auxiliary_losses[auxiliary.name] = values
+                total = total + auxiliary.coeff * jnp.mean(jnp.stack(tuple(values.values())))
+            return ReconstructionLoss(total, output_loss, auxiliary_losses)
+
+
+def _alternate_normalization_values[Out](
+    points: AuxiliaryReconstruction,
+    masked: ForwardObservations[Out],
+    clean: ForwardObservations[Out],
+    valid_row_mask: Float[Array, " batch"] | None,
+) -> dict[str, Array]:
+    """Every hidden point under the normalization it is NOT trained with, keyed
+    `<point>__altnorm` (the `pd.hidden.log_alternate_normalization` diagnostic)."""
+    out: dict[str, Array] = {}
+    for comparison in points.comparisons:
+        alternate: HiddenActsNormalization = (
+            BATCH_HIDDEN_ACTS_NORMALIZATION
+            if isinstance(comparison.normalization, PerPositionHiddenActsNormalization)
+            else PerPositionHiddenActsNormalization(floor_fraction=0.01)
+        )
+        out[f"{comparison.capture}__altnorm"] = relative_squared_error(
+            masked.captures[comparison.capture],
+            clean.captures[comparison.capture],
+            valid_row_mask=valid_row_mask,
+            normalization=alternate,
+        )
+    return out
 
 
 def reconstruction_loss_metrics(loss: ReconstructionLoss) -> dict[str, Array]:
-    """Metric suffixes contributed by one reconstruction-loss result."""
-    match loss:
-        case OutputOnlyReconstructionLoss():
-            return {}
-        case HiddenActsOnlyReconstructionLoss(hidden_acts_by_point=hidden_acts_by_point):
-            # No `e2e` key: this pass has no end-to-end term, and emitting a zero for it would
-            # read as "the output loss is zero" rather than "there is no output loss here".
-            return {
-                f"hidden_acts_reconstruction/{point}": value
-                for point, value in hidden_acts_by_point.items()
-            }
-        case (
-            OutputAndHiddenActsReconstructionLoss(
-                output=output, hidden_acts_by_point=hidden_acts_by_point
-            )
-            | HiddenActsAndOutputReconstructionLoss(
-                output=output, hidden_acts_by_point=hidden_acts_by_point
-            )
-        ):
-            return {
-                "e2e": output,
-                "hidden_acts_reconstruction": jnp.mean(
-                    jnp.stack(tuple(hidden_acts_by_point.values()))
-                ),
-                **{
-                    f"hidden_acts_reconstruction/{point}": value
-                    for point, value in hidden_acts_by_point.items()
-                },
-            }
+    metrics: dict[str, Array] = {}
+    for name, values in loss.auxiliaries.items():
+        # No `e2e` key on a pure hidden pass: it has no end-to-end term, and a zero would
+        # read as "the output loss is zero" rather than "there is no output loss here".
+        if loss.output is not None:
+            metrics["e2e"] = loss.output
+        metrics[name] = jnp.mean(
+            jnp.stack(tuple(v for k, v in values.items() if not k.endswith("__altnorm")))
+        )
+        metrics.update({f"{name}/{point}": value for point, value in values.items()})
+    return metrics
 
 
-def mean_reconstruction_losses[T](values: tuple[T, ...]) -> T:
-    """Mean every fp32 scalar leaf across structurally identical pytrees."""
+def resolve_reference_datapoint_count(
+    ci_upper: Mapping[str, SiteCI], reference_datapoint_count: int | Literal["auto"]
+) -> int:
+    """`a'` for this call's CI batch, resolving the `"auto"` spelling.
 
-    def scalar_mean(*scalars: Array) -> Array:
-        return sum(scalars, start=jnp.zeros((), jnp.float32)) / len(scalars)
-
-    return jax.tree.map(scalar_mean, *values)
+    `"auto"` resolves `a'` to this call's own `B·T`, making `a' · f_c` the raw firing COUNT
+    — the torch oracle's `log2(1 + layer_sums * world_size)` exactly, with no constant to
+    keep in sync. It is the only spelling that is correct on BOTH tPD passes at once: a
+    literal `a'` is right for whichever stream's `B·T` it names and off by that stream's
+    ratio on the other (both passes share one frequency block), which puts the other
+    stream's penalty knee at `k = B·T / a'` firing tokens instead of 1."""
+    if reference_datapoint_count != "auto":
+        return reference_datapoint_count
+    counts = {math.prod(site_ci_leading(ci)) for ci in ci_upper.values()}
+    assert len(counts) == 1, (
+        f"'auto' reference_datapoint_count needs one leading size across sites, got {sorted(counts)}"
+    )
+    return counts.pop()
 
 
 def unit_squared_norms(
@@ -330,7 +290,11 @@ def unit_squared_norms(
     match partition:
         case Neurons():
             return squares
-        case QueryHeads(head_count=head_count) | KVHeads(head_count=head_count):
+        case (
+            QueryHeads(head_count=head_count)
+            | KVHeads(head_count=head_count)
+            | DeltaNetHeads(head_count=head_count)
+        ):
             d = vectors.shape[-1]
             assert d % head_count == 0, (d, head_count)
             head_of_column = jnp.repeat(
@@ -360,11 +324,20 @@ def nonlinearity_unit_squared_norm_fractions(
 
 
 def soft_unit_count(
-    fractions: Float[Array, "*components U"], relative_threshold: Float[Array, ""] | float
+    fractions: Float[Array, "*components U"],
+    relative_threshold: Float[Array, ""] | float,
+    *,
+    normalize_at_one: bool,
 ) -> Float[Array, "*components"]:
-    """Per-component soft count `Σ_u f_u / (f_u + relative_threshold / U)` (SPEC S36)."""
+    """Per-component soft unit count.
+
+    The base count is `Σ_u f_u / (f_u + relative_threshold / U)`. Normalization
+    rescales it by `1 + relative_threshold / U`, making a one-hot unit fraction
+    contribute exactly one throughout a threshold schedule.
+    """
     unit_count = fractions.shape[-1]
-    return (fractions / (fractions + relative_threshold / unit_count)).sum(-1)
+    one_unit_normalizer = 1.0 + relative_threshold / unit_count if normalize_at_one else 1.0
+    return one_unit_normalizer * (fractions / (fractions + relative_threshold / unit_count)).sum(-1)
 
 
 class _NonlinearityGroupTerm(NamedTuple):
@@ -376,41 +349,49 @@ class _NonlinearityGroupTerm(NamedTuple):
 @jaxtyped(typechecker=beartype)
 def nonlinearity_loss(
     components: ComponentStacks,
-    partitions: Mapping[str, NonlinearityPartition],
+    alignments: Mapping[str, NonlinearityAlignment],
     relative_threshold: Float[Array, ""],
     kind_coefficients: Mapping[NonlinearityUnitKind, float],
+    *,
+    normalize_at_one: bool,
 ) -> tuple[Float[Array, ""], dict[NonlinearityUnitKind, Float[Array, ""]]]:
     """Return the kind-weighted nonlinearity penalty and its unweighted per-kind means
-    of soft uses per component (SPEC S36). Callers exclude a kind by omitting its sites
+    of soft uses per component. Callers exclude a kind by omitting its sites
     AND its coefficient — an excluded kind is never computed, so weight 0.0 is not a
     state here."""
-    assert partitions, "nonlinearity loss needs at least one partitioned site"
-    assert {p.unit_kind for p in partitions.values()} == kind_coefficients.keys(), (
-        partitions,
+    assert alignments, "nonlinearity loss needs at least one partitioned site"
+    assert {a.partition.unit_kind for a in alignments.values()} == kind_coefficients.keys(), (
+        alignments,
         kind_coefficients,
     )
-    grouped: defaultdict[tuple[str, NonlinearityPartition], list[int]] = defaultdict(list)
-    for name, partition in partitions.items():
-        group, slot = components.slot_of(name)
-        grouped[group, partition].append(slot)
+    grouped: defaultdict[tuple[str, NonlinearityAlignment], list[int]] = defaultdict(list)
+    for name, alignment in alignments.items():
+        group, index = components.stack_index_of(name)
+        grouped[group, alignment].append(index)
 
     terms: list[_NonlinearityGroupTerm] = []
-    for (group, partition), slots in grouped.items():
-        us = components.stacks[group][1]
-        # Uses, not blocks: each block is consumed by `use_multiplicity` attention
-        # nonlinearities, so the per-block soft count scales by that factor (SPEC S36).
+    for (group, alignment), stack_indices in grouped.items():
+        partition = alignment.partition
+        vectors = aligned_component_vectors(components.stacks[group], alignment.side)
+        # Uses, not blocks: each block is consumed by `use_multiplicity` nonlinearities
+        # (GQA query heads per kv head, value-head recurrences per DeltaNet key head), so
+        # the per-block soft count scales by that factor.
         counts = partition.use_multiplicity * soft_unit_count(
-            nonlinearity_unit_squared_norm_fractions(us, partition), relative_threshold
+            nonlinearity_unit_squared_norm_fractions(vectors, partition),
+            relative_threshold,
+            normalize_at_one=normalize_at_one,
         )
-        # Reduce the full resident stack under a constant slot mask — never gather the
-        # stack axis by slots: it is owner-partitioned across nodes, and a stack-axis
+        # Reduce the full resident stack under a constant stack-index mask — never gather
+        # the stack axis by index: it is owner-partitioned across nodes, and a stack-axis
         # gather forces cross-node resharding. The mask is numpy so it bakes into the
         # graph as a constant rather than a scatter.
-        mask = np.zeros((us.shape[0], 1), np.float32)
-        mask[slots] = 1.0
+        mask = np.zeros((vectors.shape[0],) + (1,) * (counts.ndim - 1), np.float32)
+        mask[stack_indices] = 1.0
         terms.append(
             _NonlinearityGroupTerm(
-                partition.unit_kind, (counts * mask).sum(), len(slots) * us.shape[1]
+                partition.unit_kind,
+                (counts * mask).sum(),
+                len(stack_indices) * math.prod(vectors.shape[1:-1]),
             )
         )
 
@@ -430,23 +411,67 @@ def nonlinearity_loss(
     return total, by_kind
 
 
+def _selected_site_frequencies(
+    ci: SelectedCI, per_value_penalty: Callable[[Array], Array]
+) -> Float[Array, " C"]:
+    """Compute full-width component frequencies from selected CI values.
+
+    Scatter selected penalties to their global components and include `psi(0)`
+    for every unselected token/component pair, all divided by the same token count.
+    The global reduction precedes the nonlinear frequency penalty; averaging
+    per-shard penalties instead would introduce Jensen bias."""
+    n = math.prod(site_ci_leading(ci))
+    selected_sums = selected_component_sums(ci, per_value_penalty(ci.values.astype(jnp.float32)))
+    selection_counts = block_selection_counts(ci)
+    psi_zero = per_value_penalty(jnp.zeros((), jnp.float32))
+    unselected = jnp.repeat(n - selection_counts, ci.c_per_block) * psi_zero
+    return (selected_sums + unselected) / n
+
+
+def _site_frequencies(
+    ci: SiteCI, per_value_penalty: Callable[[Array], Array]
+) -> Float[Array, " _"]:
+    match ci:
+        case SelectedCI():
+            return _selected_site_frequencies(ci, per_value_penalty)
+        case jax.Array():
+            return einops.reduce(per_value_penalty(ci.astype(jnp.float32)), "... c -> c", "mean")
+
+
 def _per_component_frequencies(
-    ci_upper: dict[str, Float[Array, "*leading _"]],
+    ci_upper: Mapping[str, SiteCI],
     per_value_penalty: Callable[[Float[Array, "*leading _"]], Float[Array, "*leading _"]],
 ) -> dict[str, Float[Array, " _"]]:
     """Per-site firing frequencies `f_c = mean_{b,t} psi(c)` for any per-value penalty
-    `psi` (SPEC S8). Under GSPMD the leading axes are the global batch, so the reduction
+    `psi`. Under GSPMD the leading axes are the global batch, so the reduction
     IS the exact global per-component mean — XLA reduces across shards inside the graph,
     so `f_c` is the true full-batch frequency inside the convex `log2` (a per-shard
-    `f_c` would give a Jensen bias)."""
-    return {
-        name: einops.reduce(per_value_penalty(ci.astype(jnp.float32)), "... c -> c", "mean")
-        for name, ci in ci_upper.items()
-    }
+    `f_c` would give a Jensen bias). Selected-emitting sites take the exact scatter arm
+    (`_selected_site_frequencies`); the full `[C]` vector exists only HERE, as a
+    reduction, never as a per-token tensor."""
+    return {name: _site_frequencies(ci, per_value_penalty) for name, ci in ci_upper.items()}
+
+
+def _site_activity(ci: SiteCI, per_value_penalty: Callable[[Array], Array]) -> Float[Array, ""]:
+    """One site's activity contribution `Σ_c f_c`, computed WITHOUT the `[C]` accumulator:
+    a selected-emitting site's sum over the selected axis is exact under the same `B·T`
+    denominator (zeros contribute nothing to a sum — never a mean over the last axis,
+    which would corrupt the denominator), plus the per-site `(C − k·c)·psi(0)` constant —
+    zero for smooth-L0's psi, kept so the helper is exact for any per-value penalty."""
+    match ci:
+        case SelectedCI():
+            n = math.prod(site_ci_leading(ci))
+            selected = jnp.sum(per_value_penalty(ci.values.astype(jnp.float32))) / n
+            psi_zero = per_value_penalty(jnp.zeros((), jnp.float32))
+            return selected + (ci.C - ci.values.shape[-1]) * psi_zero
+        case jax.Array():
+            return jnp.sum(
+                einops.reduce(per_value_penalty(ci.astype(jnp.float32)), "... c -> c", "mean")
+            )
 
 
 def _frequency_curve(f: Float[Array, " _"], reference_datapoint_count: int) -> Float[Array, " _"]:
-    """`Φ(f) = f · log2(1 + a'·f)`, the per-component frequency penalty (SPEC S8)."""
+    """`Φ(f) = f · log2(1 + a'·f)`, the per-component frequency penalty."""
     return f * jnp.log2(1.0 + reference_datapoint_count * f)
 
 
@@ -459,79 +484,56 @@ def _frequency_curve_slope(
 
 
 def _smooth_l0_psi(
-    gamma: Float[Array, ""],
-    normalize_at_one: bool = False,
+    gamma: Float[Array, ""], *, normalize_at_one: bool
 ) -> Callable[[Float[Array, "*leading _"]], Float[Array, "*leading _"]]:
-    """`normalize_at_one` rescales by `(1 + gamma^2)` so a fully-active component (`c = 1`)
-    contributes exactly 1 at every gamma, removing the implicit ~2x coefficient ramp the
-    bare form applies across a `1.0 -> 0.01` gamma anneal."""
     gamma_sq = gamma * gamma
-    scale = 1.0 + gamma_sq if normalize_at_one else 1.0
-    return lambda ci: scale * ci**2 / (ci**2 + gamma_sq)
-
-
-def resolve_reference_datapoint_count(
-    ci_upper: Mapping[str, Float[Array, "*leading _"]],
-    reference_datapoint_count: int | Literal["auto"] | None,
-) -> int | None:
-    """`a'` for this call's CI batch, resolving the `"auto"` spelling (SPEC S8).
-
-    `"auto"` resolves `a'` to this call's own `B·T`, making `a' · f_c` the raw firing COUNT
-    — the torch oracle's `log2(1 + layer_sums * world_size)` exactly, with no constant to
-    keep in sync. It is the only spelling that is correct on BOTH tPD passes at once: a
-    literal `a'` is right for whichever stream's `B·T` it names and off by that stream's
-    ratio on the other (SPEC T6 shares one frequency block across both passes), which puts
-    the other stream's penalty knee at `k = B·T / a'` firing tokens instead of 1."""
-    if reference_datapoint_count != "auto":
-        return reference_datapoint_count
-    counts = {math.prod(ci.shape[:-1]) for ci in ci_upper.values()}
-    assert len(counts) == 1, (
-        f"'auto' reference_datapoint_count needs one leading size across sites, got {sorted(counts)}"
-    )
-    return counts.pop()
+    if normalize_at_one:
+        return lambda ci: (1.0 + gamma_sq) * ci**2 / (ci**2 + gamma_sq)
+    return lambda ci: ci**2 / (ci**2 + gamma_sq)
 
 
 def activity_sum(frequencies: dict[str, Float[Array, " _"]]) -> Float[Array, ""]:
-    """`Σ_s Σ_c f_c` — the linear importance term (SPEC S8)."""
+    """`Σ_s Σ_c f_c` — the linear importance term."""
     return sum((jnp.sum(f) for f in frequencies.values()), start=jnp.zeros((), jnp.float32))
+
+
+def activity_sum_from_ci(
+    ci_upper: Mapping[str, SiteCI], gamma: Array, *, normalize_at_one: bool
+) -> Float[Array, ""]:
+    """The activity term directly from the CI values — the reader for steps with NO
+    frequency penalty, whose selected arm needs no `[C]` machinery at all."""
+    per_value_penalty = _smooth_l0_psi(gamma, normalize_at_one=normalize_at_one)
+    return sum(
+        (_site_activity(ci, per_value_penalty) for ci in ci_upper.values()),
+        start=jnp.zeros((), jnp.float32),
+    )
 
 
 def _frequency_penalty(
     frequencies: dict[str, Float[Array, " _"]], reference_datapoint_count: int
 ) -> Float[Array, ""]:
-    """`freq = Σ_s Σ_c Φ(f_c)` (SPEC S7/S8)."""
+    """Sum the frequency penalty `f * log2(1 + reference_datapoint_count * f)` over all
+    components."""
     return sum(
         (jnp.sum(_frequency_curve(f, reference_datapoint_count)) for f in frequencies.values()),
         start=jnp.zeros((), jnp.float32),
     )
 
 
-def _activity_and_freq(
-    frequencies: dict[str, Float[Array, " _"]], reference_datapoint_count: int | None
-) -> tuple[Float[Array, ""], Float[Array, ""]]:
-    """`(activity, freq)` from one set of per-site frequencies; `freq = 0.0` when no
-    frequency penalty is configured (`reference_datapoint_count is None`, SPEC S8')."""
-    freq = (
-        _frequency_penalty(frequencies, reference_datapoint_count)
-        if reference_datapoint_count is not None
-        else jnp.zeros((), jnp.float32)
-    )
-    return activity_sum(frequencies), freq
-
-
 def ema_frequency_penalty(
     frequencies: dict[str, Float[Array, " _"]],
     ema: dict[str, Float[Array, " _"]],
-    step_f32: Array,
+    count_f32: Float32[Array, ""],
     halflife_steps: float,
     reference_datapoint_count: int,
 ) -> tuple[Float[Array, ""], dict[str, Float[Array, " _"]]]:
-    """`(freq, new_ema)`: the frequency penalty at a debiased EMA of `f_c` (SPEC S8'').
+    """`(freq, new_ema)`: the frequency penalty at a debiased EMA of `f_c`.
 
-    `new_ema = decay·ema + (1-decay)·sg(f_batch)`, debiased `f̂ = new_ema/(1-decay^(step+1))`
-    — the current batch is included, so step 0 reproduces the un-smoothed penalty exactly.
+    `new_ema = decay·ema + (1-decay)·sg(f_batch)`, debiased `f̂ = new_ema/(1-decay^(count+1))`
+    where `count` is the number of prior observations. The current batch is included,
+    so the first observation reproduces the un-smoothed penalty exactly.
     The value is `Σ Φ(f̂)`; the first-order surrogate keeps the gradient at the un-smoothed
-    penalty's scale, `Φ'(f̂)·∂f_batch/∂θ`, with the estimate stop-gradded (both S8'').
+    penalty's scale, `Φ'(f̂)·∂f_batch/∂θ`, with the estimate stop-gradded.
 
     `decay = 2^(-1/halflife)` exists only in log space: formed directly it rounds to 1
     (past `h ~ 1e16` even in f64), the subtractive `1-decay` forms cancel to 0, and the
@@ -540,7 +542,7 @@ def ema_frequency_penalty(
     in the recurrence (pinned by `test_ema_long_scan_rounding_bounded`)."""
     log_decay = -math.log(2.0) / halflife_steps
     alpha = -math.expm1(log_decay)  # 1 - decay
-    debias = -jnp.expm1(log_decay * (step_f32 + 1.0))  # 1 - decay^(step+1)
+    debias = -jnp.expm1(log_decay * (count_f32 + 1.0))  # 1 - decay^(count+1)
     freq = jnp.zeros((), jnp.float32)
     new_ema: dict[str, Float[Array, " _"]] = {}
     for name, f_batch in frequencies.items():
@@ -556,136 +558,120 @@ def ema_frequency_penalty(
 
 @jaxtyped(typechecker=beartype)
 def importance_minimality_terms(
-    ci_upper: dict[str, Float[Array, "*leading _"]],
+    ci_upper: Mapping[str, SiteCI],
     gamma: Float[Array, ""],
     reference_datapoint_count: int | Literal["auto"] | None,
-    normalize_at_one: bool = False,
+    *,
+    normalize_at_one: bool,
 ) -> tuple[Float[Array, ""], Float[Array, ""]]:
     """Geman–McClure smooth-L0 imp-min terms: per-value penalty `c^2 / (c^2 + gamma^2)`.
     Flat at the origin (`phi'(0)=0`) and bounded (`|phi'| <= 0.65/gamma`) — no singularity,
-    no `eps` floor. Approaches the true `L_0` count as `gamma -> 0`.
+    no `eps` floor. Approaches the true `L_0` count as `gamma -> 0`. `normalize_at_one`
+    switches to `(1 + gamma^2) c^2 / (c^2 + gamma^2)`, so `c = 1` contributes exactly 1.
 
-    `normalize_at_one` is `_smooth_l0_psi`'s rescale — see there."""
-    return _activity_and_freq(
-        _per_component_frequencies(ci_upper, _smooth_l0_psi(gamma, normalize_at_one)),
-        resolve_reference_datapoint_count(ci_upper, reference_datapoint_count),
+    Without a frequency penalty (`reference_datapoint_count is None`), the
+    activity reads the CI values directly (no `[C]` accumulator — a selected-emitting
+    site's sum is exact as-is) and `freq = 0.0`; with one, both terms read the same
+    per-component frequencies."""
+    if reference_datapoint_count is None:
+        return activity_sum_from_ci(ci_upper, gamma, normalize_at_one=normalize_at_one), jnp.zeros(
+            (), jnp.float32
+        )
+    frequencies = _per_component_frequencies(
+        ci_upper, _smooth_l0_psi(gamma, normalize_at_one=normalize_at_one)
+    )
+    return activity_sum(frequencies), _frequency_penalty(
+        frequencies, resolve_reference_datapoint_count(ci_upper, reference_datapoint_count)
     )
 
 
 def per_component_frequencies(
-    ci_upper: dict[str, Float[Array, "*leading _"]],
-    gamma: Array,
-    normalize_at_one: bool = False,
+    ci_upper: Mapping[str, SiteCI], gamma: Array, *, normalize_at_one: bool
 ) -> dict[str, Float[Array, " _"]]:
-    """The per-site `f_c` vectors both imp-min readouts consume (SPEC S8), under the
-    smooth-L0 penalty at its annealed width (SPEC S9)."""
-    return _per_component_frequencies(ci_upper, _smooth_l0_psi(gamma, normalize_at_one))
+    """Return per-site component frequencies under smooth-L0 at the supplied `gamma`."""
+    return _per_component_frequencies(
+        ci_upper, _smooth_l0_psi(gamma, normalize_at_one=normalize_at_one)
+    )
 
 
-class BatchFrequencyTerm(NamedTuple):
-    """The frequency penalty at the single-batch `f_c` (SPEC S8/S8')."""
-
-    freq: Float[Array, ""]
+class BatchFrequencyPenalty(NamedTuple):
+    value: Float32[Array, ""]
 
 
-class EmaFrequencyTerm(NamedTuple):
-    """The frequency penalty at the debiased EMA of `f_c` (SPEC S8''). `freq_batch` is
-    the un-smoothed diagnostic logged alongside; `new_freq_ema` is the per-site `(C,)`
-    EMA state to carry forward."""
-
-    freq: Float[Array, ""]
-    freq_batch: Float[Array, ""]
-    new_freq_ema: dict[str, Float[Array, " _"]]
+class EmaFrequencyPenalty(NamedTuple):
+    value: Float32[Array, ""]
+    batch_value: Float32[Array, ""]
 
 
-FrequencyTerm = BatchFrequencyTerm | EmaFrequencyTerm
+FrequencyPenalty = BatchFrequencyPenalty | EmaFrequencyPenalty
 
 
-@dataclass(frozen=True)
-class BatchFrequency:
-    """The single-batch frequency-penalty mode (SPEC S8'), owning no cross-step state."""
+class BatchFrequency(eqx.Module):
+    """A frequency estimate from the current batch."""
 
-    coeff: LossCoeff
-    reference_datapoint_count: int | Literal["auto"]
-
-    def resolved(self, ci_upper: Mapping[str, Float[Array, "*leading _"]]) -> "BatchFrequency":
-        """`"auto"` bound to this batch's own `B·T` (SPEC S8) — see
-        `resolve_reference_datapoint_count`. A literal count returns `self` unchanged."""
-        return replace(
-            self,
-            reference_datapoint_count=resolve_reference_datapoint_count(
-                ci_upper, self.reference_datapoint_count
-            ),
-        )
-
-    def term(self, frequencies: dict[str, Float[Array, " _"]]) -> BatchFrequencyTerm:
-        count = self.reference_datapoint_count
-        assert count != "auto", "resolve the 'auto' count against this batch's CI first"
-        return BatchFrequencyTerm(_frequency_penalty(frequencies, count))
-
-
-@dataclass(frozen=True)
-class EmaFrequency:
-    """The debiased-EMA frequency-penalty mode (SPEC S8'') — the only mode that owns
-    EMA state."""
-
-    coeff: LossCoeff
-    reference_datapoint_count: int | Literal["auto"]
-    halflife_steps: float
-
-    def resolved(self, ci_upper: Mapping[str, Float[Array, "*leading _"]]) -> "EmaFrequency":
-        """`"auto"` bound to this batch's own `B·T`, as `BatchFrequency.resolved`."""
-        return replace(
-            self,
-            reference_datapoint_count=resolve_reference_datapoint_count(
-                ci_upper, self.reference_datapoint_count
-            ),
-        )
-
-    def initial_state(self, sites: tuple[SiteSpec, ...]) -> dict[str, Array]:
-        """Zero-init per-site `(C,)` fp32 EMA of the per-component firing frequencies."""
-        return {spec.name: jnp.zeros((spec.C,), jnp.float32) for spec in sites}
-
-    def term(
+    def evaluate(
         self,
-        frequencies: dict[str, Float[Array, " _"]],
-        freq_ema: dict[str, Float[Array, " _"]] | None,
-        step_f32: Array,
-    ) -> EmaFrequencyTerm:
-        assert freq_ema is not None, "ema_halflife_steps set but no freq_ema state (S8'')"
-        count = self.reference_datapoint_count
-        assert count != "auto", "resolve the 'auto' count against this batch's CI first"
-        freq, new_freq_ema = ema_frequency_penalty(
-            frequencies, freq_ema, step_f32, self.halflife_steps, count
+        frequencies: dict[str, Float32[Array, " _"]],
+        reference_datapoint_count: int,
+    ) -> tuple[BatchFrequencyPenalty, "BatchFrequency"]:
+        return BatchFrequencyPenalty(
+            _frequency_penalty(frequencies, reference_datapoint_count)
+        ), self
+
+
+class EmaFrequency(eqx.Module):
+    """A running frequency estimate, debiased when evaluating its penalty."""
+
+    halflife_steps: float = eqx.field(static=True)
+    estimate: dict[str, Float32[Array, " _"]]
+    count: Int32[Array, ""]
+
+    def evaluate(
+        self,
+        frequencies: dict[str, Float32[Array, " _"]],
+        reference_datapoint_count: int,
+    ) -> tuple[EmaFrequencyPenalty, "EmaFrequency"]:
+        value, estimate = ema_frequency_penalty(
+            frequencies,
+            self.estimate,
+            jnp.asarray(self.count, jnp.float32),
+            self.halflife_steps,
+            reference_datapoint_count,
         )
-        return EmaFrequencyTerm(freq, _frequency_penalty(frequencies, count), new_freq_ema)
+        return EmaFrequencyPenalty(
+            value, _frequency_penalty(frequencies, reference_datapoint_count)
+        ), replace(self, estimate=estimate, count=self.count + 1)
 
 
-FrequencyRole = BatchFrequency | EmaFrequency
+FrequencyEstimator = BatchFrequency | EmaFrequency
 
 
-def resolve_frequency(cfg: FrequencyMinimalityConfig) -> FrequencyRole:
-    """The config's `ema_halflife_steps` optional decided into one mode noun, once, at
-    step-build time — the runtime consumers match on the role. Whether a frequency
-    penalty exists at all is the caller's match on the config's presence."""
-    match cfg.ema_halflife_steps:
+def init_frequency_estimator(
+    cfg: FrequencyMinimalityConfig | None, sites: tuple[SiteSpec, ...]
+) -> FrequencyEstimator:
+    match cfg:
         case None:
-            return BatchFrequency(cfg.coeff, cfg.reference_datapoint_count)
-        case halflife_steps:
-            return EmaFrequency(cfg.coeff, cfg.reference_datapoint_count, halflife_steps)
+            return BatchFrequency()
+        case FrequencyMinimalityConfig():
+            match cfg.ema_halflife_steps:
+                case None:
+                    return BatchFrequency()
+                case int() | float() as halflife_steps:
+                    return EmaFrequency(
+                        halflife_steps,
+                        {site.name: jnp.zeros((site.C,), jnp.float32) for site in sites},
+                        jnp.zeros((), jnp.int32),
+                    )
 
 
 def imp_min_terms(
-    ci_upper: dict[str, Float[Array, "*leading _"]],
+    ci_upper: Mapping[str, SiteCI],
     cfg: ImportanceMinimalityLossConfig,
     gamma: Array,
 ) -> tuple[Float[Array, ""], Float[Array, ""]]:
     """`(activity, freq)` from the single-batch estimate — the reader for steps without
-    EMA state (the targeted objective, evals). The EMA-aware train step composes
-    `per_component_frequencies` + `activity_sum` + the resolved `FrequencyRole`'s `term`
-    instead (SPEC S8'')."""
+    EMA state, such as evaluations. EMA-aware training composes
+    `per_component_frequencies` + `activity_sum` + the frequency estimator's `evaluate`
+    instead."""
     ref = cfg.frequency.reference_datapoint_count if cfg.frequency is not None else None
-    return _activity_and_freq(
-        per_component_frequencies(ci_upper, gamma, cfg.normalize_at_one),
-        resolve_reference_datapoint_count(ci_upper, ref),
-    )
+    return importance_minimality_terms(ci_upper, gamma, ref, normalize_at_one=cfg.normalize_at_one)

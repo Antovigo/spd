@@ -10,8 +10,11 @@ import numpy as np
 import pytest
 from jax.sharding import AxisType, Mesh
 
-from param_decomp.experiments.lm.ab_grid_operation import global_arithmetic_probe
-from param_decomp.experiments.lm.arithmetic_probe import build_arithmetic_probe
+from param_decomp.experiments.lm.arithmetic_eval_operation import global_arithmetic_probe
+from param_decomp.experiments.lm.arithmetic_probe import (
+    build_arithmetic_probe,
+    build_arithmetic_prompt_grid,
+)
 
 BOS = 7
 SYMBOL_IDS = {"+": 101, "-": 102, "×": 103, "=": 104}
@@ -50,6 +53,7 @@ def test_build_arithmetic_probe_grid_row_major_with_bos():
 
 def test_build_arithmetic_probe_operation_dispatch_and_rejects_unknown():
     probe = build_arithmetic_probe("mul", (2, 3), (2, 3), _StubTokenizer())
+    # The symbol written into the prompt is the training pool's (`multiplication_1-100.txt`).
     assert probe.grid.symbol == "×"
     assert probe.tokens[0][2] == SYMBOL_IDS["×"]
     with pytest.raises(AssertionError, match="operation must be"):
@@ -69,10 +73,12 @@ def test_build_arithmetic_probe_rejects_multi_token_answer():
         build_arithmetic_probe("add", (5, 5), (5, 6), _StubTokenizer(split_from=10))
 
 
-def test_build_arithmetic_probe_mul_accepts_multi_token_products():
-    # 40x50=2000 splits under split_from=1000; mul never reads the answer, so it builds
-    probe = build_arithmetic_probe("mul", (40, 41), (50, 51), _StubTokenizer(split_from=1000))
-    assert probe.tokens.shape == (4, 5) and probe.answer_position == 4
+def test_prompt_grid_carries_no_answer_premise():
+    # The same ranges the probe refuses above: a training pool draws prompt rows and
+    # never scores an answer, so only the shared prompt length is asserted.
+    grid = build_arithmetic_prompt_grid("add", (5, 5), (5, 6), _StubTokenizer(split_from=10))
+    assert grid.tokens.shape == (2, 5)
+    assert grid.tokens.dtype == np.int32
 
 
 def test_arithmetic_probe_global_preserves_grid():
@@ -81,5 +87,11 @@ def test_arithmetic_probe_global_preserves_grid():
     mesh = Mesh(devices, ("replicate", "fsdp"), axis_types=(AxisType.Explicit,) * 2)
     sharded = global_arithmetic_probe(probe.tokens, mesh, n_proc=1)
     # one device: no padding, rows preserved verbatim (the eval trims pad via n_prompts anyway)
-    assert sharded.shape == probe.tokens.shape
-    np.testing.assert_array_equal(np.asarray(sharded), probe.tokens)
+    assert sharded.batch.token_ids.shape == probe.tokens.shape
+    np.testing.assert_array_equal(np.asarray(sharded.batch.token_ids), probe.tokens)
+
+
+def test_build_arithmetic_probe_mul_accepts_multi_token_products():
+    # 40×50=2000 splits under split_from=1000; mul never reads the answer, so it builds
+    probe = build_arithmetic_probe("mul", (40, 41), (50, 51), _StubTokenizer(split_from=1000))
+    assert probe.tokens.shape == (4, 5) and probe.answer_position == 4

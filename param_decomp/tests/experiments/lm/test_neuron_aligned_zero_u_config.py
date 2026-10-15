@@ -5,7 +5,6 @@ by — and only by — the two of them, and a plain (non-targeted) run refuses i
 from typing import Any
 
 import pytest
-import yaml
 from pydantic import ValidationError
 
 from param_decomp.core.configs import NamedNeuronRanks
@@ -16,7 +15,8 @@ from param_decomp.experiments.lm.config import (
     SimpleMlpCSpec,
 )
 from param_decomp.experiments.lm.resolved import ALIGNED_INITIALIZATIONS
-from param_decomp.tests.experiments.test_repo_configs_parse import LM_CONFIG_PATHS
+from param_decomp.tests.experiments.lm.test_lm_targeted import _targeted_raw
+from param_decomp.tests.lm_configs import l18_mlp_raw
 
 _SITES: dict[str, Any] = {
     "kind": "glu_transformer",
@@ -58,13 +58,8 @@ def test_the_simple_mlp_spec_agrees_with_the_glu_spec():
     assert spec.neuron_ranks is not None
 
 
-def _seat(name: str) -> dict[str, Any]:
-    [path] = [p for p in LM_CONFIG_PATHS if p.stem == name]
-    return yaml.safe_load(path.read_text())
-
-
 def test_a_plain_run_refuses_the_zero_u_variant():
-    raw = _seat("llama8b_l18_C49k_200k")
+    raw = l18_mlp_raw()
     raw["decomposition"]["sites"]["initialization"] = "neuron_aligned_zero_u"
     raw["decomposition"]["sites"]["neuron_ranks"] = {"kind": "name", "name": "x"}
     with pytest.raises(ValidationError, match="targeted-run"):
@@ -72,7 +67,7 @@ def test_a_plain_run_refuses_the_zero_u_variant():
 
 
 def test_a_targeted_run_admits_the_zero_u_variant_and_resolves_its_initializer():
-    raw = _seat("llama8b_l18_arith_targeted")
+    raw = _targeted_raw()
     raw["decomposition"]["sites"]["initialization"] = "neuron_aligned_zero_u"
     raw["decomposition"]["sites"]["neuron_ranks"] = {"kind": "name", "name": "x"}
     cfg = LMTargetedExperimentConfig.model_validate(raw)

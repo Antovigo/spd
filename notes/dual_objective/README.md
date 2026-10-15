@@ -27,6 +27,28 @@ mirrors the torch run field-for-field.
 | neuron-aligned init (SPEC T13) | `pd.weight_init: neuron_aligned_targeted` + `pd.neuron_ranks` — `targets/neuron_alignment.py`, `experiments/lm/harvest_neuron_ranks.py`; plan and rationale in `notes/neuron_aligned_init_plan.md` |
 | SPEC | S36 (dual CI), T12 (the hidden pass); T1 and T5 amended |
 
+## Configs after the 2026-10 upstream merge (017a17af4)
+
+Every config here was migrated in place to the upstream schema: the mesh axes moved under
+`runtime.mesh:`, `compiler_options: tuned-v1` became `tuned-v2` (upstream retired v1 with
+jaxlib 0.11), `target.output_edge: {kind: materialized}` was added (the old behaviour,
+full logits on every forward), and the CI attention's `attention_implementation` was
+renamed `implementation`, with `mask: bidirectional` added (the old CI attention was
+implicitly bidirectional).
+
+These ten configs validate: `addsub-L18-24`, `addsub-L18-24-outputs-only`,
+`addsub-all-layers-4xh100-{05-outputs-only,06,07,08,sota}` and
+`mult-all-layers-4xh100-{05,06,sota}`.
+
+The other 36 are kept as records of finished runs and do NOT load under the new schema.
+They are `addsub-L18-sota`, `addsub-all-layers-8xh100-sota`,
+`addsub-all-layers-4xh100-bal-perpos` and everything under `addsub-all-layers/arms-4xh100/`,
+`trials/` and `trials-4xh100/`. They give the non-target `MergedStochasticSubsetPPGDReconLoss`
+(in `nontarget.recon` and `nontarget.hidden.recon`) a batch-shared `source_shape: c`, which
+upstream removed for persistent adversaries: only `bc` (one source per batch row) and `bsc`
+(one per row and position) remain. Moving to `bc` changes the threat model, from one source
+shared by the whole batch to one per row, so none of them was rewritten.
+
 ## Three decisions worth knowing
 
 **The trunk is shared by construction, not by identity.** The torch port shares it by module

@@ -8,16 +8,19 @@ whichever family happened to bind it.
 from typing import ClassVar, Literal
 
 import pytest
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 from param_decomp.core.base_config import BaseConfig
 from param_decomp.core.configs import (
+    AnyLossMetricConfig,
     CI_L0Config,
     CIHistogramsConfig,
-    PGDReconLossConfig,
+    EvalPGDReconLossConfig,
+    SlowPGDReconLossConfig,
     UVPlotsConfig,
 )
 from param_decomp.core.eval_schedule import Every, EveryAfterFirst, FirstThenEvery, eval_due
+from param_decomp.core.recon_eval import fresh_pgd_probe
 from param_decomp.experiments.eval_config import (
     EVAL_METRIC_CONFIG_TYPES,
     AnyEvalMetricConfig,
@@ -29,24 +32,27 @@ from param_decomp.experiments.lm.eval_config import ABGridDatasetConfig
 
 FAST_METRICS = {
     "CEandKLLossesConfig",
+    "CIMaskedReconEvalConfig",
+    "UnmaskedNoDeltaReconEvalConfig",
     "CIMaskedAttnPatternsReconLossConfig",
-    "CIMaskedReconLossConfig",
     "CI_L0Config",
+    "EvalPGDReconLossConfig",
+    "RouterDivergenceConfig",
     "StochasticAttnPatternsReconLossConfig",
-    "UnmaskedNoDeltaReconLossConfig",
 }
 SLOW_METRICS = {
     "ABGridDatasetConfig",
     "ArithmeticCIGridConfig",
+    "TwoStreamCIMeanPerComponentConfig",
+    "WeightMagnitudeConfig",
+    "CIActiveCountsPerPositionConfig",
     "CIHistogramsConfig",
     "CIMeanPerComponentConfig",
     "ComponentActivationDensityConfig",
     "IdentityCIErrorConfig",
-    "PGDReconLossConfig",
     "PermutedCIPlotsConfig",
-    "TwoStreamCIMeanPerComponentConfig",
+    "SlowPGDReconLossConfig",
     "UVPlotsConfig",
-    "WeightMagnitudeConfig",
     "WellTemperednessConfig",
 }
 
@@ -82,26 +88,6 @@ def test_the_slow_tier_skips_the_first_pass_when_unasked() -> None:
     assert schedule_for(slow, _eval_config(slow, slow_on_first_step=False)) == Every(5000)
 
 
-def test_the_ab_grid_snapshot_never_runs_on_the_first_pass() -> None:
-    """An untrained decomposition puts every component above the floor, so the first-pass
-    snapshot is enormous and uninformative. The opt-out is the metric's, not the seat's:
-    it holds whether or not the callback asked for a slow first pass."""
-    ab_grid = ABGridDatasetConfig(mean_ci_floor=0.05)
-    assert schedule_for(ab_grid, _eval_config(ab_grid)) == EveryAfterFirst(1000, 5000)
-    assert schedule_for(ab_grid, _eval_config(ab_grid, slow_on_first_step=False)) == (
-        EveryAfterFirst(1000, 5000)
-    )
-
-    schedule = schedule_for(ab_grid, _eval_config(ab_grid))
-    assert not eval_due(schedule, 1000)  # the first eval pass: skipped
-    assert eval_due(schedule, 5000) and eval_due(schedule, 10000)
-    # A sibling slow metric keeps the callback's own cadence — which, since #1000, means
-    # the untrained step-0 baseline rather than the first `every` pass (see
-    # `test_slow_on_first_step_is_the_untrained_baseline_not_the_first_eval_pass`).
-    histograms = CIHistogramsConfig(n_batches_accum=None)
-    assert eval_due(schedule_for(histograms, _eval_config(histograms)), 0)
-
-
 def test_slow_on_first_step_is_the_untrained_baseline_not_the_first_eval_pass() -> None:
     """The flag's whole point is a pre-training readout; landing it on the first `every`
     pass instead would report an already-trained model and defer any eval-path blowup by
@@ -119,7 +105,66 @@ def test_slow_on_first_step_is_the_untrained_baseline_not_the_first_eval_pass() 
 def test_the_tier_travels_with_the_metric_across_families() -> None:
     """UVPlots is slow wherever it is bound; the toy and LM binders read the same
     declaration rather than each assigning a tier of their own."""
-    assert UVPlotsConfig.slow and PGDReconLossConfig.slow and not CI_L0Config.slow
+    assert UVPlotsConfig.slow and not EvalPGDReconLossConfig.slow
+
+
+def _fresh_pgd_raw(metric_type: str, **steps: object) -> dict[str, object]:
+    return {
+        "type": metric_type,
+        "init": "random",
+        "source_shape": "c",
+        **steps,
+        "step_size": 0.1,
+    }
+
+
+def _eval_with(*metrics: dict[str, object]) -> EvalConfig:
+    return EvalConfig.model_validate(
+        {"batch_size": 8, "n_steps": 1, "every": 1000, "slow_every": 5000, "metrics": metrics}
+    )
+
+
+def test_the_slow_fresh_pgd_probe_is_the_fast_one_on_the_other_cadence() -> None:
+    """A long attack ladder rides `slow_every` beside the 20-step fast probe; both are the
+    same probe to every binder, with distinct config types for their cadences."""
+    eval_config = _eval_with(
+        _fresh_pgd_raw("PGDReconLoss", n_steps=20),
+        _fresh_pgd_raw("SlowPGDReconLoss", read_out_steps=[40, 1280]),
+    )
+    fast, slow = eval_config.metrics
+    assert type(fast) is EvalPGDReconLossConfig and type(slow) is SlowPGDReconLossConfig
+    assert schedule_for(fast, eval_config) == Every(1000)
+    assert schedule_for(slow, eval_config) == FirstThenEvery(0, 5000)
+    assert fresh_pgd_probe(fast).read_out_names == ("PGDReconLoss_20step",)
+    assert fresh_pgd_probe(slow).read_out_names == (
+        "SlowPGDReconLoss_40step",
+        "SlowPGDReconLoss_1280step",
+    )
+
+
+def test_the_slow_fresh_pgd_probe_is_not_a_training_loss() -> None:
+    with pytest.raises(ValidationError, match="SlowPGDReconLoss"):
+        TypeAdapter(AnyLossMetricConfig).validate_python(
+            _fresh_pgd_raw("SlowPGDReconLoss", read_out_steps=[40])
+        )
+
+
+@pytest.mark.parametrize("read_out_steps", [[], [80, 40], [40, 40], 40])
+def test_a_slow_fresh_pgd_ladder_strictly_ascends(read_out_steps: int | list[int]) -> None:
+    with pytest.raises(ValidationError):
+        SlowPGDReconLossConfig.model_validate(
+            _fresh_pgd_raw("SlowPGDReconLoss", read_out_steps=read_out_steps)
+        )
+
+
+def test_the_fast_probe_and_the_ladder_log_apart_at_a_shared_step() -> None:
+    fast, slow = _eval_with(
+        _fresh_pgd_raw("PGDReconLoss", n_steps=40),
+        _fresh_pgd_raw("SlowPGDReconLoss", read_out_steps=[40, 80]),
+    ).metrics
+    assert isinstance(fast, EvalPGDReconLossConfig) and isinstance(slow, SlowPGDReconLossConfig)
+    assert fresh_pgd_probe(fast).read_out_names == ("PGDReconLoss_40step",)
+    assert fresh_pgd_probe(slow).read_out_names[0] == "SlowPGDReconLoss_40step"
 
 
 def test_a_seat_cannot_author_its_own_tier() -> None:
@@ -157,3 +202,19 @@ def test_a_metric_that_does_not_state_its_tier_refuses(metric_type: type[BaseCon
 
 def test_the_sweep_accepts_a_metric_that_states_its_own_tier() -> None:
     assert_every_metric_declares_its_tier([_RedeclaringConfig])
+
+
+def test_the_ab_grid_snapshot_never_runs_on_the_first_pass() -> None:
+    """An untrained decomposition puts every component above the floor, so the first-pass
+    snapshot is enormous and uninformative. The opt-out is the metric's, not the seat's:
+    it holds whether or not the callback asked for a slow first pass."""
+    ab_grid = ABGridDatasetConfig(mean_ci_floor=0.05)
+    assert schedule_for(ab_grid, _eval_config(ab_grid)) == EveryAfterFirst(1000, 5000)
+    assert schedule_for(ab_grid, _eval_config(ab_grid, slow_on_first_step=False)) == (
+        EveryAfterFirst(1000, 5000)
+    )
+    schedule = schedule_for(ab_grid, _eval_config(ab_grid))
+    assert not eval_due(schedule, 1000)  # the first eval pass: skipped
+    assert eval_due(schedule, 5000) and eval_due(schedule, 10000)
+    histograms = CIHistogramsConfig(n_batches_accum=None)
+    assert eval_due(schedule_for(histograms, _eval_config(histograms)), 0)

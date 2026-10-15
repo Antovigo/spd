@@ -34,8 +34,7 @@ from param_decomp.ci_filter.pool import answer_token_ids, build_pool, load_token
 from param_decomp.ci_filter.scripts.nontarget_probe import select_components
 from param_decomp.ci_filter.step import Prepared, gather_rows, prepare_components
 from param_decomp.core.log import logger, setup_console_logger
-from param_decomp.core.model import PlacedModel
-from param_decomp.experiments.lm.load_run import restore_jax_run
+from param_decomp.experiments.lm.load_run import PlacedTransformer, restore_jax_run
 from param_decomp.experiments.lm.resolved import TargetConfig
 from param_decomp.experiments.lm.training import enable_persistent_compilation_cache
 
@@ -57,7 +56,7 @@ COLUMNS = (
 def make_scores() -> Callable[..., tuple[Float[Array, " B"], Float[Array, " B"]]]:
     @eqx.filter_jit
     def scores(
-        placed: PlacedModel,
+        placed: PlacedTransformer,
         prepared: Prepared,
         tokens_all: Int[Array, "N T"],
         idx: Int[Array, " B"],
@@ -113,7 +112,7 @@ def model_ablation(
         target_all = jax.sharding.reshard(jnp.asarray(targets.indices), P())
         ones = {
             site.name: jax.sharding.reshard(jnp.ones(site.C, jnp.float32), P())
-            for site in placed.sites
+            for site in placed.model.sites
         }
         rng = np.random.default_rng(np.random.SeedSequence((config.seed, 13)))
         subset = np.sort(

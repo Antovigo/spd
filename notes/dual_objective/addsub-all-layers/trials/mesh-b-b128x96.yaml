@@ -28,7 +28,8 @@ decomposition:
     attention:
       kind: mha
       n_heads: 8
-      attention_implementation: xla
+      implementation: xla
+      mask: bidirectional  # the pre-017a17af4 CI attention was implicitly bidirectional
     ffn:
       kind: gelu
       hidden: 2048
@@ -315,6 +316,8 @@ cadence:
   checkpointing:
     kind: none
 target:
+  output_edge:
+    kind: materialized  # the pre-017a17af4 behaviour: full logits every forward
   attention_implementation: xla
   spec:
     kind: hf_weights_in_vendored
@@ -330,10 +333,11 @@ data:
     name: fineweb_llama_tok_64_eval
 runtime:
   compilation_cache_dir: ~/.cache/param-decomp/xla
-  compiler_options: tuned-v1
-  replicate: 1
-  fsdp: 8
-  tp: 1
+  compiler_options: tuned-v2  # tuned-v1 retired upstream (jaxlib 0.11)
+  mesh:
+    replicate: 1
+    fsdp: 8
+    tp: 1
   sharding: zero1
   remat_recon_forwards: true
   remat_ci_fn: true

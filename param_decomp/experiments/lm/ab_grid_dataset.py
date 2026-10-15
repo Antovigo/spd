@@ -17,16 +17,13 @@ from jax.experimental import multihost_utils
 from jax.sharding import PartitionSpec as P
 from jaxtyping import Array, Float, Int
 
-from param_decomp.core.ci_fn import (
-    DUAL_CI_ROLES,
-    CIRole,
-    PlacedCIFn,
-    ci_preactivations,
-    lower_leaky_hard_sigmoid,
-)
-from param_decomp.core.components import ComponentStacks
-from param_decomp.core.model import CaptureKeys, PlacedModel, prepare_compute_weights
-from param_decomp.experiments.lm.arithmetic_probe import ArithmeticGrid
+from param_decomp.core.ci_fn.interface import DUAL_CI_ROLES, CIFn, CIRole, ci_for_role
+from param_decomp.core.ci_fn.runtime import evaluate_ci_from_captures
+from param_decomp.core.ci_fn.squashing import lower_leaky_hard_sigmoid
+from param_decomp.core.components import ComponentStacks, require_full_emission
+from param_decomp.core.model import CaptureKeys, PlacedModel, select_captures
+from param_decomp.experiments.lm.arithmetic_eval import ArithmeticGrid
+from param_decomp.lm.batch import LMBatchWithDocuments
 
 AB_GRIDS_DIR = "ab_grids"
 THUMBNAIL_MAX_SIDE = 100
@@ -43,7 +40,7 @@ MANIFEST_VAR = "AB_GRIDS_MANIFEST"
 GATHER_INDEX_MULTIPLE = 64
 
 ABGridStep = Callable[
-    [PlacedModel, ComponentStacks, PlacedCIFn, Int[Array, "n_pad T"], Array],
+    [PlacedModel[Any, Any, Any, Any, Any], ComponentStacks, CIFn[Any], LMBatchWithDocuments, Array],
     tuple[dict[CIRole, dict[str, Array]], dict[str, Array], dict[CIRole, dict[str, Array]]],
 ]
 """`(model, components, ci_fn, tokens, n_valid_rows) -> ({site: CI}, {site: inner}, {site:
@@ -55,8 +52,8 @@ every chunk of a chunked pass shares one compiled step even though the last chun
 fewer real rows."""
 
 
-def make_ab_grid_step[PreparedT](
-    model_static: PlacedModel[PreparedT],
+def make_ab_grid_step(
+    model_static: PlacedModel[Any, Any, Any, Any, Any],
     ci_capture_keys: CaptureKeys,
     positions: tuple[int, ...],
     roles: tuple[CIRole, ...] = ("output",),
@@ -68,30 +65,39 @@ def make_ab_grid_step[PreparedT](
 
     ONE frozen forward serves both: `component_activation_forward` returns the CI fn's taps
     and every site's `x @ V` from the same pass, so the snapshot costs no masked forward."""
-    site_names = model_static.site_names
+    site_names = model_static.model.site_names
     position_index = np.asarray(positions, dtype=np.int32)
 
     # HLO-baking rule: read STATIC config (site_names, positions) off the closed-over
     # `model_static`; all array access goes through the traced `model` arg.
     @eqx.filter_jit
     def step(
-        model: PlacedModel[PreparedT],
+        model: PlacedModel[Any, Any, Any, Any, Any],
         components: ComponentStacks,
-        placed_ci_fn: PlacedCIFn,
-        tokens: Int[Array, "n_pad T"],
+        ci_fn: CIFn[Any],
+        tokens: LMBatchWithDocuments,
         n_valid_rows: Array,
     ) -> tuple[dict[CIRole, dict[str, Array]], dict[str, Array], dict[CIRole, dict[str, Array]]]:
-        prepared_weights = prepare_compute_weights(model, components)
+        prepared_weights = model.prepare_compute_weights(components)
         clean_forward_result, component_activations = model.component_activation_forward(
-            prepared_weights, tokens, capture_keys=ci_capture_keys
+            prepared_weights, tokens, sites=site_names, capture_keys=ci_capture_keys
         )
         # Every role off the ONE frozen forward: the CI fn's trunk runs once and the heads
-        # are separate readouts of it (S37), so a dual snapshot costs no extra forward — only
-        # the second head's `[d_model, C]` matmul and its grids.
+        # are separate readouts of it, so a dual snapshot costs no extra forward — only the
+        # second head's `[d_model, C]` matmul and its grids.
+        any_ci = evaluate_ci_from_captures(
+            ci_fn.prepare(),
+            select_captures(clean_forward_result.captures, ci_capture_keys),
+            clean_forward_result.conditioning,
+            prepared_weights,
+            sequence=clean_forward_result.sequence,
+            remat=False,
+        )
         preactivations_by_role: dict[CIRole, dict[str, Array]] = {
-            role: ci_preactivations(
-                placed_ci_fn, clean_forward_result.captures, remat=False, role=role
-            )
+            role: {
+                site: require_full_emission(value).astype(jnp.float32)
+                for site, value in ci_for_role(any_ci, role).preactivations.items()
+            }
             for role in roles
         }
         first = preactivations_by_role[roles[0]]
@@ -111,7 +117,9 @@ def make_ab_grid_step[PreparedT](
         inner = {}
         for site in site_names:
             v_norm = jnp.linalg.norm(components.site(site).V.astype(jnp.float32), axis=0)
-            acts = component_activations[site][:, recorded, :].astype(jnp.float32)
+            acts = require_full_emission(component_activations[site])[:, recorded, :].astype(
+                jnp.float32
+            )
             if not jax.sharding.get_abstract_mesh().empty:
                 # The two component axes come from different placements: V's carries the
                 # optimizer-state spec (e.g. `('tp', 'replicate')`) while the activations'
@@ -122,7 +130,7 @@ def make_ab_grid_step[PreparedT](
                 # Measured on 4x H100, mesh (1, 4, 1)/zero1, 2026-09-10.
                 v_norm = jax.sharding.reshard(v_norm, P(jax.typeof(acts).sharding.spec[2]))
             inner[site] = acts / jnp.maximum(v_norm, 1e-12)
-        valid_rows = (jnp.arange(tokens.shape[0]) < n_valid_rows)[:, None, None]
+        valid_rows = (jnp.arange(tokens.batch.token_ids.shape[0]) < n_valid_rows)[:, None, None]
         ci_sum: dict[CIRole, dict[str, Array]] = {
             role: {
                 site: jnp.where(valid_rows, role_ci[site], 0.0).sum(axis=0, dtype=jnp.float32)
@@ -184,10 +192,10 @@ class ABGridSnapshot:
 
 def collect_ab_grid_snapshot(
     step: ABGridStep,
-    model: PlacedModel,
+    model: PlacedModel[Any, Any, Any, Any, Any],
     components: ComponentStacks,
-    placed_ci_fn: PlacedCIFn,
-    chunks: tuple[tuple[Int[Array, "n_pad T"], int], ...],
+    ci_fn: CIFn[Any],
+    chunks: tuple[tuple[LMBatchWithDocuments, int], ...],
     n_prompts: int,
     mean_ci_floor: float,
 ) -> ABGridSnapshot:
@@ -213,7 +221,7 @@ def collect_ab_grid_snapshot(
     ci_totals: dict[CIRole, dict[str, np.ndarray]] = {}
     for chunk_tokens, chunk_valid_rows in chunks:
         _ci, _inner, chunk_sum = step(
-            model, components, placed_ci_fn, chunk_tokens, jnp.asarray(chunk_valid_rows)
+            model, components, ci_fn, chunk_tokens, jnp.asarray(chunk_valid_rows)
         )
         for role, role_sum in chunk_sum.items():
             totals = ci_totals.setdefault(role, {})
@@ -254,7 +262,7 @@ def collect_ab_grid_snapshot(
     padded_idx = {site: _padded_gather_index(saved[site]) for site in live}
     for chunk_tokens, chunk_valid_rows in chunks if live else ():
         ci, inner, _sum = step(
-            model, components, placed_ci_fn, chunk_tokens, jnp.asarray(chunk_valid_rows)
+            model, components, ci_fn, chunk_tokens, jnp.asarray(chunk_valid_rows)
         )
         to_gather: dict[str, tuple[tuple[Array, ...], Array]] = {
             site: (

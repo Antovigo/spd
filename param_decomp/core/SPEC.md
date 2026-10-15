@@ -1,5 +1,9 @@
 # Single-pool VPD — semantics spec
 
+> **Fork-only (2026-10).** Upstream retired this file in 017a17af4; the fork keeps it because
+> its S/T numbers are cited throughout `notes/` and the fork code. Its API names predate the
+> upstream objective-in-state / `ci_fn/` rewrite — the SEMANTICS still hold, the identifiers may not.
+
 Pins the **meaning** of the single-pool VPD training step. An implementation (torch,
 JAX, anything) is correct iff it satisfies this document. Ground truth: the on-branch
 single-pool torch core in `goodfire-ai/param-decomp` @ `feature/jax` (`param_decomp/`),

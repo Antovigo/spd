@@ -27,8 +27,11 @@ from param_decomp.core.init_placed import (
 from param_decomp.core.model import PlacedModel, site_weight_delta
 from param_decomp.core.placement import from_config
 from param_decomp.core.sharding import single_device_mesh
-from param_decomp.targets.glu_transformer import canonical_site_cs, glu_site_specs, site_name
+from param_decomp.experiments.lm.load_run import component_initializer_for
+from param_decomp.experiments.lm.resolved import ComponentInitialization, TargetConfig
+from param_decomp.targets.lm_output import MaterializedOutputEdge
 from param_decomp.targets.testing import tiny_glu_cfg, tiny_glu_decomposed_lm
+from param_decomp.targets.transformer import canonical_site_cs, glu_site_specs, site_name
 
 KEY = jax.random.PRNGKey(1)
 
@@ -69,7 +72,8 @@ def test_zero_components_read_back_the_frozen_weights():
     zero = zero_component_stacks(sites)
     group, (Vs, Us) = next(iter(zero.stacks.items()))
     perturbed = type(zero)(
-        stacks=zero.stacks | {group: (Vs + 1.0, Us + 1.0)}, site_slots=zero.site_slots
+        stacks=zero.stacks | {group: (Vs + 1.0, Us + 1.0)},
+        site_stack_indices=zero.site_stack_indices,
     )
     moved = model.weight_deltas(perturbed)
     assert any(
@@ -140,18 +144,18 @@ def test_placed_init_matches_the_eager_values():
             np.testing.assert_allclose(x, y, atol=1e-6)
 
 
-@pytest.mark.parametrize("init", ["random", "zero_u", "neuron_aligned"])
-def test_the_lm_dispatch_resolves_every_data_free_arm(init: str):
+@pytest.mark.parametrize("init", ["random", "zero_u", "nonlinearity_aligned"])
+def test_the_lm_dispatch_resolves_every_data_free_arm(init: ComponentInitialization):
     """`zero_u` is selectable exactly like the other data-free arms — no artifact, no
-    capacity bound (unlike the aligned inits, which cap C at the coordinate count)."""
-    from param_decomp.experiments.lm.load_run import component_initializer_for
-    from param_decomp.experiments.lm.resolved import TargetConfig
-
+    capacity bound (unlike the aligned inits, which cap C at the coordinate count).
+    (`nonlinearity_aligned` is upstream's name for the pre-merge `neuron_aligned` arm.)"""
+    model, _sites, _w = _model()
     target = TargetConfig(
         model_name="meta-llama/Llama-3.1-8B",
         sites=(),
         weights_dtype="bfloat16",
         attention_implementation="xla",
-        component_initialization=init,  # pyright: ignore[reportArgumentType]
+        output_edge=MaterializedOutputEdge(),
+        component_initialization=init,
     )
-    assert callable(component_initializer_for(target))
+    assert callable(component_initializer_for(target, PlacedModel(model=model, placement=None)))

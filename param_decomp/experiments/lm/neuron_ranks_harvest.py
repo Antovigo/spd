@@ -34,18 +34,18 @@ import numpy as np
 import yaml
 
 from param_decomp.core.sharding import hsdp_mesh, initialize_topology
+from param_decomp.core.world_size import SingleNode
 from param_decomp.experiments.lm.config import (
     LMTargetedExperimentConfig,
     resolve_decomposition,
 )
-from param_decomp.experiments.lm.eval_operations import global_token_batch
-from param_decomp.experiments.lm.load_run import build_target
+from param_decomp.experiments.lm.load_run import build_target, target_vocab_size
 from param_decomp.experiments.lm.neuron_ranks import target_identity
 from param_decomp.experiments.lm.targeted_data import build_prompt_pool
 from param_decomp.experiments.lm.training import enable_persistent_compilation_cache
-from param_decomp.experiments.lm.training_targeted import pool_tokenizer
-from param_decomp.infra.dataset_store import read_dataset_meta, resolve_dataset_ref
-from param_decomp.targets.glu_transformer import GLUDecomposedModel
+from param_decomp.experiments.lm.training_targeted import load_pool_tokenizer, pool_tokenizer_source
+from param_decomp.infra.dataset_store import read_dataset_identity, resolve_dataset_ref
+from param_decomp.lm.batch_data import HostTokenBatch, global_token_batch
 from param_decomp.targets.neuron_alignment import (
     STATISTIC,
     UNIT_KINDS,
@@ -62,6 +62,7 @@ from param_decomp.targets.neuron_alignment import (
     unit_counts,
     write_neuron_ranks,
 )
+from param_decomp.targets.transformer import TransformerDecomposedModel
 
 
 def _layers(spec: str | int | list[int] | tuple[int, ...], n_layer: int) -> tuple[int, ...]:
@@ -93,7 +94,7 @@ def harvest(
     runtime = cfg.runtime
     target = resolve_decomposition(cfg.target, cfg.decomposition, data_root).target
 
-    initialize_topology(local_device_count, local_device_count)
+    initialize_topology(SingleNode(n_gpus=local_device_count), local_device_count)
     assert jax.process_count() == 1, "the harvest is a single-process tool"
     assert batch_size % local_device_count == 0, (batch_size, local_device_count)
     mesh = hsdp_mesh(local_device_count, 1, 1)
@@ -101,13 +102,16 @@ def harvest(
     enable_persistent_compilation_cache(runtime.compilation_cache_dir)
 
     train_dir = resolve_dataset_ref(cfg.data.train, data_root)
-    tokenizer = pool_tokenizer(target, read_dataset_meta(train_dir).tokenizer_name)
+    tokenizer = load_pool_tokenizer(
+        pool_tokenizer_source(target, read_dataset_identity(train_dir).tokenizer_name)
+    )
     pool = build_prompt_pool(cfg.prompts, tokenizer)
     n_prompts, prompt_len = pool.tokens.shape
 
-    model = build_target(target, mesh, data_root, runtime.sharding)
+    model = build_target(target, mesh, data_root, runtime.sharding, "replicate")
     glu = model.model
-    assert isinstance(glu, GLUDecomposedModel), type(glu)
+    assert isinstance(glu, TransformerDecomposedModel), type(glu)
+    vocab_size = target_vocab_size(model)
     blocks = _layers(layers, glu.n_layer)
     counts = unit_counts(glu)
     widths = tap_widths(counts)
@@ -126,7 +130,10 @@ def harvest(
         t0 = time.time()
         step = make_moments_step(model, group)
         placed = (
-            (global_token_batch(rows, mesh, batch_size), jnp.asarray(mask))
+            (
+                global_token_batch(HostTokenBatch(rows), mesh, batch_size, vocab_size).token_ids,
+                jnp.asarray(mask),
+            )
             for rows, mask in pool_slices(pool.tokens, batch_size)
         )
         totals = accumulate_neuron_moments(step, group, widths, placed)

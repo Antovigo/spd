@@ -20,10 +20,18 @@ from jax.sharding import PartitionSpec as P
 from jaxtyping import Array, Float, Int
 
 from param_decomp.ci_filter.objective import kl_rows
-from param_decomp.ci_filter.step import UNCONSTRAINED, Prepared, output_ci
-from param_decomp.core.ci_fn import PlacedCIFn
-from param_decomp.core.model import MaterializedMasking, PlacedModel
+from param_decomp.ci_filter.step import (
+    UNCONSTRAINED,
+    FilterCIFn,
+    Prepared,
+    all_logits,
+    lm_batch,
+    masked_output,
+    output_ci,
+)
+from param_decomp.core.model import MaterializedMasking
 from param_decomp.core.precision import COMPUTE_DT
+from param_decomp.experiments.lm.load_run import PlacedTransformer
 
 
 class ProbeBaseline(eqx.Module):
@@ -50,22 +58,28 @@ def _per_position_kl(
 
 
 def subtracting(
-    placed: PlacedModel, prepared: Prepared, tokens: Int[Array, "B T"], keep: dict[str, Array]
+    placed: PlacedTransformer,
+    prepared: Prepared,
+    tokens: Int[Array, "B T"],
+    keep: dict[str, Array],
 ) -> Float[Array, "B T V"]:
     """`x @ W` minus the components whose `keep` entry is 0, at every site: with every mask at 1
     and the delta mask at 1 the masked forward IS the frozen model, so a zeroed mask subtracts
     exactly that component's contribution."""
     masks = {
         site.name: jnp.broadcast_to(keep[site.name].astype(COMPUTE_DT), (*tokens.shape, site.C))
-        for site in placed.sites
+        for site in placed.model.sites
     }
-    delta = {site.name: jnp.ones(tokens.shape, COMPUTE_DT) for site in placed.sites}
-    return placed.masked_forward(
-        prepared,
-        tokens,
-        masking=MaterializedMasking(component_masks=masks, weight_delta_masks=delta),
-        remat=False,
-    ).output
+    delta = {site.name: jnp.ones(tokens.shape, COMPUTE_DT) for site in placed.model.sites}
+    return all_logits(
+        masked_output(
+            placed,
+            prepared,
+            lm_batch(tokens),
+            MaterializedMasking(component_masks=masks, weight_delta_masks=delta),
+            remat=False,
+        )
+    )
 
 
 def make_probe_ci(selection: tuple[tuple[str, int], ...]) -> Callable[..., Float[Array, "B T K"]]:
@@ -75,10 +89,13 @@ def make_probe_ci(selection: tuple[tuple[str, int], ...]) -> Callable[..., Float
 
     @eqx.filter_jit
     def probe_ci(
-        placed: PlacedModel, ci_fn: PlacedCIFn, tokens: Int[Array, "B T"]
+        placed: PlacedTransformer,
+        prepared: Prepared,
+        ci_fn: FilterCIFn,
+        tokens: Int[Array, "B T"],
     ) -> Float[Array, "B T K"]:
-        captures = placed.clean_forward(tokens, capture_keys=ci_fn.capture_keys).captures
-        lower = output_ci(placed, ci_fn, UNCONSTRAINED, captures, remat=False).lower
+        clean = placed.clean_forward(lm_batch(tokens), ci_fn.capture_keys)
+        lower = output_ci(placed, prepared, ci_fn, UNCONSTRAINED, clean, remat=False).lower
         ci = jnp.stack(
             [lower[site][:, :, component].astype(jnp.float32) for site, component in selection],
             axis=-1,
@@ -91,9 +108,12 @@ def make_probe_ci(selection: tuple[tuple[str, int], ...]) -> Callable[..., Float
 def make_probe_baseline() -> Callable[..., ProbeBaseline]:
     @eqx.filter_jit
     def probe_baseline(
-        placed: PlacedModel, prepared: Prepared, tokens: Int[Array, "B T"], keep: dict[str, Array]
+        placed: PlacedTransformer,
+        prepared: Prepared,
+        tokens: Int[Array, "B T"],
+        keep: dict[str, Array],
     ) -> ProbeBaseline:
-        clean_logits = placed.clean_forward(tokens).output
+        clean_logits = all_logits(placed.clean_forward(lm_batch(tokens)).output)
         identity = subtracting(placed, prepared, tokens, keep)
         return ProbeBaseline(
             logits=identity,
@@ -112,7 +132,7 @@ def make_probe_component() -> Callable[..., dict[str, Array]]:
 
     @eqx.filter_jit
     def probe_component(
-        placed: PlacedModel,
+        placed: PlacedTransformer,
         prepared: Prepared,
         tokens: Int[Array, "B T"],
         baseline: ProbeBaseline,

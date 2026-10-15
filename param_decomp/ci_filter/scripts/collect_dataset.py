@@ -41,18 +41,20 @@ from param_decomp.ci_filter.paths import CIFilterOutputs
 from param_decomp.ci_filter.pool import ArithmeticPool, build_pool, load_tokenizer
 from param_decomp.ci_filter.step import (
     CIConstraints,
+    FilterCIFn,
     Prepared,
-    gather_rows,
+    all_logits,
+    gather_batch,
     output_ci,
     prepare_components,
     remove_components,
 )
-from param_decomp.core.ci_fn import PlacedCIFn
+from param_decomp.core.components import require_full_emission
 from param_decomp.core.log import logger, setup_console_logger
-from param_decomp.core.model import MaterializedMasking, PlacedModel, select_captures
+from param_decomp.core.model import MaterializedMasking
 from param_decomp.core.precision import COMPUTE_DT
 from param_decomp.experiments.lm.arithmetic_eval import component_activation_model
-from param_decomp.experiments.lm.load_run import restore_jax_run
+from param_decomp.experiments.lm.load_run import PlacedTransformer, restore_jax_run
 from param_decomp.experiments.lm.resolved import TargetConfig
 from param_decomp.experiments.lm.training import enable_persistent_compilation_cache
 from param_decomp.targets.transformer_taps import (
@@ -140,19 +142,16 @@ def make_position_max():  # noqa: ANN201 (jitted closure)
 
     @eqx.filter_jit
     def position_max(
-        placed: PlacedModel,
+        placed: PlacedTransformer,
         prepared: Prepared,
-        ci_fn: PlacedCIFn,
+        ci_fn: FilterCIFn,
         constraints: CIConstraints,
         alive_idx: dict[str, Array],
         tokens_all: Int[Array, "N T"],
         idx: Int[Array, " B"],
     ) -> Array:
-        tokens = gather_rows(tokens_all, idx)
-        clean, _ = placed.component_activation_forward(
-            prepared, tokens, capture_keys=frozenset(ci_fn.capture_keys)
-        )
-        lower = output_ci(placed, ci_fn, constraints, clean.captures, False).lower
+        clean = placed.clean_forward(gather_batch(tokens_all, idx), ci_fn.capture_keys)
+        lower = output_ci(placed, prepared, ci_fn, constraints, clean, remat=False).lower
         ci = jnp.concatenate(
             [
                 jnp.take(jax.sharding.reshard(lower[s], P()), alive_idx[s], axis=-1)
@@ -218,39 +217,43 @@ def make_collect(n_layer: int, threshold: float):  # noqa: ANN201 (jitted closur
 
     @eqx.filter_jit
     def collect(
-        placed: PlacedModel,
+        placed: PlacedTransformer,
         prepared: Prepared,
-        ci_fn: PlacedCIFn,
+        ci_fn: FilterCIFn,
         constraints: CIConstraints,
         alive_idx: dict[str, Array],
         tokens_all: Int[Array, "N T"],
         idx: Int[Array, " B"],
     ) -> tuple[dict[str, Array], dict[str, Array], Array]:
-        tokens = gather_rows(tokens_all, idx)
-        keys = frozenset(ci_fn.capture_keys) | frozenset((*resid, *gate, *up, *hidden))
+        batch = gather_batch(tokens_all, idx)
+        keys = ci_fn.capture_keys | frozenset((*resid, *gate, *up, *hidden))
 
-        clean, clean_inner = placed.component_activation_forward(
-            prepared, tokens, capture_keys=keys
+        clean, clean_acts = placed.component_activation_forward(
+            prepared, batch, sites=placed.model.site_names, capture_keys=keys
         )
-        clean_lower = output_ci(
-            placed, ci_fn, constraints, select_captures(clean.captures, ci_fn.capture_keys), False
-        ).lower
-        original = extract(clean.captures, clean.output, clean_lower, clean_inner, alive_idx)
+        clean_inner = {site: require_full_emission(v) for site, v in clean_acts.items()}
+        clean_lower = output_ci(placed, prepared, ci_fn, constraints, clean, remat=False).lower
+        clean_logits = all_logits(clean.output)
+        original = extract(clean.captures, clean_logits, clean_lower, clean_inner, alive_idx)
 
         masking = MaterializedMasking(
             component_masks={k: (v > threshold).astype(COMPUTE_DT) for k, v in clean_lower.items()}
         )
         masked = placed.masked_forward(
-            prepared, tokens, masking=masking, capture_keys=keys, remat=False
+            prepared,
+            batch,
+            masking=placed.model.prepare_masking(masking),
+            routes=None,
+            capture_keys=keys,
+            remat=False,
         )
         masked_inner = component_activation_model(placed).masked_component_activations(
-            prepared, tokens, masking, placement=placed.placement
+            prepared, batch, masking, placement=placed.placement
         )
-        masked_lower = output_ci(
-            placed, ci_fn, constraints, select_captures(masked.captures, ci_fn.capture_keys), False
-        ).lower
-        decomposed = extract(masked.captures, masked.output, masked_lower, masked_inner, alive_idx)
-        kl = jax.sharding.reshard(kl_rows(masked.output[:, -1], clean.output[:, -1]), P())
+        masked_lower = output_ci(placed, prepared, ci_fn, constraints, masked, remat=False).lower
+        masked_logits = all_logits(masked.output)
+        decomposed = extract(masked.captures, masked_logits, masked_lower, masked_inner, alive_idx)
+        kl = jax.sharding.reshard(kl_rows(masked_logits[:, -1], clean_logits[:, -1]), P())
         return original, decomposed, kl
 
     return collect
@@ -304,7 +307,7 @@ def collect_dataset(
     pool = build_pool(config.pool, load_tokenizer(target.model_name))
     threshold = config.alive_threshold
     n_prompts = pool.n_prompts if limit is None else limit
-    n_layer = len({site.split(".")[1] for site in placed.site_names})
+    n_layer = len({site.split(".")[1] for site in placed.model.site_names})
 
     alive_json = json.loads(outputs.alive.read_text())
     assert alive_json["threshold"] == threshold, (alive_json["threshold"], threshold)
@@ -326,7 +329,7 @@ def collect_dataset(
         }
         prepared, v_norms = prepare_components(placed, components)
         del restored, components
-        assert set(alive) == set(placed.site_names), set(placed.site_names) ^ set(alive)
+        assert set(alive) == set(placed.model.site_names), set(placed.model.site_names) ^ set(alive)
         alive_idx = {s: jax.sharding.reshard(jnp.asarray(alive[s]), P()) for s in sites}
         tokens_all = jax.sharding.reshard(jnp.asarray(pool.tokens), P())
 
@@ -498,9 +501,9 @@ def collect_dataset(
     return out_dir
 
 
-def site_d_in(placed: PlacedModel, kind: str) -> int:
+def site_d_in(placed: PlacedTransformer, kind: str) -> int:
     """Block 0's `kind` input width: d_model for `self_attn.q_proj`, d_mlp for `mlp.down_proj`."""
-    (spec,) = [s for s in placed.sites if s.name == f"layers.0.{kind}"]
+    (spec,) = [s for s in placed.model.sites if s.name == f"layers.0.{kind}"]
     return spec.d_in
 
 

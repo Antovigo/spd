@@ -102,7 +102,7 @@ def load_tokenizer(model_name: str) -> Tokenizer:
     """The HF target's tokenizer from its local snapshot (the weights load already staged it)."""
     from transformers import AutoTokenizer
 
-    from param_decomp.targets.glu_transformer import hf_snapshot_dir
+    from param_decomp.targets.transformer import hf_snapshot_dir
 
     loaded = AutoTokenizer.from_pretrained(str(hf_snapshot_dir(model_name)), local_files_only=True)
     return cast(Tokenizer, cast(object, loaded))

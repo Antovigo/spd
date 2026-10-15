@@ -17,19 +17,27 @@ from jax.sharding import PartitionSpec as P
 from jaxtyping import Array, Float, Int
 
 from param_decomp.ci_filter.objective import kl_rows
-from param_decomp.ci_filter.step import CIConstraints, Prepared, gather_rows, output_ci
-from param_decomp.core.ci_fn import PlacedCIFn
-from param_decomp.core.model import MaterializedMasking, PlacedModel
+from param_decomp.ci_filter.step import (
+    CIConstraints,
+    FilterCIFn,
+    Prepared,
+    all_logits,
+    gather_batch,
+    masked_output,
+    output_ci,
+)
+from param_decomp.core.model import MaterializedMasking
 from param_decomp.core.precision import COMPUTE_DT
+from param_decomp.experiments.lm.load_run import PlacedTransformer
 
 MASKINGS = ("all_on", "alive_union", "dead_only", "rounded_ci", "rounded_ci_plus_dead")
 
 
 @eqx.filter_jit
 def ablation_rows(
-    placed: PlacedModel,
+    placed: PlacedTransformer,
     prepared: Prepared,
-    ci_fn: PlacedCIFn,
+    ci_fn: FilterCIFn,
     constraints: CIConstraints,
     alive: dict[str, Float[Array, " C"]],
     tokens_all: Int[Array, "N T"],
@@ -37,9 +45,9 @@ def ablation_rows(
     threshold: float,
 ) -> dict[str, dict[str, Array]]:
     """`{masking: {"last": (B,), "all_positions": (B,)}}` KLs, replicated."""
-    tokens = gather_rows(tokens_all, idx)
-    clean = placed.clean_forward(tokens, capture_keys=ci_fn.capture_keys)
-    lower = output_ci(placed, ci_fn, constraints, clean.captures, remat=False).lower
+    clean = placed.clean_forward(gather_batch(tokens_all, idx), ci_fn.capture_keys)
+    clean_logits = all_logits(clean.output)
+    lower = output_ci(placed, prepared, ci_fn, constraints, clean, remat=False).lower
     rounded = {k: (v > threshold).astype(COMPUTE_DT) for k, v in lower.items()}
     fixed = {k: v[None, None, :].astype(COMPUTE_DT) for k, v in alive.items()}
     maskings = {
@@ -51,13 +59,16 @@ def ablation_rows(
     }
     out: dict[str, dict[str, Array]] = {}
     for name in MASKINGS:
-        logits = placed.masked_forward(
-            prepared,
-            tokens,
-            masking=MaterializedMasking(component_masks=maskings[name]),
-            remat=False,
-        ).output
-        per_position = kl_rows(logits, clean.output)
+        logits = all_logits(
+            masked_output(
+                placed,
+                prepared,
+                clean.conditioning,
+                MaterializedMasking(component_masks=maskings[name]),
+                remat=False,
+            )
+        )
+        per_position = kl_rows(logits, clean_logits)
         out[name] = {
             "last": jax.sharding.reshard(per_position[:, -1], P()),
             "all_positions": jax.sharding.reshard(jnp.mean(per_position, axis=1), P()),

@@ -8,25 +8,25 @@ layout (a pos/comp axis swap is the bug this catches); and the snapshot write + 
 
 import base64
 import json
-from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
-from typing import cast
+from typing import Any
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from param_decomp.core.ci_fn import (
-    CIRole,
-    PlacedCIFn,
-    ci_preactivations,
-    lower_leaky_hard_sigmoid,
+from param_decomp.core.ci_fn.implementations.chunkwise.arch import (
+    Chunk,
+    ChunkwiseTransformerCIFnArch,
 )
-from param_decomp.core.components import ComponentStacks, init_component_stacks
-from param_decomp.core.model import PlacedModel, prepare_compute_weights
-from param_decomp.core.train import TrainState
+from param_decomp.core.ci_fn.implementations.transformer.layers import MHACIFnAttention
+from param_decomp.core.ci_fn.interface import CIFn, CIRole, is_dual
+from param_decomp.core.ci_fn.runtime import evaluate_ci_role_from_captures
+from param_decomp.core.ci_fn.squashing import lower_leaky_hard_sigmoid
+from param_decomp.core.components import init_component_stacks, require_full_emission
+from param_decomp.core.model import PlacedModel
 from param_decomp.experiments.lm import ab_grid_dataset
 from param_decomp.experiments.lm.ab_grid_dataset import (
     APPLET_FILENAME,
@@ -43,15 +43,36 @@ from param_decomp.experiments.lm.ab_grid_dataset import (
     write_ab_grid_snapshot,
 )
 from param_decomp.experiments.lm.ab_grid_operation import ABGridOperation, resolve_positions
-from param_decomp.experiments.lm.arithmetic_probe import ArithmeticGrid
-from param_decomp.targets.glu_transformer import glu_site_specs, mlp_family_site_cs
-from param_decomp.targets.testing import capture_clean, tiny_glu_cfg, tiny_glu_decomposed_lm
-from param_decomp.tests.core.test_slow_eval import _build_ci_fn
+from param_decomp.experiments.lm.arithmetic_eval import ArithmeticGrid
+from param_decomp.lm.batch import LMBatchWithDocuments
+from param_decomp.targets.testing import tiny_glu_cfg, tiny_glu_decomposed_lm
+from param_decomp.targets.transformer import glu_site_specs, mlp_family_site_cs
 
 N_A, N_B = 3, 4
 T = 5
 POSITIONS = (0, T - 1)
 SITE = "layers.4.mlp.gate_proj"
+
+
+def _build_ci_fn(
+    model: PlacedModel[Any, Any, Any, Any, Any], n_embd: int, key: jax.Array, dual: bool = False
+) -> CIFn[Any]:
+    """One transformer chunk over all sites, reading the residual entering the first
+    decomposed block (the `test_slow_eval` arch, with an optional second readout head)."""
+    site_names = model.model.site_names
+    first_block = min(int(name.split(".")[1]) for name in site_names)
+    arch = ChunkwiseTransformerCIFnArch(
+        chunks=(Chunk(input_taps=(f"resid.{first_block}",), output_sites=site_names),),
+        input_dim=n_embd,
+        d_model=16,
+        n_blocks=1,
+        attention=MHACIFnAttention(mask="bidirectional", implementation="xla", n_heads=2),
+        ffn_hidden=32,
+        ffn_kind="gelu",
+        learned_norm_scale=False,
+        dual=dual,
+    )
+    return arch.initialize(model.model.sites, model.placement, key)
 
 
 @cache
@@ -75,10 +96,12 @@ def _grid_step(roles: tuple[CIRole, ...] = ("output",)):
     return make_ab_grid_step(model, ci_fn.capture_keys, POSITIONS, roles)
 
 
-def _dual_ci_fn() -> PlacedCIFn:
+def _dual_ci_fn() -> CIFn[Any]:
     """The same arch with a second readout head (S37)."""
     cfg, model, _ci_fn, _C = _tiny_setup()
-    return _build_ci_fn(model, cfg.n_embd, jax.random.PRNGKey(2), dual=True)
+    ci_fn = _build_ci_fn(model, cfg.n_embd, jax.random.PRNGKey(2), dual=True)
+    assert is_dual(ci_fn)
+    return ci_fn
 
 
 def _grid() -> ArithmeticGrid:
@@ -86,12 +109,16 @@ def _grid() -> ArithmeticGrid:
 
 
 def _components():
-    return init_component_stacks(_tiny_setup()[1].sites, jax.random.PRNGKey(1))
+    return init_component_stacks(_tiny_setup()[1].model.sites, jax.random.PRNGKey(1))
 
 
-def _tokens(n_rows: int) -> jax.Array:
+def _token_ids(n_rows: int) -> jax.Array:
     cfg = _tiny_setup()[0]
     return jax.random.randint(jax.random.PRNGKey(4), (n_rows, T), 0, cfg.vocab_size)
+
+
+def _tokens(n_rows: int) -> LMBatchWithDocuments:
+    return LMBatchWithDocuments.from_unsegmented_sequences(_token_ids(n_rows))
 
 
 def test_grid_step_ci_inner_and_pad_masked_sums_match_hand_rolled():
@@ -102,25 +129,35 @@ def test_grid_step_ci_inner_and_pad_masked_sums_match_hand_rolled():
     tokens = _tokens(n_pad)
     ci_grids, inner_grids, ci_sums = _grid_step()(model, vu, ci_fn, tokens, jnp.asarray(n_prompts))
 
-    preactivations = ci_preactivations(
-        ci_fn,
-        capture_clean(model.model, tokens, ci_fn.capture_keys),
+    prepared_weights = model.prepare_compute_weights(vu)
+    clean = model.clean_forward(tokens, ci_fn.capture_keys)
+    preactivations = evaluate_ci_role_from_captures(
+        ci_fn.prepare(),
+        clean.captures,
+        clean.conditioning,
+        prepared_weights,
+        sequence=clean.sequence,
         remat=False,
         role="output",
-    )
+    ).preactivations
     _clean, raw_activations = model.component_activation_forward(
-        prepare_compute_weights(model, vu), tokens, capture_keys=ci_fn.capture_keys
+        prepared_weights, tokens, sites=model.model.site_names, capture_keys=ci_fn.capture_keys
     )
-    for site in model.site_names:
+    for site in model.model.site_names:
         ci = np.asarray(ci_grids["output"][site])
         assert ci.shape == (n_pad, len(POSITIONS), C)
         assert ci.min() >= 0.0 and ci.max() <= 1.0
-        ci_expected = np.asarray(lower_leaky_hard_sigmoid(preactivations[site]), np.float32)
+        ci_expected = np.asarray(
+            lower_leaky_hard_sigmoid(require_full_emission(preactivations[site])), np.float32
+        )
         np.testing.assert_allclose(ci, ci_expected[:, POSITIONS, :], rtol=1e-4, atol=1e-4)
 
         # inner is x@V divided by the component's own ‖V_c‖, at the recorded positions only
         v_norms = np.linalg.norm(np.asarray(vu.site(site).V, np.float32), axis=0)
-        inner_expected = np.asarray(raw_activations[site], np.float32)[:, POSITIONS, :] / v_norms
+        inner_expected = (
+            np.asarray(require_full_emission(raw_activations[site]), np.float32)[:, POSITIONS, :]
+            / v_norms
+        )
         np.testing.assert_allclose(np.asarray(inner_grids[site]), inner_expected, rtol=1e-4)
 
         # the sums are over the REAL rows only — the garbage tail must not move a mean
@@ -137,7 +174,7 @@ def test_collect_snapshot_saves_only_components_above_the_floor():
     everything = collect_ab_grid_snapshot(
         _grid_step(), model, vu, ci_fn, ((tokens, n_prompts),), n_prompts, mean_ci_floor=0.0
     )
-    for site in model.site_names:
+    for site in model.model.site_names:
         mean_ci = everything.mean_ci["output"][site]
         assert mean_ci.shape == (len(POSITIONS), C)
         assert everything.saved[site].tolist() == list(range(C))  # floor 0 saves everything
@@ -148,7 +185,7 @@ def test_collect_snapshot_saves_only_components_above_the_floor():
     cut = collect_ab_grid_snapshot(
         _grid_step(), model, vu, ci_fn, ((tokens, n_prompts),), n_prompts, mean_ci_floor=floor
     )
-    for site in model.site_names:
+    for site in model.model.site_names:
         expected = saved_indices(everything.mean_ci["output"][site], floor)
         np.testing.assert_array_equal(cut.saved[site], expected)
         # the mean-CI vector is kept for EVERY component even when its grids are cut
@@ -160,7 +197,7 @@ def test_collect_snapshot_saves_only_components_above_the_floor():
             everything.ci_columns["output"][site][:, :, expected],
             rtol=1e-6,
         )
-    assert any(cut.saved[site].size < C for site in model.site_names)
+    assert any(cut.saved[site].size < C for site in model.model.site_names)
 
 
 def test_chunking_the_grid_changes_nothing():
@@ -171,7 +208,8 @@ def test_chunking_the_grid_changes_nothing():
     _cfg, model, ci_fn, _C = _tiny_setup()
     vu = _components()
     n_prompts = N_A * N_B
-    tokens = _tokens(n_prompts)
+    token_ids = _token_ids(n_prompts)
+    tokens = LMBatchWithDocuments.from_unsegmented_sequences(token_ids)
     step = _grid_step()
 
     whole = collect_ab_grid_snapshot(
@@ -183,11 +221,17 @@ def test_chunking_the_grid_changes_nothing():
         model,
         vu,
         ci_fn,
-        ((tokens[:split], split), (tokens[split:], n_prompts - split)),
+        (
+            (LMBatchWithDocuments.from_unsegmented_sequences(token_ids[:split]), split),
+            (
+                LMBatchWithDocuments.from_unsegmented_sequences(token_ids[split:]),
+                n_prompts - split,
+            ),
+        ),
         n_prompts,
         mean_ci_floor=0.02,
     )
-    for site in model.site_names:
+    for site in model.model.site_names:
         np.testing.assert_array_equal(chunked.saved[site], whole.saved[site])
         np.testing.assert_allclose(
             chunked.mean_ci["output"][site], whole.mean_ci["output"][site], rtol=1e-5, atol=1e-6
@@ -439,7 +483,7 @@ def test_dual_snapshot_floor_keeps_hidden_only_components():
     )
     assert set(snapshot.mean_ci) == {"output", "hidden"}
     assert set(snapshot.ci_columns) == {"output", "hidden"}
-    for site in model.site_names:
+    for site in model.model.site_names:
         # One shared index set, and it is at least the union of what either role would keep.
         both = np.maximum(snapshot.mean_ci["output"][site], snapshot.mean_ci["hidden"][site])
         floor = float(np.median(both.max(axis=0)))
@@ -458,47 +502,17 @@ def test_dual_snapshot_floor_keeps_hidden_only_components():
             assert cut.ci_columns[role][site].shape[-1] == expected.size
 
 
-class _PoisonedCIFn:
-    """Stands in for `state.decomposition.ci_fn`. Any read at all is the regression."""
-
-    def __getattr__(self, name: str) -> object:
-        raise AssertionError(
-            "the ab-grid operation read state.decomposition.ci_fn; it must consume the eval "
-            f"invocation's placed_ci_fn instead (attribute {name!r})"
-        )
-
-
-@dataclass(frozen=True)
-class _StubDecomposition:
-    components: ComponentStacks
-    ci_fn: object
-
-
-@dataclass(frozen=True)
-class _StubState:
-    decomposition: _StubDecomposition
-
-
-def test_the_grid_operation_consumes_the_invocation_s_placed_ci_fn() -> None:
-    """Regression for run 10631, which died after 3900 healthy steps.
-
-    `ci_preactivations` goes through the CI compute lifecycle, and
-    `materialize_ci_compute_weights` reads `.fn` / `.placement` off a `PlacedCIFn` to
-    rebuild a chunkwise fn's compute weights. The operation used to reach past the eval
-    invocation to `state.decomposition.ci_fn` and hand the RAW fn down, so the first
-    snapshot raised `'ChunkwiseTransformerCIFn' object has no attribute 'fn'`. The grid's
-    schedule carries a `step > 0` guard, so its first firing is `slow_every` — never step
-    0 — which is why a short smoke cannot see it and why this test exists instead.
-
-    The dataset-level tests above all pass a correctly-built `PlacedCIFn`, so they were
-    green both before and after the fix: the untested seam was the OPERATION's wiring.
-    Poisoning the state's raw fn is what pins it — the run must succeed while any read of
-    `state.decomposition.ci_fn` fails loudly.
-    """
+def test_the_grid_operation_runs_and_reports_saved_component_counts() -> None:
+    """The OPERATION's wiring — the seam the dataset-level tests above do not cross (run
+    10631 died there after 3900 healthy steps, and the grid's `step > 0` guard means a
+    short smoke never fires it). Driven with the decomposition's own CI fn, which carries
+    its placement, the operation must run end to end and report the saved counts."""
     _cfg, model, ci_fn, C = _tiny_setup()
     vu = _components()
     n_prompts = N_A * N_B
-    tokens = jax.random.randint(jax.random.PRNGKey(4), (n_prompts, T), 0, 64)
+    tokens = LMBatchWithDocuments.from_unsegmented_sequences(
+        jax.random.randint(jax.random.PRNGKey(4), (n_prompts, T), 0, 64)
+    )
     operation = ABGridOperation(
         step=_grid_step(),
         model=model,
@@ -511,13 +525,12 @@ def test_the_grid_operation_consumes_the_invocation_s_placed_ci_fn() -> None:
         run_dir=Path("/nonexistent"),
         writes_snapshots=False,
     )
-    state = _StubState(decomposition=_StubDecomposition(components=vu, ci_fn=_PoisonedCIFn()))
 
-    record = operation.run(cast(TrainState, cast(object, state)), 0, ci_fn)
+    record = operation.run(vu, ci_fn, 0)
 
-    assert record["eval/ab_grids/saved_components/total"] == float(len(model.site_names) * C), (
-        "a zero floor keeps every component, so the total is the full component count"
-    )
+    assert record["eval/ab_grids/saved_components/total"] == float(
+        len(model.model.site_names) * C
+    ), "a zero floor keeps every component, so the total is the full component count"
 
 
 @pytest.mark.multidevice

@@ -12,12 +12,7 @@ import pytest
 
 from param_decomp.core.components import SiteC
 from param_decomp.core.model import PlacedModel
-from param_decomp.targets.glu_transformer import (
-    GLU_ANATOMY,
-    canonical_site_cs,
-    glu_site_specs,
-    site_name,
-)
+from param_decomp.lm.batch import LMBatchWithDocuments
 from param_decomp.targets.neuron_alignment import (
     UNIT_KINDS,
     NeuronRanks,
@@ -43,6 +38,12 @@ from param_decomp.targets.neuron_alignment import (
     write_neuron_ranks,
 )
 from param_decomp.targets.testing import capture_clean, tiny_glu_cfg, tiny_glu_decomposed_lm
+from param_decomp.targets.transformer import (
+    GLU_ANATOMY,
+    canonical_site_cs,
+    glu_site_specs,
+    site_name,
+)
 
 
 def _model(site_cs: tuple[SiteC, ...]):
@@ -130,7 +131,9 @@ def test_scores_match_a_hand_computation_from_the_taps():
     totals = accumulate_neuron_moments(step, blocks, widths, slices)
 
     keys = [key for b in blocks for key in block_tap_keys(GLU_ANATOMY, b).values()]
-    captures = capture_clean(model, jnp.asarray(tokens), keys)
+    captures = capture_clean(
+        model, LMBatchWithDocuments.from_unsegmented_sequences(jnp.asarray(tokens)), keys
+    )
     for block in blocks:
         taps = block_tap_keys(GLU_ANATOMY, block)
         acts = {tap: np.asarray(captures[key], dtype=np.float64) for tap, key in taps.items()}

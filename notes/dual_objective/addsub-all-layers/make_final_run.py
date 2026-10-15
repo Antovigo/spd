@@ -28,7 +28,7 @@ What it folds in, all measured on the 4x H100 seat:
   whose value is larger wherever high-energy positions reconstruct well and low-energy ones
   badly. Dividing by the measured per_position/batch ratio keeps the L18 recon/sparsity
   exchange rate while still moving pressure off the BOS position. Measure it with
-  `arms-4xh100/normcal.yaml` under `PD_LOG_ALT_HIDDEN_NORM=1`. `--rho 1` opts out.
+  `arms-4xh100/normcal.yaml` with `pd.hidden.log_alternate_normalization: true`. `--rho 1` opts out.
 """
 
 import argparse
@@ -46,7 +46,7 @@ CS_KEYS = ("q", "k", "v", "o", "gate", "up", "down")
 
 RHO_NOTE_UNCHANGED = (
     "#   hidden recon coefficients UNCHANGED (rho = 1). MEASURED 2026-09-11 with\n"
-    "#     arms-4xh100/normcal.yaml under PD_LOG_ALT_HIDDEN_NORM=1: the aggregate\n"
+    "#     arms-4xh100/normcal.yaml with pd.hidden.log_alternate_normalization: true: the aggregate\n"
     "#     per_position/batch ratio is 0.897 (target stochastic), 0.950 (target PPGD) and\n"
     "#     1.037 (nontarget merged) — i.e. ~1, so per_position already carries the L18\n"
     "#     exchange rate and needs no rescaling. It redistributes pressure WITHIN each point\n"

@@ -31,13 +31,15 @@ from param_decomp.ci_filter.pool import build_pool, load_tokenizer
 from param_decomp.ci_filter.step import (
     UNCONSTRAINED,
     CIConstraints,
-    gather_rows,
+    FilterCIFn,
+    Prepared,
+    gather_batch,
     output_ci,
+    prepare_components,
+    remove_components,
 )
-from param_decomp.core.ci_fn import PlacedCIFn
 from param_decomp.core.log import logger, setup_console_logger
-from param_decomp.core.model import PlacedModel
-from param_decomp.experiments.lm.load_run import restore_jax_run
+from param_decomp.experiments.lm.load_run import PlacedTransformer, restore_jax_run
 from param_decomp.experiments.lm.resolved import TargetConfig
 from param_decomp.experiments.lm.training import enable_persistent_compilation_cache
 
@@ -48,15 +50,15 @@ def make_site_l0(threshold: float) -> Callable[..., dict[str, Float[Array, " T"]
 
     @eqx.filter_jit
     def site_l0(
-        placed: PlacedModel,
-        ci_fn: PlacedCIFn,
+        placed: PlacedTransformer,
+        prepared: Prepared,
+        ci_fn: FilterCIFn,
         constraints: CIConstraints,
         tokens_all: Int[Array, "N T"],
         idx: Int[Array, " B"],
     ) -> dict[str, Float[Array, " T"]]:
-        tokens = gather_rows(tokens_all, idx)
-        captures = placed.clean_forward(tokens, capture_keys=ci_fn.capture_keys).captures
-        lower = output_ci(placed, ci_fn, constraints, captures, remat=False).lower
+        clean = placed.clean_forward(gather_batch(tokens_all, idx), ci_fn.capture_keys)
+        lower = output_ci(placed, prepared, ci_fn, constraints, clean, remat=False).lower
         return {
             site: jax.sharding.reshard(
                 jnp.sum(value > threshold, axis=(0, 2), dtype=jnp.float32), P()
@@ -102,9 +104,16 @@ def l0_by_position(config: CIFilterConfig, data_root: Path, prompts: int, batch_
                 if source == "run"
                 else trained_ci(run_dir, step, source, restored.ci_fn)
             )
+            components = (
+                restored.components
+                if constraints.kept is None
+                else remove_components(restored.components, constraints.kept)
+            )
+            prepared, _ = prepare_components(placed, components)
+            del components
             totals: dict[str, np.ndarray] = {}
             for block in batches:
-                got = site_l0(placed, ci_fn, constraints, tokens_all, jnp.asarray(block))
+                got = site_l0(placed, prepared, ci_fn, constraints, tokens_all, jnp.asarray(block))
                 for site, value in got.items():
                     totals[site] = totals.get(site, 0.0) + np.asarray(value)
             for site in sorted(totals):

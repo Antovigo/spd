@@ -14,13 +14,17 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
-import optax
 import pytest
 from jaxtyping import Array
 
-from param_decomp.core.ci_fn import LayerwiseMLPCIArch, LayerwiseMLPCIFn, build_ci_fn
+from param_decomp.core.ci_fn.implementations.layerwise_mlp import (
+    LayerwiseMLPCIFn,
+    LayerwiseMLPCIFnArch,
+)
 from param_decomp.core.components import SiteC, init_component_stacks
 from param_decomp.core.configs import (
+    AdamWOptimizerConfig,
+    BatchHiddenActsNormalization,
     HiddenActsNormalization,
     HiddenPassConfig,
     ImportanceMinimalityLossConfig,
@@ -31,14 +35,17 @@ from param_decomp.core.configs import (
     StochasticReconLossConfig,
     TargetedLossMetricConfig,
 )
+from param_decomp.core.losses import init_frequency_estimator
 from param_decomp.core.model import PlacedModel
 from param_decomp.core.objective import build_targeted_objective
+from param_decomp.core.run_state import _adamw_optimizer
 from param_decomp.core.schedule import ScheduleConfig
 from param_decomp.core.train import (
     CIScaledWeightDecay,
     Decomposition,
     ForwardSubstrate,
-    TrainingItem,
+    TargetedPDState,
+    TargetedPDTrainingState,
     TrainState,
     make_targeted_train_step,
 )
@@ -51,6 +58,9 @@ from param_decomp.targets.tms import (
     site_specs,
     tms_decomposed_model,
 )
+
+TOTAL_STEPS = 20
+LR = 1e-3
 
 HIDDEN_POINTS = ("linear1.out", "linear2.out")
 """Both decomposed sites' linear outputs — downstream of the masking, so the pass has a
@@ -80,7 +90,7 @@ def _hidden(
 ) -> tuple[HiddenPassConfig, NontargetConfig]:
     hidden = HiddenPassConfig(
         points=HIDDEN_POINTS,
-        **({} if normalization is None else {"normalization": normalization}),
+        normalization=BatchHiddenActsNormalization() if normalization is None else normalization,
         output_coeff=output_coeff,
         impmin_coeff=5e-3,
         # An explicit name: the identity is unique across passes because both this and the
@@ -98,6 +108,17 @@ def _hidden(
     return hidden, nontarget
 
 
+def _ci_fn(*, dual: bool) -> LayerwiseMLPCIFn:
+    cfg = TMSConfig(n_features=5, n_hidden=2)
+    sites = site_specs(cfg, (SiteC("linear1", 8), SiteC("linear2", 6)))
+    return LayerwiseMLPCIFnArch(
+        hidden_dims=(16,),
+        has_position_axis=False,
+        input_names=site_input_tap_keys(tuple(s.name for s in sites)),
+        dual=dual,
+    ).initialize(sites, None, jax.random.PRNGKey(2))
+
+
 def _setup(
     *,
     dual: bool,
@@ -112,28 +133,10 @@ def _setup(
     target = init_tms_target(cfg, jax.random.PRNGKey(0))
     model = PlacedModel(model=tms_decomposed_model(cfg, target, sites), placement=None)
     vu = init_component_stacks(sites, jax.random.PRNGKey(1))
-    ci_fn = build_ci_fn(
-        LayerwiseMLPCIArch(
-            hidden_dims=(16,),
-            has_position_axis=False,
-            input_names=site_input_tap_keys(tuple(s.name for s in sites)),
-            dual=dual,
-        ),
-        sites,
-        jax.random.PRNGKey(2),
-    )
-    opt_vu = optax.adamw(1e-3, weight_decay=0.0)
-    opt_ci = optax.adamw(1e-3, weight_decay=0.0)
-    state = TrainState(
-        decomposition=Decomposition(components=vu, ci_fn=ci_fn),
-        training=TrainingItem(
-            components_opt_state=opt_vu.init(eqx.filter(vu, eqx.is_array)),
-            ci_fn_opt_state=opt_ci.init(eqx.filter(ci_fn, eqx.is_array)),
-            adversaries={},
-            freq_ema=None,
-            step=jnp.zeros((), jnp.int32),
-        ),
-    )
+    ci_fn = _ci_fn(dual=dual)
+    optimizer_config = AdamWOptimizerConfig(lr_schedule=ScheduleConfig.constant(LR))
+    opt_vu = _adamw_optimizer(optimizer_config, TOTAL_STEPS)
+    opt_ci = _adamw_optimizer(optimizer_config, TOTAL_STEPS)
     if dual:
         hidden, nontarget = _hidden(normalization, output_coeff)
     else:
@@ -146,22 +149,45 @@ def _setup(
     loss_metrics = _loss_metrics()
     if nonlinearity_coeff is not None:
         loss_metrics = (*loss_metrics, _nonlinearity_cfg(nonlinearity_coeff))
-    objective = build_targeted_objective(loss_metrics, nontarget, model.site_names, hidden=hidden)
-    step = make_targeted_train_step(
-        model_static=model,
-        substrate=ForwardSubstrate.of(
-            model,
-            remat_recon_forwards=False,
-            remat_ci_fn=False,
-            ci_capture_keys=ci_fn.capture_keys,
-            ci_placement=None,
+    objective = build_targeted_objective(loss_metrics, nontarget, model.model.sites, hidden=hidden)
+    importance = next(
+        term for term in loss_metrics if isinstance(term, ImportanceMinimalityLossConfig)
+    )
+
+    def frequency():
+        return init_frequency_estimator(importance.frequency, sites)
+
+    state = TrainState(
+        decomposition=Decomposition[Array](components=vu, ci_fn=ci_fn),
+        training=TargetedPDTrainingState(
+            objective=objective,
+            target_frequency=frequency(),
+            nontarget_frequency=frequency(),
+            hidden_frequency=frequency() if objective.hidden is not None else None,
+            nontarget_hidden_frequency=(
+                frequency() if objective.nontarget_hidden is not None else None
+            ),
+            ci_scaled_weight_decay=ci_scaled_weight_decay,
+            components_opt_state=opt_vu.init(eqx.filter(vu, eqx.is_array)),
+            ci_fn_opt_state=opt_ci.init(eqx.filter(ci_fn, eqx.is_array)),
+            adversaries={},
+            step=jnp.zeros((), jnp.int32),
         ),
-        objective=objective,
-        ci_scaled_weight_decay=ci_scaled_weight_decay,
-        components_optimizer=opt_vu,
-        ci_fn_optimizer=opt_ci,
-        total_steps=20,
-        sequential_passes=sequential,
+    )
+    step = jax.jit(
+        make_targeted_train_step(
+            model,
+            substrate=ForwardSubstrate.of(
+                model,
+                remat_recon_forwards=False,
+                remat_ci_fn=False,
+                ci_capture_keys=ci_fn.capture_keys,
+            ),
+            components_optimizer=opt_vu,
+            ci_fn_optimizer=opt_ci,
+            total_steps=TOTAL_STEPS,
+            sequential_passes=sequential,
+        )
     )
     return cfg, state, step
 
@@ -185,9 +211,10 @@ def test_sequential_and_fused_passes_give_the_same_step():
 
     Graded by what each quantity can distinguish:
 
-    - every LOSS scalar is compared for EXACT equality. The forward is identical, so anything
-      other than bit-equality here means a pass was dropped, double-counted, or fed the wrong
-      CI head.
+    - every per-pass and per-term LOSS scalar is compared for EXACT equality. The forward is
+      identical, so anything other than bit-equality here means a pass was dropped,
+      double-counted, or fed the wrong CI head. The cross-pass `total` is their sum and gets
+      ~1 fp32 ULP.
     - the resulting DECOMPOSITION is compared tightly. It cannot be exact at bf16 compute:
       the two schedulings accumulate the same mathematical gradient in a different order, and
       bf16 has ~8 mantissa bits. Forcing `precision.COMPUTE_DT` to fp32 makes this comparison
@@ -217,8 +244,16 @@ def test_sequential_and_fused_passes_give_the_same_step():
     ):
         assert expected in shared, sorted(shared)
 
+    # The one cross-pass composite, `total`, gets a ~1-ULP fp32 tolerance: the fused
+    # scheduling's cross-pass fusion clusters may round the sum of the (bit-equal) per-pass
+    # totals one bit differently, as in `test_nontarget_adversary`'s hidden-pass twin. A
+    # dropped or double-counted pass would move `total` by far more than rounding, and every
+    # per-pass and per-term loss stays EXACT.
     losses = sorted(k for k in shared if not k.startswith("grad_norms/"))
     for name in losses:
+        if name == "total":
+            assert np.isclose(fused_metrics[name], seq_metrics[name], rtol=1e-6, atol=0.0), name
+            continue
         assert fused_metrics[name] == seq_metrics[name], (
             f"{name} differs between the fused and sequential pass schedules: "
             f"{fused_metrics[name]} vs {seq_metrics[name]}"
@@ -362,18 +397,11 @@ def test_hidden_pass_and_dual_ci_must_agree():
     """A dual CI fn with no hidden pass would train a head against nothing, and a hidden pass
     with a single-role fn has no head to train. Both are refused, at trace."""
     cfg, state, step = _setup(dual=False, sequential=False)
-    dual_fn = build_ci_fn(
-        LayerwiseMLPCIArch(
-            hidden_dims=(16,),
-            has_position_axis=False,
-            input_names=site_input_tap_keys(("linear1", "linear2")),
-            dual=True,
-        ),
-        site_specs(TMSConfig(n_features=5, n_hidden=2), (SiteC("linear1", 8), SiteC("linear2", 6))),
-        jax.random.PRNGKey(2),
-    )
+    dual_fn = _ci_fn(dual=True)
     mismatched = TrainState(
-        decomposition=Decomposition(components=state.decomposition.components, ci_fn=dual_fn),
+        decomposition=Decomposition[Array](
+            components=state.decomposition.components, ci_fn=dual_fn
+        ),
         training=state.training,
     )
     target_batch, broad = _batches(cfg)
@@ -393,7 +421,13 @@ def test_nontarget_hidden_requires_the_target_hidden_pass():
         ),
     )
     with pytest.raises(AssertionError, match="nontarget.hidden needs pd.hidden"):
-        build_targeted_objective(_loss_metrics(), nontarget, ("linear1", "linear2"))
+        build_targeted_objective(
+            _loss_metrics(),
+            nontarget,
+            site_specs(
+                TMSConfig(n_features=5, n_hidden=2), (SiteC("linear1", 8), SiteC("linear2", 6))
+            ),
+        )
 
 
 def test_the_nonlinearity_prior_is_scored_once_whatever_the_pass_count() -> None:
@@ -437,7 +471,9 @@ def test_a_hidden_pass_cannot_spell_the_nonlinearity_prior() -> None:
         )
 
 
-def _pin_heads(state: TrainState, *, output_ci: float, hidden_ci: float) -> TrainState:
+def _pin_heads(
+    state: TargetedPDState[Array], *, output_ci: float, hidden_ci: float
+) -> TargetedPDState[Array]:
     """Freeze the dual CI landscape so T11's statistic is known exactly: every trunk weight
     and both readout heads' weights zeroed, each head's BIAS pinned to saturation, so every
     component reads CI `output_ci` from the output head and `hidden_ci` from the hidden one
@@ -461,14 +497,14 @@ def _pin_heads(state: TrainState, *, output_ci: float, hidden_ci: float) -> Trai
             ),
         )
     return TrainState(
-        decomposition=Decomposition(components=state.decomposition.components, ci_fn=pinned),
+        decomposition=Decomposition[Array](components=state.decomposition.components, ci_fn=pinned),
         training=state.training,
     )
 
 
 @pytest.mark.parametrize(
     ("role", "expected_decay"),
-    [("all", 0.0), ("hidden", 0.0), ("output", 0.2)],
+    [("all", 0.0), ("hidden", 0.0), ("output", 0.2 * LR)],
 )
 def test_ci_scaled_weight_decay_role_selects_which_head_counts_as_alive(
     role: str, expected_decay: float
@@ -478,11 +514,11 @@ def test_ci_scaled_weight_decay_role_selects_which_head_counts_as_alive(
     The CI fn is pinned so every component is DEAD to the output head and SATURATED on the
     hidden head — a hidden-reconstruction-only component, the shape the default rule
     protects. `all` and `hidden` therefore decay nothing; `output` decays everything at the
-    full `lr·wd` rate, which is the point of the knob: it is how you ask for a decay that
+    full `lr·wd` rate (the applied components learning rate `LR` times the coefficient
+    0.2), which is the point of the knob: it is how you ask for a decay that
     ignores the hidden objective."""
     wd = CIScaledWeightDecay(
-        coeff=0.2,
-        components_lr=ScheduleConfig.constant(1.0),
+        coeff=jnp.asarray(0.2, jnp.float32),
         role=role,  # pyright: ignore[reportArgumentType]
     )
     cfg, state, step = _setup(dual=True, sequential=False, ci_scaled_weight_decay=wd)
@@ -494,9 +530,12 @@ def test_ci_scaled_weight_decay_role_selects_which_head_counts_as_alive(
 
 
 def test_ci_scaled_weight_decay_refuses_a_role_the_run_does_not_carry() -> None:
-    """The selection is resolved against the passes the objective built, at construction:
-    asking a single-head run for the hidden head would otherwise leave an empty reduction
-    (or, worse, a silent full-rate decay of every component)."""
-    wd = CIScaledWeightDecay(coeff=0.2, components_lr=ScheduleConfig.constant(1.0), role="hidden")
+    """The selection is resolved against the passes the objective built, when the step is
+    traced (the decay rides the training state, so the step's first trace is the earliest
+    point that sees both): asking a single-head run for the hidden head would otherwise
+    leave an empty reduction (or, worse, a silent full-rate decay of every component)."""
+    wd = CIScaledWeightDecay(coeff=jnp.asarray(0.2, jnp.float32), role="hidden")
+    cfg, state, step = _setup(dual=False, sequential=False, ci_scaled_weight_decay=wd)
+    target_batch, broad = _batches(cfg)
     with pytest.raises(AssertionError, match="selects no pass"):
-        _setup(dual=False, sequential=False, ci_scaled_weight_decay=wd)
+        step(_model_of(), state, target_batch, broad, jax.random.PRNGKey(5))

@@ -37,11 +37,13 @@ from param_decomp.ci_filter.pool import answer_token_ids, build_pool, load_token
 from param_decomp.ci_filter.ppgd import PPGDStep, init_adversary
 from param_decomp.ci_filter.step import (
     CIConstraints,
+    FilterCIFn,
     Prepared,
     RowArrays,
     batch_gradients,
     ci_masked_micro_call,
     index_batches,
+    lr_schedule,
     make_apply_update,
     make_eval_batch,
     make_micro_grads,
@@ -54,10 +56,8 @@ from param_decomp.ci_filter.step import (
     sample_batch,
     trainable,
 )
-from param_decomp.core.ci_fn import PlacedCIFn
 from param_decomp.core.components import ComponentStacks
 from param_decomp.core.log import logger, setup_console_logger
-from param_decomp.core.run_state import optax_schedule
 from param_decomp.experiments.lm.load_run import restore_jax_run
 from param_decomp.experiments.lm.resolved import TargetConfig
 from param_decomp.experiments.lm.training import enable_persistent_compilation_cache
@@ -183,7 +183,7 @@ def run_ci_filter(config: CIFilterConfig, data_root: Path, filter_id: str) -> Pa
         score_fixed = make_score_fixed_masks(config)
         pgd_eval = make_pgd_eval(config) if config.pgd_eval is not None else None
 
-        def pgd_recon(ci_fn: PlacedCIFn) -> float:
+        def pgd_recon(ci_fn: FilterCIFn) -> float:
             assert pgd_eval is not None
             key = jax.random.PRNGKey(config.seed + 1)
             values = [
@@ -205,7 +205,7 @@ def run_ci_filter(config: CIFilterConfig, data_root: Path, filter_id: str) -> Pa
             return float(np.mean(values))
 
         def evaluate(
-            at_step: int, ci_fn: PlacedCIFn, references: bool, log_wandb: bool = True
+            at_step: int, ci_fn: FilterCIFn, references: bool, log_wandb: bool = True
         ) -> tuple[PoolEval, dict[str, np.ndarray]]:
             t0 = time.time()
             parts: dict[str, list[RowArrays]] = {"ci": [], "rounded": []}
@@ -302,7 +302,7 @@ def run_ci_filter(config: CIFilterConfig, data_root: Path, filter_id: str) -> Pa
             logger.info(f"PGD recon initial ({time.time() - t0:.0f}s): {pgd_initial:.4f}")
 
         optimizer = make_optimizer(config)
-        lr = optax_schedule(config.lr_schedule, config.steps)
+        lr = lr_schedule(config)
         opt_state = optimizer.init(trainable(ci_fn))
         apply_update = make_apply_update(optimizer)
         micro = config.microbatch_size or config.batch_size

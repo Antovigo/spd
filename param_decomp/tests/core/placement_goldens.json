@@ -1,498 +1,3159 @@
 {
- "explicit_fsdp_only|replicate2_fsdp2_tp2|mixed": {
-  "rules": {
-   "activations": {
-    "component": {
-     "label": "activations/component",
-     "rule": {
-      "batch": [
-       "replicate",
-       "fsdp"
-      ]
-     }
-    },
-    "external": {
-     "label": "activations/external",
-     "rule": {
-      "batch": [
-       "replicate",
-       "fsdp"
-      ]
-     }
+ "ci_census|block_selected|zero1-replicated-resident-moe": {
+  "stack_len": 3,
+  "stack_pad": 0
+ },
+ "ci_census|chunkwise|owner-replicated-resident": {
+  "stack_len": 3,
+  "stack_pad": 1
+ },
+ "ci_census|chunkwise|zero1-replicated-resident": {
+  "stack_len": 3,
+  "stack_pad": 0
+ },
+ "ci|block_selected|ddp|data4_tp2": {
+  "refused": "the block-selected transformer CI has no rows for placement preset 'ddp'"
+ },
+ "ci|block_selected|ddp|replicate2_fsdp2_tp2": {
+  "refused": "the block-selected transformer CI has no rows for placement preset 'ddp'"
+ },
+ "ci|block_selected|ddp|replicate4_fsdp8_tp1": {
+  "refused": "the block-selected transformer CI has no rows for placement preset 'ddp'"
+ },
+ "ci|block_selected|owner-replicated-resident-moe|data4_tp2": {
+  "ci_rows": [
+   {
+    "label": "ci_fn/input.optimizer_state",
+    "rule": {
+     "d_model": [
+      "data"
+     ],
+     "input": [
+      "tp"
+     ]
     }
    },
-   "ci_fn": {
-    "activations": {
-     "label": "ci_fn/activations",
-     "rule": {
-      "batch": [
-       "replicate",
-       "fsdp"
-      ]
-     }
-    },
-    "attention": {
-     "compute_weights": {
-      "label": "ci_fn/attention.compute_weights",
-      "rule": {
-       "d_model": "fsdp"
-      }
-     },
-     "ns_compute": {
-      "label": "ci_fn/attention.ns_compute",
-      "rule": {}
-     },
-     "operands": {
-      "label": "ci_fn/attention.operands",
-      "rule": {}
-     },
-     "optimizer_state": {
-      "label": "ci_fn/attention.optimizer_state",
-      "rule": {
-       "d_model": "fsdp"
-      }
-     }
-    },
-    "ffn": {
-     "compute_weights": {
-      "label": "ci_fn/ffn.compute_weights",
-      "rule": {
-       "ffn_hidden": "fsdp"
-      }
-     },
-     "ns_compute": {
-      "label": "ci_fn/ffn.ns_compute",
-      "rule": {}
-     },
-     "operands": {
-      "label": "ci_fn/ffn.operands",
-      "rule": {}
-     },
-     "optimizer_state": {
-      "label": "ci_fn/ffn.optimizer_state",
-      "rule": {
-       "ffn_hidden": "fsdp"
-      }
-     }
-    },
-    "input": {
-     "compute_weights": {
-      "label": "ci_fn/input.compute_weights",
-      "rule": {
-       "d_model": "fsdp"
-      }
-     },
-     "ns_compute": {
-      "label": "ci_fn/input.ns_compute",
-      "rule": {}
-     },
-     "operands": {
-      "label": "ci_fn/input.operands",
-      "rule": {}
-     },
-     "optimizer_state": {
-      "label": "ci_fn/input.optimizer_state",
-      "rule": {
-       "d_model": "fsdp"
-      }
-     }
-    },
-    "output": {
-     "compute_weights": {
-      "label": "ci_fn/output.compute_weights",
-      "rule": {
-       "d_model": "fsdp"
-      }
-     },
-     "ns_compute": {
-      "label": "ci_fn/output.ns_compute",
-      "rule": {}
-     },
-     "operands": {
-      "label": "ci_fn/output.operands",
-      "rule": {}
-     },
-     "optimizer_state": {
-      "label": "ci_fn/output.optimizer_state",
-      "rule": {
-       "d_model": "fsdp"
-      }
-     }
-    },
-    "vectors": {
-     "label": "ci_fn/vectors",
-     "rule": {}
+   {
+    "label": "ci_fn/input.compute_weights",
+    "rule": {
+     "input": [
+      "tp"
+     ]
     }
    },
-   "components": {
-    "compute_weights": {
-     "label": "components/compute_weights",
-     "rule": {
-      "d_in": "fsdp",
-      "d_out": "fsdp"
-     }
-    },
-    "faithfulness_deltas": {
-     "label": "components/faithfulness_deltas",
-     "rule": {
-      "d_out": "fsdp"
-     }
-    },
-    "faithfulness_weights": {
-     "label": "components/faithfulness_weights",
-     "rule": {
-      "d_in": "fsdp",
-      "d_out": "fsdp"
-     }
-    },
-    "group_stack_lens": {
-     "128x64x8": 1,
-     "64x32x8": 4
-    },
-    "ns_compute": {
-     "label": "components/ns_compute",
-     "rule": {}
-    },
-    "operands": {
-     "label": "components/operands",
-     "rule": {}
-    },
-    "optimizer_state": {
-     "label": "components/optimizer_state",
-     "rule": {
-      "d_in": "fsdp",
-      "d_out": "fsdp"
-     }
+   {
+    "label": "ci_fn/input.operands",
+    "rule": {
+     "input": [
+      "tp"
+     ]
     }
    },
-   "mesh": {
-    "fsdp": 2,
-    "replicate": 2,
-    "tp": 2
+   {
+    "label": "ci_fn/input.ns_compute",
+    "rule": {
+     "stack": [
+      "data"
+     ]
+    }
    },
-   "target": {
-    "column": {
-     "input": "activations/external",
-     "operand": {
-      "label": "target/column.operand",
-      "rule": {}
-     },
-     "output": "target/intermediate",
-     "persist": {
-      "label": "target/column.persist",
-      "rule": {
-       "d_in": "fsdp"
-      }
-     }
-    },
-    "component": {
-     "input": "activations/external",
-     "output": "activations/external"
-    },
-    "embedding": {
-     "operand": {
-      "label": "target/embedding.operand",
-      "rule": {}
-     },
-     "persist": {
-      "label": "target/embedding.persist",
-      "rule": {
-       "d_model": "fsdp"
-      }
-     }
-    },
-    "intermediate": {
-     "label": "target/intermediate",
-     "rule": {
-      "batch": [
-       "replicate",
-       "fsdp"
-      ]
-     }
-    },
-    "normalization": {
-     "label": "target/normalization",
-     "rule": {}
-    },
-    "output": {
-     "operand": {
-      "label": "target/output.operand",
-      "rule": {}
-     },
-     "persist": {
-      "label": "target/output.persist",
-      "rule": {
-       "d_model": "fsdp"
-      }
-     }
-    },
-    "position_encoding": {
-     "label": "target/position_encoding",
-     "rule": {}
-    },
-    "row": {
-     "input": "target/intermediate",
-     "operand": {
-      "label": "target/row.operand",
-      "rule": {}
-     },
-     "output": "activations/external",
-     "persist": {
-      "label": "target/row.persist",
-      "rule": {
-       "d_out": "fsdp"
-      }
-     }
+   {
+    "label": "ci_fn/attention.optimizer_state",
+    "rule": {
+     "d_model": [
+      "data"
+     ],
+     "kv_head": [
+      "tp"
+     ],
+     "q_head": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/attention.compute_weights",
+    "rule": {
+     "kv_head": [
+      "tp"
+     ],
+     "q_head": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/attention.operands",
+    "rule": {
+     "kv_head": [
+      "tp"
+     ],
+     "q_head": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/attention.ns_compute",
+    "rule": {
+     "stack": [
+      "data"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/ffn.optimizer_state",
+    "rule": {
+     "ffn_hidden": [
+      "tp",
+      "data"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/ffn.compute_weights",
+    "rule": {
+     "ffn_hidden": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/ffn.operands",
+    "rule": {
+     "ffn_hidden": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/ffn.ns_compute",
+    "rule": {
+     "stack": [
+      "data"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/output.optimizer_state",
+    "rule": {
+     "C": [
+      "tp"
+     ],
+     "d_model": [
+      "data"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/output.compute_weights",
+    "rule": {
+     "C": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/output.operands",
+    "rule": {
+     "C": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/output.ns_compute",
+    "rule": {
+     "stack": [
+      "data"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/vectors",
+    "rule": {
+     "C": [
+      "tp"
+     ],
+     "ffn_hidden": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/activations",
+    "rule": {
+     "C": [
+      "tp"
+     ],
+     "batch": [
+      "data"
+     ],
+     "ffn_hidden": [
+      "tp"
+     ],
+     "input": [
+      "tp"
+     ],
+     "kv_head": [
+      "tp"
+     ],
+     "q_head": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/expert_ffn.optimizer_state",
+    "rule": {
+     "expert": [
+      "tp"
+     ],
+     "ffn_hidden": [
+      "data"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/expert_ffn.compute_weights",
+    "rule": {
+     "expert": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/expert_ffn.operands",
+    "rule": {
+     "expert": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/expert_ffn.ns_compute",
+    "rule": {
+     "stack": [
+      "data"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/expert_head.optimizer_state",
+    "rule": {
+     "C_block": [
+      "data"
+     ],
+     "expert": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/expert_head.compute_weights",
+    "rule": {
+     "expert": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/expert_head.operands",
+    "rule": {
+     "expert": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/expert_head.ns_compute",
+    "rule": {
+     "stack": [
+      "data"
+     ]
     }
    }
-  }
+  ]
+ },
+ "ci|block_selected|owner-replicated-resident-moe|replicate2_fsdp2_tp2": {
+  "refused": "placement rule 'ci_fn/input.optimizer_state': axis 'd_model' maps to unknown mesh axes ['data'] (mesh has ['fsdp', 'replicate', 'tp'])"
+ },
+ "ci|block_selected|owner-replicated-resident-moe|replicate4_fsdp8_tp1": {
+  "refused": "placement rule 'ci_fn/input.optimizer_state': axis 'd_model' maps to unknown mesh axes ['data'] (mesh has ['fsdp', 'replicate', 'tp'])"
+ },
+ "ci|block_selected|owner-replicated-resident|data4_tp2": {
+  "refused": "the block-selected transformer CI has no rows for placement preset 'owner-replicated-resident'"
+ },
+ "ci|block_selected|owner-replicated-resident|replicate2_fsdp2_tp2": {
+  "refused": "the block-selected transformer CI has no rows for placement preset 'owner-replicated-resident'"
+ },
+ "ci|block_selected|owner-replicated-resident|replicate4_fsdp8_tp1": {
+  "refused": "the block-selected transformer CI has no rows for placement preset 'owner-replicated-resident'"
+ },
+ "ci|block_selected|owner|data4_tp2": {
+  "refused": "the block-selected transformer CI has no rows for placement preset 'owner'"
+ },
+ "ci|block_selected|owner|replicate2_fsdp2_tp2": {
+  "refused": "the block-selected transformer CI has no rows for placement preset 'owner'"
+ },
+ "ci|block_selected|owner|replicate4_fsdp8_tp1": {
+  "refused": "the block-selected transformer CI has no rows for placement preset 'owner'"
+ },
+ "ci|block_selected|zero1-replicated-resident-moe-replicated-ns|data4_tp2": {
+  "ci_rows": [
+   {
+    "label": "ci_fn/input.optimizer_state",
+    "rule": {
+     "d_model": [
+      "data"
+     ],
+     "input": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/input.compute_weights",
+    "rule": {
+     "input": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/input.operands",
+    "rule": {
+     "input": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/input.ns_compute",
+    "rule": {}
+   },
+   {
+    "label": "ci_fn/attention.optimizer_state",
+    "rule": {
+     "d_model": [
+      "data"
+     ],
+     "kv_head": [
+      "tp"
+     ],
+     "q_head": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/attention.compute_weights",
+    "rule": {
+     "kv_head": [
+      "tp"
+     ],
+     "q_head": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/attention.operands",
+    "rule": {
+     "kv_head": [
+      "tp"
+     ],
+     "q_head": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/attention.ns_compute",
+    "rule": {}
+   },
+   {
+    "label": "ci_fn/ffn.optimizer_state",
+    "rule": {
+     "ffn_hidden": [
+      "tp",
+      "data"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/ffn.compute_weights",
+    "rule": {
+     "ffn_hidden": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/ffn.operands",
+    "rule": {
+     "ffn_hidden": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/ffn.ns_compute",
+    "rule": {}
+   },
+   {
+    "label": "ci_fn/output.optimizer_state",
+    "rule": {
+     "C": [
+      "tp"
+     ],
+     "d_model": [
+      "data"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/output.compute_weights",
+    "rule": {
+     "C": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/output.operands",
+    "rule": {
+     "C": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/output.ns_compute",
+    "rule": {}
+   },
+   {
+    "label": "ci_fn/vectors",
+    "rule": {
+     "C": [
+      "tp"
+     ],
+     "ffn_hidden": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/activations",
+    "rule": {
+     "C": [
+      "tp"
+     ],
+     "batch": [
+      "data"
+     ],
+     "ffn_hidden": [
+      "tp"
+     ],
+     "input": [
+      "tp"
+     ],
+     "kv_head": [
+      "tp"
+     ],
+     "q_head": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/expert_ffn.optimizer_state",
+    "rule": {
+     "expert": [
+      "tp"
+     ],
+     "ffn_hidden": [
+      "data"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/expert_ffn.compute_weights",
+    "rule": {
+     "expert": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/expert_ffn.operands",
+    "rule": {
+     "expert": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/expert_ffn.ns_compute",
+    "rule": {}
+   },
+   {
+    "label": "ci_fn/expert_head.optimizer_state",
+    "rule": {
+     "C_block": [
+      "data"
+     ],
+     "expert": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/expert_head.compute_weights",
+    "rule": {
+     "expert": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/expert_head.operands",
+    "rule": {
+     "expert": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/expert_head.ns_compute",
+    "rule": {}
+   }
+  ]
+ },
+ "ci|block_selected|zero1-replicated-resident-moe-replicated-ns|replicate2_fsdp2_tp2": {
+  "refused": "placement rule 'ci_fn/input.optimizer_state': axis 'd_model' maps to unknown mesh axes ['data'] (mesh has ['fsdp', 'replicate', 'tp'])"
+ },
+ "ci|block_selected|zero1-replicated-resident-moe-replicated-ns|replicate4_fsdp8_tp1": {
+  "refused": "placement rule 'ci_fn/input.optimizer_state': axis 'd_model' maps to unknown mesh axes ['data'] (mesh has ['fsdp', 'replicate', 'tp'])"
+ },
+ "ci|block_selected|zero1-replicated-resident-moe|data4_tp2": {
+  "ci_rows": [
+   {
+    "label": "ci_fn/input.optimizer_state",
+    "rule": {
+     "d_model": [
+      "data"
+     ],
+     "input": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/input.compute_weights",
+    "rule": {
+     "input": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/input.operands",
+    "rule": {
+     "input": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/input.ns_compute",
+    "rule": {
+     "stack": [
+      "data"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/attention.optimizer_state",
+    "rule": {
+     "d_model": [
+      "data"
+     ],
+     "kv_head": [
+      "tp"
+     ],
+     "q_head": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/attention.compute_weights",
+    "rule": {
+     "kv_head": [
+      "tp"
+     ],
+     "q_head": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/attention.operands",
+    "rule": {
+     "kv_head": [
+      "tp"
+     ],
+     "q_head": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/attention.ns_compute",
+    "rule": {
+     "stack": [
+      "data"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/ffn.optimizer_state",
+    "rule": {
+     "ffn_hidden": [
+      "tp",
+      "data"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/ffn.compute_weights",
+    "rule": {
+     "ffn_hidden": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/ffn.operands",
+    "rule": {
+     "ffn_hidden": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/ffn.ns_compute",
+    "rule": {
+     "stack": [
+      "data"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/output.optimizer_state",
+    "rule": {
+     "C": [
+      "tp"
+     ],
+     "d_model": [
+      "data"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/output.compute_weights",
+    "rule": {
+     "C": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/output.operands",
+    "rule": {
+     "C": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/output.ns_compute",
+    "rule": {
+     "stack": [
+      "data"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/vectors",
+    "rule": {
+     "C": [
+      "tp"
+     ],
+     "ffn_hidden": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/activations",
+    "rule": {
+     "C": [
+      "tp"
+     ],
+     "batch": [
+      "data"
+     ],
+     "ffn_hidden": [
+      "tp"
+     ],
+     "input": [
+      "tp"
+     ],
+     "kv_head": [
+      "tp"
+     ],
+     "q_head": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/expert_ffn.optimizer_state",
+    "rule": {
+     "expert": [
+      "tp"
+     ],
+     "ffn_hidden": [
+      "data"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/expert_ffn.compute_weights",
+    "rule": {
+     "expert": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/expert_ffn.operands",
+    "rule": {
+     "expert": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/expert_ffn.ns_compute",
+    "rule": {
+     "stack": [
+      "data"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/expert_head.optimizer_state",
+    "rule": {
+     "C_block": [
+      "data"
+     ],
+     "expert": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/expert_head.compute_weights",
+    "rule": {
+     "expert": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/expert_head.operands",
+    "rule": {
+     "expert": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/expert_head.ns_compute",
+    "rule": {
+     "stack": [
+      "data"
+     ]
+    }
+   }
+  ]
+ },
+ "ci|block_selected|zero1-replicated-resident-moe|replicate2_fsdp2_tp2": {
+  "refused": "placement rule 'ci_fn/input.optimizer_state': axis 'd_model' maps to unknown mesh axes ['data'] (mesh has ['fsdp', 'replicate', 'tp'])"
+ },
+ "ci|block_selected|zero1-replicated-resident-moe|replicate4_fsdp8_tp1": {
+  "refused": "placement rule 'ci_fn/input.optimizer_state': axis 'd_model' maps to unknown mesh axes ['data'] (mesh has ['fsdp', 'replicate', 'tp'])"
+ },
+ "ci|block_selected|zero1-replicated-resident|data4_tp2": {
+  "refused": "the block-selected transformer CI has no rows for placement preset 'zero1-replicated-resident'"
+ },
+ "ci|block_selected|zero1-replicated-resident|replicate2_fsdp2_tp2": {
+  "refused": "the block-selected transformer CI has no rows for placement preset 'zero1-replicated-resident'"
+ },
+ "ci|block_selected|zero1-replicated-resident|replicate4_fsdp8_tp1": {
+  "refused": "the block-selected transformer CI has no rows for placement preset 'zero1-replicated-resident'"
+ },
+ "ci|block_selected|zero1|data4_tp2": {
+  "refused": "the block-selected transformer CI has no rows for placement preset 'zero1'"
+ },
+ "ci|block_selected|zero1|replicate2_fsdp2_tp2": {
+  "refused": "the block-selected transformer CI has no rows for placement preset 'zero1'"
+ },
+ "ci|block_selected|zero1|replicate4_fsdp8_tp1": {
+  "refused": "the block-selected transformer CI has no rows for placement preset 'zero1'"
+ },
+ "ci|chunkwise|ddp|data4_tp2": {
+  "refused": "placement rule 'ci_fn/input.ns_compute': axis 'stack' maps to unknown mesh axes ['replicate'] (mesh has ['data', 'tp'])"
+ },
+ "ci|chunkwise|ddp|replicate2_fsdp2_tp2": {
+  "ci_rows": [
+   {
+    "label": "ci_fn/input.optimizer_state",
+    "rule": {}
+   },
+   {
+    "label": "ci_fn/input.compute_weights",
+    "rule": {}
+   },
+   {
+    "label": "ci_fn/input.operands",
+    "rule": {}
+   },
+   {
+    "label": "ci_fn/input.ns_compute",
+    "rule": {
+     "stack": [
+      "replicate"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/attention.optimizer_state",
+    "rule": {}
+   },
+   {
+    "label": "ci_fn/attention.compute_weights",
+    "rule": {}
+   },
+   {
+    "label": "ci_fn/attention.operands",
+    "rule": {}
+   },
+   {
+    "label": "ci_fn/attention.ns_compute",
+    "rule": {
+     "stack": [
+      "replicate"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/ffn.optimizer_state",
+    "rule": {}
+   },
+   {
+    "label": "ci_fn/ffn.compute_weights",
+    "rule": {}
+   },
+   {
+    "label": "ci_fn/ffn.operands",
+    "rule": {}
+   },
+   {
+    "label": "ci_fn/ffn.ns_compute",
+    "rule": {
+     "stack": [
+      "replicate"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/output.optimizer_state",
+    "rule": {}
+   },
+   {
+    "label": "ci_fn/output.compute_weights",
+    "rule": {}
+   },
+   {
+    "label": "ci_fn/output.operands",
+    "rule": {}
+   },
+   {
+    "label": "ci_fn/output.ns_compute",
+    "rule": {
+     "stack": [
+      "replicate"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/vectors",
+    "rule": {}
+   },
+   {
+    "label": "ci_fn/activations",
+    "rule": {
+     "batch": [
+      "replicate",
+      "fsdp"
+     ]
+    }
+   }
+  ]
+ },
+ "ci|chunkwise|ddp|replicate4_fsdp8_tp1": {
+  "ci_rows": [
+   {
+    "label": "ci_fn/input.optimizer_state",
+    "rule": {}
+   },
+   {
+    "label": "ci_fn/input.compute_weights",
+    "rule": {}
+   },
+   {
+    "label": "ci_fn/input.operands",
+    "rule": {}
+   },
+   {
+    "label": "ci_fn/input.ns_compute",
+    "rule": {
+     "stack": [
+      "replicate"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/attention.optimizer_state",
+    "rule": {}
+   },
+   {
+    "label": "ci_fn/attention.compute_weights",
+    "rule": {}
+   },
+   {
+    "label": "ci_fn/attention.operands",
+    "rule": {}
+   },
+   {
+    "label": "ci_fn/attention.ns_compute",
+    "rule": {
+     "stack": [
+      "replicate"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/ffn.optimizer_state",
+    "rule": {}
+   },
+   {
+    "label": "ci_fn/ffn.compute_weights",
+    "rule": {}
+   },
+   {
+    "label": "ci_fn/ffn.operands",
+    "rule": {}
+   },
+   {
+    "label": "ci_fn/ffn.ns_compute",
+    "rule": {
+     "stack": [
+      "replicate"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/output.optimizer_state",
+    "rule": {}
+   },
+   {
+    "label": "ci_fn/output.compute_weights",
+    "rule": {}
+   },
+   {
+    "label": "ci_fn/output.operands",
+    "rule": {}
+   },
+   {
+    "label": "ci_fn/output.ns_compute",
+    "rule": {
+     "stack": [
+      "replicate"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/vectors",
+    "rule": {}
+   },
+   {
+    "label": "ci_fn/activations",
+    "rule": {
+     "batch": [
+      "replicate",
+      "fsdp"
+     ]
+    }
+   }
+  ]
+ },
+ "ci|chunkwise|owner-replicated-resident-moe|data4_tp2": {
+  "refused": "the chunkwise transformer CI has no rows for placement preset 'owner-replicated-resident-moe'"
+ },
+ "ci|chunkwise|owner-replicated-resident-moe|replicate2_fsdp2_tp2": {
+  "refused": "the chunkwise transformer CI has no rows for placement preset 'owner-replicated-resident-moe'"
+ },
+ "ci|chunkwise|owner-replicated-resident-moe|replicate4_fsdp8_tp1": {
+  "refused": "the chunkwise transformer CI has no rows for placement preset 'owner-replicated-resident-moe'"
+ },
+ "ci|chunkwise|owner-replicated-resident|data4_tp2": {
+  "ci_rows": [
+   {
+    "label": "ci_fn/input.optimizer_state",
+    "rule": {
+     "input": [
+      "tp"
+     ],
+     "stack": [
+      "data"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/input.compute_weights",
+    "rule": {
+     "input": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/input.operands",
+    "rule": {
+     "input": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/input.ns_compute",
+    "rule": {
+     "stack": [
+      "data"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/attention.optimizer_state",
+    "rule": {
+     "kv_head": [
+      "tp"
+     ],
+     "q_head": [
+      "tp"
+     ],
+     "stack": [
+      "data"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/attention.compute_weights",
+    "rule": {
+     "kv_head": [
+      "tp"
+     ],
+     "q_head": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/attention.operands",
+    "rule": {
+     "kv_head": [
+      "tp"
+     ],
+     "q_head": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/attention.ns_compute",
+    "rule": {
+     "stack": [
+      "data"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/ffn.optimizer_state",
+    "rule": {
+     "ffn_hidden": [
+      "tp"
+     ],
+     "stack": [
+      "data"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/ffn.compute_weights",
+    "rule": {
+     "ffn_hidden": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/ffn.operands",
+    "rule": {
+     "ffn_hidden": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/ffn.ns_compute",
+    "rule": {
+     "stack": [
+      "data"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/output.optimizer_state",
+    "rule": {
+     "C": [
+      "tp"
+     ],
+     "stack": [
+      "data"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/output.compute_weights",
+    "rule": {
+     "C": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/output.operands",
+    "rule": {
+     "C": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/output.ns_compute",
+    "rule": {
+     "stack": [
+      "data"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/vectors",
+    "rule": {
+     "C": [
+      "tp"
+     ],
+     "ffn_hidden": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/activations",
+    "rule": {
+     "C": [
+      "tp"
+     ],
+     "batch": [
+      "data"
+     ],
+     "ffn_hidden": [
+      "tp"
+     ],
+     "input": [
+      "tp"
+     ],
+     "kv_head": [
+      "tp"
+     ],
+     "q_head": [
+      "tp"
+     ]
+    }
+   }
+  ]
+ },
+ "ci|chunkwise|owner-replicated-resident|replicate2_fsdp2_tp2": {
+  "refused": "placement rule 'ci_fn/input.optimizer_state': axis 'stack' maps to unknown mesh axes ['data'] (mesh has ['fsdp', 'replicate', 'tp'])"
+ },
+ "ci|chunkwise|owner-replicated-resident|replicate4_fsdp8_tp1": {
+  "refused": "placement rule 'ci_fn/input.optimizer_state': axis 'stack' maps to unknown mesh axes ['data'] (mesh has ['fsdp', 'replicate', 'tp'])"
+ },
+ "ci|chunkwise|owner|data4_tp2": {
+  "refused": "placement rule 'ci_fn/input.optimizer_state': axis 'stack' maps to unknown mesh axes ['replicate'] (mesh has ['data', 'tp'])"
+ },
+ "ci|chunkwise|owner|replicate2_fsdp2_tp2": {
+  "ci_rows": [
+   {
+    "label": "ci_fn/input.optimizer_state",
+    "rule": {
+     "d_model": [
+      "fsdp"
+     ],
+     "input": [
+      "tp"
+     ],
+     "stack": [
+      "replicate"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/input.compute_weights",
+    "rule": {
+     "d_model": [
+      "fsdp"
+     ],
+     "input": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/input.operands",
+    "rule": {
+     "input": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/input.ns_compute",
+    "rule": {
+     "stack": [
+      "replicate"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/attention.optimizer_state",
+    "rule": {
+     "d_model": [
+      "fsdp"
+     ],
+     "kv_head": [
+      "tp"
+     ],
+     "q_head": [
+      "tp"
+     ],
+     "stack": [
+      "replicate"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/attention.compute_weights",
+    "rule": {
+     "d_model": [
+      "fsdp"
+     ],
+     "kv_head": [
+      "tp"
+     ],
+     "q_head": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/attention.operands",
+    "rule": {
+     "kv_head": [
+      "tp"
+     ],
+     "q_head": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/attention.ns_compute",
+    "rule": {
+     "stack": [
+      "replicate"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/ffn.optimizer_state",
+    "rule": {
+     "ffn_hidden": [
+      "tp",
+      "fsdp"
+     ],
+     "stack": [
+      "replicate"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/ffn.compute_weights",
+    "rule": {
+     "ffn_hidden": [
+      "tp",
+      "fsdp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/ffn.operands",
+    "rule": {
+     "ffn_hidden": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/ffn.ns_compute",
+    "rule": {
+     "stack": [
+      "replicate"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/output.optimizer_state",
+    "rule": {
+     "C": [
+      "tp"
+     ],
+     "d_model": [
+      "fsdp"
+     ],
+     "stack": [
+      "replicate"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/output.compute_weights",
+    "rule": {
+     "C": [
+      "tp"
+     ],
+     "d_model": [
+      "fsdp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/output.operands",
+    "rule": {
+     "C": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/output.ns_compute",
+    "rule": {
+     "stack": [
+      "replicate"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/vectors",
+    "rule": {
+     "C": [
+      "tp"
+     ],
+     "ffn_hidden": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/activations",
+    "rule": {
+     "C": [
+      "tp"
+     ],
+     "batch": [
+      "replicate",
+      "fsdp"
+     ],
+     "ffn_hidden": [
+      "tp"
+     ],
+     "input": [
+      "tp"
+     ],
+     "kv_head": [
+      "tp"
+     ],
+     "q_head": [
+      "tp"
+     ]
+    }
+   }
+  ]
+ },
+ "ci|chunkwise|owner|replicate4_fsdp8_tp1": {
+  "ci_rows": [
+   {
+    "label": "ci_fn/input.optimizer_state",
+    "rule": {
+     "d_model": [
+      "fsdp"
+     ],
+     "input": [
+      "tp"
+     ],
+     "stack": [
+      "replicate"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/input.compute_weights",
+    "rule": {
+     "d_model": [
+      "fsdp"
+     ],
+     "input": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/input.operands",
+    "rule": {
+     "input": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/input.ns_compute",
+    "rule": {
+     "stack": [
+      "replicate"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/attention.optimizer_state",
+    "rule": {
+     "d_model": [
+      "fsdp"
+     ],
+     "kv_head": [
+      "tp"
+     ],
+     "q_head": [
+      "tp"
+     ],
+     "stack": [
+      "replicate"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/attention.compute_weights",
+    "rule": {
+     "d_model": [
+      "fsdp"
+     ],
+     "kv_head": [
+      "tp"
+     ],
+     "q_head": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/attention.operands",
+    "rule": {
+     "kv_head": [
+      "tp"
+     ],
+     "q_head": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/attention.ns_compute",
+    "rule": {
+     "stack": [
+      "replicate"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/ffn.optimizer_state",
+    "rule": {
+     "ffn_hidden": [
+      "tp",
+      "fsdp"
+     ],
+     "stack": [
+      "replicate"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/ffn.compute_weights",
+    "rule": {
+     "ffn_hidden": [
+      "tp",
+      "fsdp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/ffn.operands",
+    "rule": {
+     "ffn_hidden": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/ffn.ns_compute",
+    "rule": {
+     "stack": [
+      "replicate"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/output.optimizer_state",
+    "rule": {
+     "C": [
+      "tp"
+     ],
+     "d_model": [
+      "fsdp"
+     ],
+     "stack": [
+      "replicate"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/output.compute_weights",
+    "rule": {
+     "C": [
+      "tp"
+     ],
+     "d_model": [
+      "fsdp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/output.operands",
+    "rule": {
+     "C": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/output.ns_compute",
+    "rule": {
+     "stack": [
+      "replicate"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/vectors",
+    "rule": {
+     "C": [
+      "tp"
+     ],
+     "ffn_hidden": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/activations",
+    "rule": {
+     "C": [
+      "tp"
+     ],
+     "batch": [
+      "replicate",
+      "fsdp"
+     ],
+     "ffn_hidden": [
+      "tp"
+     ],
+     "input": [
+      "tp"
+     ],
+     "kv_head": [
+      "tp"
+     ],
+     "q_head": [
+      "tp"
+     ]
+    }
+   }
+  ]
+ },
+ "ci|chunkwise|zero1-replicated-resident-moe-replicated-ns|data4_tp2": {
+  "refused": "the chunkwise transformer CI has no rows for placement preset 'zero1-replicated-resident-moe-replicated-ns'"
+ },
+ "ci|chunkwise|zero1-replicated-resident-moe-replicated-ns|replicate2_fsdp2_tp2": {
+  "refused": "the chunkwise transformer CI has no rows for placement preset 'zero1-replicated-resident-moe-replicated-ns'"
+ },
+ "ci|chunkwise|zero1-replicated-resident-moe-replicated-ns|replicate4_fsdp8_tp1": {
+  "refused": "the chunkwise transformer CI has no rows for placement preset 'zero1-replicated-resident-moe-replicated-ns'"
+ },
+ "ci|chunkwise|zero1-replicated-resident-moe|data4_tp2": {
+  "ci_rows": [
+   {
+    "label": "ci_fn/input.optimizer_state",
+    "rule": {
+     "d_model": [
+      "data"
+     ],
+     "input": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/input.compute_weights",
+    "rule": {
+     "input": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/input.operands",
+    "rule": {
+     "input": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/input.ns_compute",
+    "rule": {
+     "stack": [
+      "data"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/attention.optimizer_state",
+    "rule": {
+     "d_model": [
+      "data"
+     ],
+     "kv_head": [
+      "tp"
+     ],
+     "q_head": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/attention.compute_weights",
+    "rule": {
+     "kv_head": [
+      "tp"
+     ],
+     "q_head": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/attention.operands",
+    "rule": {
+     "kv_head": [
+      "tp"
+     ],
+     "q_head": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/attention.ns_compute",
+    "rule": {
+     "stack": [
+      "data"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/ffn.optimizer_state",
+    "rule": {
+     "ffn_hidden": [
+      "tp",
+      "data"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/ffn.compute_weights",
+    "rule": {
+     "ffn_hidden": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/ffn.operands",
+    "rule": {
+     "ffn_hidden": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/ffn.ns_compute",
+    "rule": {
+     "stack": [
+      "data"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/output.optimizer_state",
+    "rule": {
+     "C": [
+      "tp"
+     ],
+     "d_model": [
+      "data"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/output.compute_weights",
+    "rule": {
+     "C": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/output.operands",
+    "rule": {
+     "C": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/output.ns_compute",
+    "rule": {
+     "stack": [
+      "data"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/vectors",
+    "rule": {
+     "C": [
+      "tp"
+     ],
+     "ffn_hidden": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/activations",
+    "rule": {
+     "C": [
+      "tp"
+     ],
+     "batch": [
+      "data"
+     ],
+     "ffn_hidden": [
+      "tp"
+     ],
+     "input": [
+      "tp"
+     ],
+     "kv_head": [
+      "tp"
+     ],
+     "q_head": [
+      "tp"
+     ]
+    }
+   }
+  ]
+ },
+ "ci|chunkwise|zero1-replicated-resident-moe|replicate2_fsdp2_tp2": {
+  "refused": "placement rule 'ci_fn/input.optimizer_state': axis 'd_model' maps to unknown mesh axes ['data'] (mesh has ['fsdp', 'replicate', 'tp'])"
+ },
+ "ci|chunkwise|zero1-replicated-resident-moe|replicate4_fsdp8_tp1": {
+  "refused": "placement rule 'ci_fn/input.optimizer_state': axis 'd_model' maps to unknown mesh axes ['data'] (mesh has ['fsdp', 'replicate', 'tp'])"
+ },
+ "ci|chunkwise|zero1-replicated-resident|data4_tp2": {
+  "ci_rows": [
+   {
+    "label": "ci_fn/input.optimizer_state",
+    "rule": {
+     "d_model": [
+      "data"
+     ],
+     "input": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/input.compute_weights",
+    "rule": {
+     "input": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/input.operands",
+    "rule": {
+     "input": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/input.ns_compute",
+    "rule": {
+     "stack": [
+      "data"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/attention.optimizer_state",
+    "rule": {
+     "d_model": [
+      "data"
+     ],
+     "kv_head": [
+      "tp"
+     ],
+     "q_head": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/attention.compute_weights",
+    "rule": {
+     "kv_head": [
+      "tp"
+     ],
+     "q_head": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/attention.operands",
+    "rule": {
+     "kv_head": [
+      "tp"
+     ],
+     "q_head": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/attention.ns_compute",
+    "rule": {
+     "stack": [
+      "data"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/ffn.optimizer_state",
+    "rule": {
+     "ffn_hidden": [
+      "tp",
+      "data"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/ffn.compute_weights",
+    "rule": {
+     "ffn_hidden": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/ffn.operands",
+    "rule": {
+     "ffn_hidden": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/ffn.ns_compute",
+    "rule": {
+     "stack": [
+      "data"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/output.optimizer_state",
+    "rule": {
+     "C": [
+      "tp"
+     ],
+     "d_model": [
+      "data"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/output.compute_weights",
+    "rule": {
+     "C": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/output.operands",
+    "rule": {
+     "C": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/output.ns_compute",
+    "rule": {
+     "stack": [
+      "data"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/vectors",
+    "rule": {
+     "C": [
+      "tp"
+     ],
+     "ffn_hidden": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/activations",
+    "rule": {
+     "C": [
+      "tp"
+     ],
+     "batch": [
+      "data"
+     ],
+     "ffn_hidden": [
+      "tp"
+     ],
+     "input": [
+      "tp"
+     ],
+     "kv_head": [
+      "tp"
+     ],
+     "q_head": [
+      "tp"
+     ]
+    }
+   }
+  ]
+ },
+ "ci|chunkwise|zero1-replicated-resident|replicate2_fsdp2_tp2": {
+  "refused": "placement rule 'ci_fn/input.optimizer_state': axis 'd_model' maps to unknown mesh axes ['data'] (mesh has ['fsdp', 'replicate', 'tp'])"
+ },
+ "ci|chunkwise|zero1-replicated-resident|replicate4_fsdp8_tp1": {
+  "refused": "placement rule 'ci_fn/input.optimizer_state': axis 'd_model' maps to unknown mesh axes ['data'] (mesh has ['fsdp', 'replicate', 'tp'])"
+ },
+ "ci|chunkwise|zero1|data4_tp2": {
+  "refused": "placement rule 'ci_fn/input.optimizer_state': axis 'd_model' maps to unknown mesh axes ['fsdp', 'replicate'] (mesh has ['data', 'tp'])"
+ },
+ "ci|chunkwise|zero1|replicate2_fsdp2_tp2": {
+  "ci_rows": [
+   {
+    "label": "ci_fn/input.optimizer_state",
+    "rule": {
+     "d_model": [
+      "fsdp",
+      "replicate"
+     ],
+     "input": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/input.compute_weights",
+    "rule": {
+     "d_model": [
+      "fsdp"
+     ],
+     "input": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/input.operands",
+    "rule": {
+     "input": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/input.ns_compute",
+    "rule": {
+     "stack": [
+      "replicate"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/attention.optimizer_state",
+    "rule": {
+     "d_model": [
+      "fsdp",
+      "replicate"
+     ],
+     "kv_head": [
+      "tp"
+     ],
+     "q_head": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/attention.compute_weights",
+    "rule": {
+     "d_model": [
+      "fsdp"
+     ],
+     "kv_head": [
+      "tp"
+     ],
+     "q_head": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/attention.operands",
+    "rule": {
+     "kv_head": [
+      "tp"
+     ],
+     "q_head": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/attention.ns_compute",
+    "rule": {
+     "stack": [
+      "replicate"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/ffn.optimizer_state",
+    "rule": {
+     "ffn_hidden": [
+      "tp",
+      "fsdp",
+      "replicate"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/ffn.compute_weights",
+    "rule": {
+     "ffn_hidden": [
+      "tp",
+      "fsdp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/ffn.operands",
+    "rule": {
+     "ffn_hidden": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/ffn.ns_compute",
+    "rule": {
+     "stack": [
+      "replicate"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/output.optimizer_state",
+    "rule": {
+     "C": [
+      "tp"
+     ],
+     "d_model": [
+      "fsdp",
+      "replicate"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/output.compute_weights",
+    "rule": {
+     "C": [
+      "tp"
+     ],
+     "d_model": [
+      "fsdp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/output.operands",
+    "rule": {
+     "C": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/output.ns_compute",
+    "rule": {
+     "stack": [
+      "replicate"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/vectors",
+    "rule": {
+     "C": [
+      "tp"
+     ],
+     "ffn_hidden": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/activations",
+    "rule": {
+     "C": [
+      "tp"
+     ],
+     "batch": [
+      "replicate",
+      "fsdp"
+     ],
+     "ffn_hidden": [
+      "tp"
+     ],
+     "input": [
+      "tp"
+     ],
+     "kv_head": [
+      "tp"
+     ],
+     "q_head": [
+      "tp"
+     ]
+    }
+   }
+  ]
+ },
+ "ci|chunkwise|zero1|replicate4_fsdp8_tp1": {
+  "ci_rows": [
+   {
+    "label": "ci_fn/input.optimizer_state",
+    "rule": {
+     "d_model": [
+      "fsdp",
+      "replicate"
+     ],
+     "input": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/input.compute_weights",
+    "rule": {
+     "d_model": [
+      "fsdp"
+     ],
+     "input": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/input.operands",
+    "rule": {
+     "input": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/input.ns_compute",
+    "rule": {
+     "stack": [
+      "replicate"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/attention.optimizer_state",
+    "rule": {
+     "d_model": [
+      "fsdp",
+      "replicate"
+     ],
+     "kv_head": [
+      "tp"
+     ],
+     "q_head": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/attention.compute_weights",
+    "rule": {
+     "d_model": [
+      "fsdp"
+     ],
+     "kv_head": [
+      "tp"
+     ],
+     "q_head": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/attention.operands",
+    "rule": {
+     "kv_head": [
+      "tp"
+     ],
+     "q_head": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/attention.ns_compute",
+    "rule": {
+     "stack": [
+      "replicate"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/ffn.optimizer_state",
+    "rule": {
+     "ffn_hidden": [
+      "tp",
+      "fsdp",
+      "replicate"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/ffn.compute_weights",
+    "rule": {
+     "ffn_hidden": [
+      "tp",
+      "fsdp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/ffn.operands",
+    "rule": {
+     "ffn_hidden": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/ffn.ns_compute",
+    "rule": {
+     "stack": [
+      "replicate"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/output.optimizer_state",
+    "rule": {
+     "C": [
+      "tp"
+     ],
+     "d_model": [
+      "fsdp",
+      "replicate"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/output.compute_weights",
+    "rule": {
+     "C": [
+      "tp"
+     ],
+     "d_model": [
+      "fsdp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/output.operands",
+    "rule": {
+     "C": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/output.ns_compute",
+    "rule": {
+     "stack": [
+      "replicate"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/vectors",
+    "rule": {
+     "C": [
+      "tp"
+     ],
+     "ffn_hidden": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/activations",
+    "rule": {
+     "C": [
+      "tp"
+     ],
+     "batch": [
+      "replicate",
+      "fsdp"
+     ],
+     "ffn_hidden": [
+      "tp"
+     ],
+     "input": [
+      "tp"
+     ],
+     "kv_head": [
+      "tp"
+     ],
+     "q_head": [
+      "tp"
+     ]
+    }
+   }
+  ]
+ },
+ "ci|conditioning|ddp|data4_tp2": {
+  "ci_rows": [
+   {
+    "label": "ci_fn/readout_vectors",
+    "rule": {
+     "C": [
+      "tp"
+     ]
+    }
+   }
+  ]
+ },
+ "ci|conditioning|ddp|replicate2_fsdp2_tp2": {
+  "ci_rows": [
+   {
+    "label": "ci_fn/readout_vectors",
+    "rule": {
+     "C": [
+      "tp"
+     ]
+    }
+   }
+  ]
+ },
+ "ci|conditioning|ddp|replicate4_fsdp8_tp1": {
+  "ci_rows": [
+   {
+    "label": "ci_fn/readout_vectors",
+    "rule": {
+     "C": [
+      "tp"
+     ]
+    }
+   }
+  ]
+ },
+ "ci|conditioning|owner-replicated-resident-moe|data4_tp2": {
+  "ci_rows": [
+   {
+    "label": "ci_fn/readout_vectors",
+    "rule": {
+     "C": [
+      "tp"
+     ]
+    }
+   }
+  ]
+ },
+ "ci|conditioning|owner-replicated-resident-moe|replicate2_fsdp2_tp2": {
+  "ci_rows": [
+   {
+    "label": "ci_fn/readout_vectors",
+    "rule": {
+     "C": [
+      "tp"
+     ]
+    }
+   }
+  ]
+ },
+ "ci|conditioning|owner-replicated-resident-moe|replicate4_fsdp8_tp1": {
+  "ci_rows": [
+   {
+    "label": "ci_fn/readout_vectors",
+    "rule": {
+     "C": [
+      "tp"
+     ]
+    }
+   }
+  ]
+ },
+ "ci|conditioning|owner-replicated-resident|data4_tp2": {
+  "ci_rows": [
+   {
+    "label": "ci_fn/readout_vectors",
+    "rule": {
+     "C": [
+      "tp"
+     ]
+    }
+   }
+  ]
+ },
+ "ci|conditioning|owner-replicated-resident|replicate2_fsdp2_tp2": {
+  "ci_rows": [
+   {
+    "label": "ci_fn/readout_vectors",
+    "rule": {
+     "C": [
+      "tp"
+     ]
+    }
+   }
+  ]
+ },
+ "ci|conditioning|owner-replicated-resident|replicate4_fsdp8_tp1": {
+  "ci_rows": [
+   {
+    "label": "ci_fn/readout_vectors",
+    "rule": {
+     "C": [
+      "tp"
+     ]
+    }
+   }
+  ]
+ },
+ "ci|conditioning|owner|data4_tp2": {
+  "ci_rows": [
+   {
+    "label": "ci_fn/readout_vectors",
+    "rule": {
+     "C": [
+      "tp"
+     ]
+    }
+   }
+  ]
+ },
+ "ci|conditioning|owner|replicate2_fsdp2_tp2": {
+  "ci_rows": [
+   {
+    "label": "ci_fn/readout_vectors",
+    "rule": {
+     "C": [
+      "tp"
+     ]
+    }
+   }
+  ]
+ },
+ "ci|conditioning|owner|replicate4_fsdp8_tp1": {
+  "ci_rows": [
+   {
+    "label": "ci_fn/readout_vectors",
+    "rule": {
+     "C": [
+      "tp"
+     ]
+    }
+   }
+  ]
+ },
+ "ci|conditioning|zero1-replicated-resident-moe-replicated-ns|data4_tp2": {
+  "ci_rows": [
+   {
+    "label": "ci_fn/readout_vectors",
+    "rule": {
+     "C": [
+      "tp"
+     ]
+    }
+   }
+  ]
+ },
+ "ci|conditioning|zero1-replicated-resident-moe-replicated-ns|replicate2_fsdp2_tp2": {
+  "ci_rows": [
+   {
+    "label": "ci_fn/readout_vectors",
+    "rule": {
+     "C": [
+      "tp"
+     ]
+    }
+   }
+  ]
+ },
+ "ci|conditioning|zero1-replicated-resident-moe-replicated-ns|replicate4_fsdp8_tp1": {
+  "ci_rows": [
+   {
+    "label": "ci_fn/readout_vectors",
+    "rule": {
+     "C": [
+      "tp"
+     ]
+    }
+   }
+  ]
+ },
+ "ci|conditioning|zero1-replicated-resident-moe|data4_tp2": {
+  "ci_rows": [
+   {
+    "label": "ci_fn/readout_vectors",
+    "rule": {
+     "C": [
+      "tp"
+     ]
+    }
+   }
+  ]
+ },
+ "ci|conditioning|zero1-replicated-resident-moe|replicate2_fsdp2_tp2": {
+  "ci_rows": [
+   {
+    "label": "ci_fn/readout_vectors",
+    "rule": {
+     "C": [
+      "tp"
+     ]
+    }
+   }
+  ]
+ },
+ "ci|conditioning|zero1-replicated-resident-moe|replicate4_fsdp8_tp1": {
+  "ci_rows": [
+   {
+    "label": "ci_fn/readout_vectors",
+    "rule": {
+     "C": [
+      "tp"
+     ]
+    }
+   }
+  ]
+ },
+ "ci|conditioning|zero1-replicated-resident|data4_tp2": {
+  "ci_rows": [
+   {
+    "label": "ci_fn/readout_vectors",
+    "rule": {
+     "C": [
+      "tp"
+     ]
+    }
+   }
+  ]
+ },
+ "ci|conditioning|zero1-replicated-resident|replicate2_fsdp2_tp2": {
+  "ci_rows": [
+   {
+    "label": "ci_fn/readout_vectors",
+    "rule": {
+     "C": [
+      "tp"
+     ]
+    }
+   }
+  ]
+ },
+ "ci|conditioning|zero1-replicated-resident|replicate4_fsdp8_tp1": {
+  "ci_rows": [
+   {
+    "label": "ci_fn/readout_vectors",
+    "rule": {
+     "C": [
+      "tp"
+     ]
+    }
+   }
+  ]
+ },
+ "ci|conditioning|zero1|data4_tp2": {
+  "ci_rows": [
+   {
+    "label": "ci_fn/readout_vectors",
+    "rule": {
+     "C": [
+      "tp"
+     ]
+    }
+   }
+  ]
+ },
+ "ci|conditioning|zero1|replicate2_fsdp2_tp2": {
+  "ci_rows": [
+   {
+    "label": "ci_fn/readout_vectors",
+    "rule": {
+     "C": [
+      "tp"
+     ]
+    }
+   }
+  ]
+ },
+ "ci|conditioning|zero1|replicate4_fsdp8_tp1": {
+  "ci_rows": [
+   {
+    "label": "ci_fn/readout_vectors",
+    "rule": {
+     "C": [
+      "tp"
+     ]
+    }
+   }
+  ]
+ },
+ "ci|global|ddp": {
+  "refused": "the global transformer CI has no rows for placement preset 'ddp'"
+ },
+ "ci|global|owner-replicated-resident": {
+  "refused": "the global transformer CI has no rows for placement preset 'owner-replicated-resident'"
+ },
+ "ci|global|owner-replicated-resident-moe": {
+  "refused": "the global transformer CI has no rows for placement preset 'owner-replicated-resident-moe'"
+ },
+ "ci|global|owner|data4_tp2": {
+  "refused": "placement rule 'ci_fn/input.optimizer_state': axis 'd_model' maps to unknown mesh axes ['fsdp', 'replicate'] (mesh has ['data', 'tp'])"
+ },
+ "ci|global|owner|replicate2_fsdp2_tp2": {
+  "ci_rows": [
+   {
+    "label": "ci_fn/input.optimizer_state",
+    "rule": {
+     "d_model": [
+      "fsdp",
+      "replicate"
+     ],
+     "input": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/input.compute_weights",
+    "rule": {
+     "d_model": [
+      "fsdp"
+     ],
+     "input": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/input.operands",
+    "rule": {
+     "input": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/input.ns_compute",
+    "rule": {}
+   },
+   {
+    "label": "ci_fn/attention.optimizer_state",
+    "rule": {
+     "d_model": [
+      "fsdp"
+     ],
+     "depth": [
+      "replicate"
+     ],
+     "kv_head": [
+      "tp"
+     ],
+     "q_head": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/attention.compute_weights",
+    "rule": {
+     "d_model": [
+      "fsdp"
+     ],
+     "kv_head": [
+      "tp"
+     ],
+     "q_head": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/attention.operands",
+    "rule": {
+     "kv_head": [
+      "tp"
+     ],
+     "q_head": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/attention.ns_compute",
+    "rule": {
+     "depth": [
+      "replicate"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/ffn.optimizer_state",
+    "rule": {
+     "depth": [
+      "replicate"
+     ],
+     "ffn_hidden": [
+      "tp",
+      "fsdp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/ffn.compute_weights",
+    "rule": {
+     "ffn_hidden": [
+      "tp",
+      "fsdp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/ffn.operands",
+    "rule": {
+     "ffn_hidden": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/ffn.ns_compute",
+    "rule": {
+     "depth": [
+      "replicate"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/output.optimizer_state",
+    "rule": {
+     "C": [
+      "tp"
+     ],
+     "d_model": [
+      "fsdp"
+     ],
+     "site": [
+      "replicate"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/output.compute_weights",
+    "rule": {
+     "C": [
+      "tp"
+     ],
+     "d_model": [
+      "fsdp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/output.operands",
+    "rule": {
+     "C": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/output.ns_compute",
+    "rule": {
+     "site": [
+      "replicate"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/vectors",
+    "rule": {
+     "C": [
+      "tp"
+     ],
+     "ffn_hidden": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/activations",
+    "rule": {
+     "C": [
+      "tp"
+     ],
+     "batch": [
+      "replicate",
+      "fsdp"
+     ],
+     "ffn_hidden": [
+      "tp"
+     ],
+     "input": [
+      "tp"
+     ],
+     "kv_head": [
+      "tp"
+     ],
+     "q_head": [
+      "tp"
+     ]
+    }
+   }
+  ]
+ },
+ "ci|global|owner|replicate4_fsdp8_tp1": {
+  "ci_rows": [
+   {
+    "label": "ci_fn/input.optimizer_state",
+    "rule": {
+     "d_model": [
+      "fsdp",
+      "replicate"
+     ],
+     "input": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/input.compute_weights",
+    "rule": {
+     "d_model": [
+      "fsdp"
+     ],
+     "input": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/input.operands",
+    "rule": {
+     "input": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/input.ns_compute",
+    "rule": {}
+   },
+   {
+    "label": "ci_fn/attention.optimizer_state",
+    "rule": {
+     "d_model": [
+      "fsdp"
+     ],
+     "depth": [
+      "replicate"
+     ],
+     "kv_head": [
+      "tp"
+     ],
+     "q_head": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/attention.compute_weights",
+    "rule": {
+     "d_model": [
+      "fsdp"
+     ],
+     "kv_head": [
+      "tp"
+     ],
+     "q_head": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/attention.operands",
+    "rule": {
+     "kv_head": [
+      "tp"
+     ],
+     "q_head": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/attention.ns_compute",
+    "rule": {
+     "depth": [
+      "replicate"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/ffn.optimizer_state",
+    "rule": {
+     "depth": [
+      "replicate"
+     ],
+     "ffn_hidden": [
+      "tp",
+      "fsdp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/ffn.compute_weights",
+    "rule": {
+     "ffn_hidden": [
+      "tp",
+      "fsdp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/ffn.operands",
+    "rule": {
+     "ffn_hidden": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/ffn.ns_compute",
+    "rule": {
+     "depth": [
+      "replicate"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/output.optimizer_state",
+    "rule": {
+     "C": [
+      "tp"
+     ],
+     "d_model": [
+      "fsdp"
+     ],
+     "site": [
+      "replicate"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/output.compute_weights",
+    "rule": {
+     "C": [
+      "tp"
+     ],
+     "d_model": [
+      "fsdp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/output.operands",
+    "rule": {
+     "C": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/output.ns_compute",
+    "rule": {
+     "site": [
+      "replicate"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/vectors",
+    "rule": {
+     "C": [
+      "tp"
+     ],
+     "ffn_hidden": [
+      "tp"
+     ]
+    }
+   },
+   {
+    "label": "ci_fn/activations",
+    "rule": {
+     "C": [
+      "tp"
+     ],
+     "batch": [
+      "replicate",
+      "fsdp"
+     ],
+     "ffn_hidden": [
+      "tp"
+     ],
+     "input": [
+      "tp"
+     ],
+     "kv_head": [
+      "tp"
+     ],
+     "q_head": [
+      "tp"
+     ]
+    }
+   }
+  ]
+ },
+ "ci|global|zero1": {
+  "refused": "the global transformer CI has no rows for placement preset 'zero1'"
+ },
+ "ci|global|zero1-replicated-resident": {
+  "refused": "the global transformer CI has no rows for placement preset 'zero1-replicated-resident'"
+ },
+ "ci|global|zero1-replicated-resident-moe": {
+  "refused": "the global transformer CI has no rows for placement preset 'zero1-replicated-resident-moe'"
+ },
+ "ci|global|zero1-replicated-resident-moe-replicated-ns": {
+  "refused": "the global transformer CI has no rows for placement preset 'zero1-replicated-resident-moe-replicated-ns'"
+ },
+ "explicit_fsdp_only|data4_tp2|mixed": {
+  "refused": "explicit placement table names mesh axes ['fsdp', 'replicate'] the mesh does not declare (mesh axes: ['data', 'tp']); a table binds only a mesh spelled in its own axis vocabulary \u2014 author `runtime.mesh` with the axes its rows name"
+ },
+ "explicit_fsdp_only|data4_tp2|tiling": {
+  "refused": "explicit placement table names mesh axes ['fsdp', 'replicate'] the mesh does not declare (mesh axes: ['data', 'tp']); a table binds only a mesh spelled in its own axis vocabulary \u2014 author `runtime.mesh` with the axes its rows name"
+ },
+ "explicit_fsdp_only|replicate2_fsdp2_tp2|mixed": {
+  "refused": "explicit placement table shards nothing over mesh axes ['tp'] (sizes [2]) \u2014 every device along them would hold a full replica. Name them in some row, or author a mesh without them"
  },
  "explicit_fsdp_only|replicate2_fsdp2_tp2|tiling": {
-  "rules": {
-   "activations": {
-    "component": {
-     "label": "activations/component",
-     "rule": {
-      "batch": [
-       "replicate",
-       "fsdp"
-      ]
-     }
-    },
-    "external": {
-     "label": "activations/external",
-     "rule": {
-      "batch": [
-       "replicate",
-       "fsdp"
-      ]
-     }
-    }
-   },
-   "ci_fn": {
-    "activations": {
-     "label": "ci_fn/activations",
-     "rule": {
-      "batch": [
-       "replicate",
-       "fsdp"
-      ]
-     }
-    },
-    "attention": {
-     "compute_weights": {
-      "label": "ci_fn/attention.compute_weights",
-      "rule": {
-       "d_model": "fsdp"
-      }
-     },
-     "ns_compute": {
-      "label": "ci_fn/attention.ns_compute",
-      "rule": {}
-     },
-     "operands": {
-      "label": "ci_fn/attention.operands",
-      "rule": {}
-     },
-     "optimizer_state": {
-      "label": "ci_fn/attention.optimizer_state",
-      "rule": {
-       "d_model": "fsdp"
-      }
-     }
-    },
-    "ffn": {
-     "compute_weights": {
-      "label": "ci_fn/ffn.compute_weights",
-      "rule": {
-       "ffn_hidden": "fsdp"
-      }
-     },
-     "ns_compute": {
-      "label": "ci_fn/ffn.ns_compute",
-      "rule": {}
-     },
-     "operands": {
-      "label": "ci_fn/ffn.operands",
-      "rule": {}
-     },
-     "optimizer_state": {
-      "label": "ci_fn/ffn.optimizer_state",
-      "rule": {
-       "ffn_hidden": "fsdp"
-      }
-     }
-    },
-    "input": {
-     "compute_weights": {
-      "label": "ci_fn/input.compute_weights",
-      "rule": {
-       "d_model": "fsdp"
-      }
-     },
-     "ns_compute": {
-      "label": "ci_fn/input.ns_compute",
-      "rule": {}
-     },
-     "operands": {
-      "label": "ci_fn/input.operands",
-      "rule": {}
-     },
-     "optimizer_state": {
-      "label": "ci_fn/input.optimizer_state",
-      "rule": {
-       "d_model": "fsdp"
-      }
-     }
-    },
-    "output": {
-     "compute_weights": {
-      "label": "ci_fn/output.compute_weights",
-      "rule": {
-       "d_model": "fsdp"
-      }
-     },
-     "ns_compute": {
-      "label": "ci_fn/output.ns_compute",
-      "rule": {}
-     },
-     "operands": {
-      "label": "ci_fn/output.operands",
-      "rule": {}
-     },
-     "optimizer_state": {
-      "label": "ci_fn/output.optimizer_state",
-      "rule": {
-       "d_model": "fsdp"
-      }
-     }
-    },
-    "vectors": {
-     "label": "ci_fn/vectors",
-     "rule": {}
-    }
-   },
-   "components": {
-    "compute_weights": {
-     "label": "components/compute_weights",
-     "rule": {
-      "d_in": "fsdp",
-      "d_out": "fsdp"
-     }
-    },
-    "faithfulness_deltas": {
-     "label": "components/faithfulness_deltas",
-     "rule": {
-      "d_out": "fsdp"
-     }
-    },
-    "faithfulness_weights": {
-     "label": "components/faithfulness_weights",
-     "rule": {
-      "d_in": "fsdp",
-      "d_out": "fsdp"
-     }
-    },
-    "group_stack_lens": {
-     "64x32x8": 4
-    },
-    "ns_compute": {
-     "label": "components/ns_compute",
-     "rule": {}
-    },
-    "operands": {
-     "label": "components/operands",
-     "rule": {}
-    },
-    "optimizer_state": {
-     "label": "components/optimizer_state",
-     "rule": {
-      "d_in": "fsdp",
-      "d_out": "fsdp"
-     }
-    }
-   },
-   "mesh": {
-    "fsdp": 2,
-    "replicate": 2,
-    "tp": 2
-   },
-   "target": {
-    "column": {
-     "input": "activations/external",
-     "operand": {
-      "label": "target/column.operand",
-      "rule": {}
-     },
-     "output": "target/intermediate",
-     "persist": {
-      "label": "target/column.persist",
-      "rule": {
-       "d_in": "fsdp"
-      }
-     }
-    },
-    "component": {
-     "input": "activations/external",
-     "output": "activations/external"
-    },
-    "embedding": {
-     "operand": {
-      "label": "target/embedding.operand",
-      "rule": {}
-     },
-     "persist": {
-      "label": "target/embedding.persist",
-      "rule": {
-       "d_model": "fsdp"
-      }
-     }
-    },
-    "intermediate": {
-     "label": "target/intermediate",
-     "rule": {
-      "batch": [
-       "replicate",
-       "fsdp"
-      ]
-     }
-    },
-    "normalization": {
-     "label": "target/normalization",
-     "rule": {}
-    },
-    "output": {
-     "operand": {
-      "label": "target/output.operand",
-      "rule": {}
-     },
-     "persist": {
-      "label": "target/output.persist",
-      "rule": {
-       "d_model": "fsdp"
-      }
-     }
-    },
-    "position_encoding": {
-     "label": "target/position_encoding",
-     "rule": {}
-    },
-    "row": {
-     "input": "target/intermediate",
-     "operand": {
-      "label": "target/row.operand",
-      "rule": {}
-     },
-     "output": "activations/external",
-     "persist": {
-      "label": "target/row.persist",
-      "rule": {
-       "d_out": "fsdp"
-      }
-     }
-    }
-   }
-  }
+  "refused": "explicit placement table shards nothing over mesh axes ['tp'] (sizes [2]) \u2014 every device along them would hold a full replica. Name them in some row, or author a mesh without them"
  },
  "explicit_fsdp_only|replicate4_fsdp8_tp1|mixed": {
   "rules": {
@@ -516,133 +3177,59 @@
      }
     }
    },
-   "ci_fn": {
-    "activations": {
-     "label": "ci_fn/activations",
-     "rule": {
-      "batch": [
-       "replicate",
-       "fsdp"
-      ]
-     }
-    },
-    "attention": {
-     "compute_weights": {
-      "label": "ci_fn/attention.compute_weights",
-      "rule": {
-       "d_model": "fsdp"
-      }
-     },
-     "ns_compute": {
-      "label": "ci_fn/attention.ns_compute",
-      "rule": {}
-     },
-     "operands": {
-      "label": "ci_fn/attention.operands",
-      "rule": {}
-     },
-     "optimizer_state": {
-      "label": "ci_fn/attention.optimizer_state",
-      "rule": {
-       "d_model": "fsdp"
-      }
-     }
-    },
-    "ffn": {
-     "compute_weights": {
-      "label": "ci_fn/ffn.compute_weights",
-      "rule": {
-       "ffn_hidden": "fsdp"
-      }
-     },
-     "ns_compute": {
-      "label": "ci_fn/ffn.ns_compute",
-      "rule": {}
-     },
-     "operands": {
-      "label": "ci_fn/ffn.operands",
-      "rule": {}
-     },
-     "optimizer_state": {
-      "label": "ci_fn/ffn.optimizer_state",
-      "rule": {
-       "ffn_hidden": "fsdp"
-      }
-     }
-    },
-    "input": {
-     "compute_weights": {
-      "label": "ci_fn/input.compute_weights",
-      "rule": {
-       "d_model": "fsdp"
-      }
-     },
-     "ns_compute": {
-      "label": "ci_fn/input.ns_compute",
-      "rule": {}
-     },
-     "operands": {
-      "label": "ci_fn/input.operands",
-      "rule": {}
-     },
-     "optimizer_state": {
-      "label": "ci_fn/input.optimizer_state",
-      "rule": {
-       "d_model": "fsdp"
-      }
-     }
-    },
-    "output": {
-     "compute_weights": {
-      "label": "ci_fn/output.compute_weights",
-      "rule": {
-       "d_model": "fsdp"
-      }
-     },
-     "ns_compute": {
-      "label": "ci_fn/output.ns_compute",
-      "rule": {}
-     },
-     "operands": {
-      "label": "ci_fn/output.operands",
-      "rule": {}
-     },
-     "optimizer_state": {
-      "label": "ci_fn/output.optimizer_state",
-      "rule": {
-       "d_model": "fsdp"
-      }
-     }
-    },
-    "vectors": {
-     "label": "ci_fn/vectors",
-     "rule": {}
-    }
-   },
+   "ci_fn": "zero1",
    "components": {
     "compute_weights": {
      "label": "components/compute_weights",
      "rule": {
-      "d_in": "fsdp",
-      "d_out": "fsdp"
+      "d_in": [
+       "fsdp"
+      ],
+      "d_out": [
+       "fsdp"
+      ]
      }
     },
     "faithfulness_deltas": {
      "label": "components/faithfulness_deltas",
      "rule": {
-      "d_out": "fsdp"
+      "d_out": [
+       "fsdp"
+      ]
      }
     },
     "faithfulness_weights": {
      "label": "components/faithfulness_weights",
      "rule": {
-      "d_in": "fsdp",
-      "d_out": "fsdp"
+      "d_in": [
+       "fsdp"
+      ],
+      "d_out": [
+       "fsdp"
+      ]
      }
     },
-    "group_stack_lens": {
-     "128x64x8": 1,
-     "64x32x8": 4
+    "group_census": {
+     "128x64x8": {
+      "factorization": {
+       "C": 8,
+       "d_in": 128,
+       "d_out": 64,
+       "kind": "DenseFactorization"
+      },
+      "stack_len": 1,
+      "stack_pad": 0
+     },
+     "64x32x8": {
+      "factorization": {
+       "C": 8,
+       "d_in": 64,
+       "d_out": 32,
+       "kind": "DenseFactorization"
+      },
+      "stack_len": 4,
+      "stack_pad": 0
+     }
     },
     "ns_compute": {
      "label": "components/ns_compute",
@@ -655,8 +3242,12 @@
     "optimizer_state": {
      "label": "components/optimizer_state",
      "rule": {
-      "d_in": "fsdp",
-      "d_out": "fsdp"
+      "d_in": [
+       "fsdp"
+      ],
+      "d_out": [
+       "fsdp"
+      ]
      }
     }
    },
@@ -676,7 +3267,9 @@
      "persist": {
       "label": "target/column.persist",
       "rule": {
-       "d_in": "fsdp"
+       "d_in": [
+        "fsdp"
+       ]
       }
      }
     },
@@ -692,7 +3285,9 @@
      "persist": {
       "label": "target/embedding.persist",
       "rule": {
-       "d_model": "fsdp"
+       "d_model": [
+        "fsdp"
+       ]
       }
      }
     },
@@ -717,7 +3312,9 @@
      "persist": {
       "label": "target/output.persist",
       "rule": {
-       "d_model": "fsdp"
+       "d_model": [
+        "fsdp"
+       ]
       }
      }
     },
@@ -735,7 +3332,9 @@
      "persist": {
       "label": "target/row.persist",
       "rule": {
-       "d_out": "fsdp"
+       "d_out": [
+        "fsdp"
+       ]
       }
      }
     }
@@ -764,132 +3363,49 @@
      }
     }
    },
-   "ci_fn": {
-    "activations": {
-     "label": "ci_fn/activations",
-     "rule": {
-      "batch": [
-       "replicate",
-       "fsdp"
-      ]
-     }
-    },
-    "attention": {
-     "compute_weights": {
-      "label": "ci_fn/attention.compute_weights",
-      "rule": {
-       "d_model": "fsdp"
-      }
-     },
-     "ns_compute": {
-      "label": "ci_fn/attention.ns_compute",
-      "rule": {}
-     },
-     "operands": {
-      "label": "ci_fn/attention.operands",
-      "rule": {}
-     },
-     "optimizer_state": {
-      "label": "ci_fn/attention.optimizer_state",
-      "rule": {
-       "d_model": "fsdp"
-      }
-     }
-    },
-    "ffn": {
-     "compute_weights": {
-      "label": "ci_fn/ffn.compute_weights",
-      "rule": {
-       "ffn_hidden": "fsdp"
-      }
-     },
-     "ns_compute": {
-      "label": "ci_fn/ffn.ns_compute",
-      "rule": {}
-     },
-     "operands": {
-      "label": "ci_fn/ffn.operands",
-      "rule": {}
-     },
-     "optimizer_state": {
-      "label": "ci_fn/ffn.optimizer_state",
-      "rule": {
-       "ffn_hidden": "fsdp"
-      }
-     }
-    },
-    "input": {
-     "compute_weights": {
-      "label": "ci_fn/input.compute_weights",
-      "rule": {
-       "d_model": "fsdp"
-      }
-     },
-     "ns_compute": {
-      "label": "ci_fn/input.ns_compute",
-      "rule": {}
-     },
-     "operands": {
-      "label": "ci_fn/input.operands",
-      "rule": {}
-     },
-     "optimizer_state": {
-      "label": "ci_fn/input.optimizer_state",
-      "rule": {
-       "d_model": "fsdp"
-      }
-     }
-    },
-    "output": {
-     "compute_weights": {
-      "label": "ci_fn/output.compute_weights",
-      "rule": {
-       "d_model": "fsdp"
-      }
-     },
-     "ns_compute": {
-      "label": "ci_fn/output.ns_compute",
-      "rule": {}
-     },
-     "operands": {
-      "label": "ci_fn/output.operands",
-      "rule": {}
-     },
-     "optimizer_state": {
-      "label": "ci_fn/output.optimizer_state",
-      "rule": {
-       "d_model": "fsdp"
-      }
-     }
-    },
-    "vectors": {
-     "label": "ci_fn/vectors",
-     "rule": {}
-    }
-   },
+   "ci_fn": "zero1",
    "components": {
     "compute_weights": {
      "label": "components/compute_weights",
      "rule": {
-      "d_in": "fsdp",
-      "d_out": "fsdp"
+      "d_in": [
+       "fsdp"
+      ],
+      "d_out": [
+       "fsdp"
+      ]
      }
     },
     "faithfulness_deltas": {
      "label": "components/faithfulness_deltas",
      "rule": {
-      "d_out": "fsdp"
+      "d_out": [
+       "fsdp"
+      ]
      }
     },
     "faithfulness_weights": {
      "label": "components/faithfulness_weights",
      "rule": {
-      "d_in": "fsdp",
-      "d_out": "fsdp"
+      "d_in": [
+       "fsdp"
+      ],
+      "d_out": [
+       "fsdp"
+      ]
      }
     },
-    "group_stack_lens": {
-     "64x32x8": 4
+    "group_census": {
+     "64x32x8": {
+      "factorization": {
+       "C": 8,
+       "d_in": 64,
+       "d_out": 32,
+       "kind": "DenseFactorization"
+      },
+      "stack_len": 4,
+      "stack_pad": 0
+     }
     },
     "ns_compute": {
      "label": "components/ns_compute",
@@ -902,8 +3418,12 @@
     "optimizer_state": {
      "label": "components/optimizer_state",
      "rule": {
-      "d_in": "fsdp",
-      "d_out": "fsdp"
+      "d_in": [
+       "fsdp"
+      ],
+      "d_out": [
+       "fsdp"
+      ]
      }
     }
    },
@@ -923,7 +3443,9 @@
      "persist": {
       "label": "target/column.persist",
       "rule": {
-       "d_in": "fsdp"
+       "d_in": [
+        "fsdp"
+       ]
       }
      }
     },
@@ -939,7 +3461,9 @@
      "persist": {
       "label": "target/embedding.persist",
       "rule": {
-       "d_model": "fsdp"
+       "d_model": [
+        "fsdp"
+       ]
       }
      }
     },
@@ -964,7 +3488,9 @@
      "persist": {
       "label": "target/output.persist",
       "rule": {
-       "d_model": "fsdp"
+       "d_model": [
+        "fsdp"
+       ]
       }
      }
     },
@@ -982,23 +3508,30 @@
      "persist": {
       "label": "target/row.persist",
       "rule": {
-       "d_out": "fsdp"
+       "d_out": [
+        "fsdp"
+       ]
       }
      }
     }
    }
   }
  },
- "explicit_owner|replicate2_fsdp2_tp2|mixed": {
-  "refused": "explicit placement table: components/optimizer_state shards the component stack axis (stack -> 'replicate', \u00f72), which these semantic groups' stack lengths do not tile: 128x64x8 (stacks 1). There is no fallback. Use a mesh where every group's stack length divides 2, or a placement whose component rows do not shard the stack axis (`sharding: zero1` rests every master intra-matrix)."
+ "explicit_owner|data4_tp2|mixed": {
+  "refused": "explicit placement table names mesh axes ['fsdp', 'replicate'] the mesh does not declare (mesh axes: ['data', 'tp']); a table binds only a mesh spelled in its own axis vocabulary \u2014 author `runtime.mesh` with the axes its rows name"
  },
- "explicit_owner|replicate2_fsdp2_tp2|tiling": {
+ "explicit_owner|data4_tp2|tiling": {
+  "refused": "explicit placement table names mesh axes ['fsdp', 'replicate'] the mesh does not declare (mesh axes: ['data', 'tp']); a table binds only a mesh spelled in its own axis vocabulary \u2014 author `runtime.mesh` with the axes its rows name"
+ },
+ "explicit_owner|replicate2_fsdp2_tp2|mixed": {
   "rules": {
    "activations": {
     "component": {
      "label": "activations/component",
      "rule": {
-      "C": "tp",
+      "C": [
+       "tp"
+      ],
       "batch": [
        "replicate",
        "fsdp"
@@ -1015,197 +3548,103 @@
      }
     }
    },
-   "ci_fn": {
-    "activations": {
-     "label": "ci_fn/activations",
-     "rule": {
-      "C": "tp",
-      "batch": [
-       "replicate",
-       "fsdp"
-      ],
-      "ffn_hidden": "tp",
-      "input": "tp",
-      "kv_head": "tp",
-      "q_head": "tp"
-     }
-    },
-    "attention": {
-     "compute_weights": {
-      "label": "ci_fn/attention.compute_weights",
-      "rule": {
-       "d_model": "fsdp",
-       "kv_head": "tp",
-       "q_head": "tp"
-      }
-     },
-     "ns_compute": {
-      "label": "ci_fn/attention.ns_compute",
-      "rule": {}
-     },
-     "operands": {
-      "label": "ci_fn/attention.operands",
-      "rule": {
-       "kv_head": "tp",
-       "q_head": "tp"
-      }
-     },
-     "optimizer_state": {
-      "label": "ci_fn/attention.optimizer_state",
-      "rule": {
-       "d_model": [
-        "fsdp",
-        "replicate"
-       ],
-       "kv_head": "tp",
-       "q_head": "tp"
-      }
-     }
-    },
-    "ffn": {
-     "compute_weights": {
-      "label": "ci_fn/ffn.compute_weights",
-      "rule": {
-       "ffn_hidden": [
-        "fsdp",
-        "tp"
-       ]
-      }
-     },
-     "ns_compute": {
-      "label": "ci_fn/ffn.ns_compute",
-      "rule": {}
-     },
-     "operands": {
-      "label": "ci_fn/ffn.operands",
-      "rule": {
-       "ffn_hidden": "tp"
-      }
-     },
-     "optimizer_state": {
-      "label": "ci_fn/ffn.optimizer_state",
-      "rule": {
-       "ffn_hidden": [
-        "fsdp",
-        "tp",
-        "replicate"
-       ]
-      }
-     }
-    },
-    "input": {
-     "compute_weights": {
-      "label": "ci_fn/input.compute_weights",
-      "rule": {
-       "d_model": "fsdp",
-       "input": "tp"
-      }
-     },
-     "ns_compute": {
-      "label": "ci_fn/input.ns_compute",
-      "rule": {}
-     },
-     "operands": {
-      "label": "ci_fn/input.operands",
-      "rule": {
-       "input": "tp"
-      }
-     },
-     "optimizer_state": {
-      "label": "ci_fn/input.optimizer_state",
-      "rule": {
-       "d_model": [
-        "fsdp",
-        "replicate"
-       ],
-       "input": "tp"
-      }
-     }
-    },
-    "output": {
-     "compute_weights": {
-      "label": "ci_fn/output.compute_weights",
-      "rule": {
-       "C": "tp",
-       "d_model": "fsdp"
-      }
-     },
-     "ns_compute": {
-      "label": "ci_fn/output.ns_compute",
-      "rule": {}
-     },
-     "operands": {
-      "label": "ci_fn/output.operands",
-      "rule": {
-       "C": "tp"
-      }
-     },
-     "optimizer_state": {
-      "label": "ci_fn/output.optimizer_state",
-      "rule": {
-       "C": "tp",
-       "d_model": [
-        "fsdp",
-        "replicate"
-       ]
-      }
-     }
-    },
-    "vectors": {
-     "label": "ci_fn/vectors",
-     "rule": {
-      "C": "tp",
-      "ffn_hidden": "tp"
-     }
-    }
-   },
+   "ci_fn": "zero1",
    "components": {
     "compute_weights": {
      "label": "components/compute_weights",
      "rule": {
-      "C": "tp",
-      "d_in": "fsdp",
-      "d_out": "fsdp"
+      "C": [
+       "tp"
+      ],
+      "d_in": [
+       "fsdp"
+      ],
+      "d_out": [
+       "fsdp"
+      ]
      }
     },
     "faithfulness_deltas": {
      "label": "components/faithfulness_deltas",
      "rule": {
-      "d_out": "fsdp",
-      "stack": "replicate"
+      "d_out": [
+       "fsdp"
+      ],
+      "stack": [
+       "replicate"
+      ]
      }
     },
     "faithfulness_weights": {
      "label": "components/faithfulness_weights",
      "rule": {
-      "C": "tp",
-      "d_in": "fsdp",
-      "d_out": "fsdp",
-      "stack": "replicate"
+      "C": [
+       "tp"
+      ],
+      "d_in": [
+       "fsdp"
+      ],
+      "d_out": [
+       "fsdp"
+      ],
+      "stack": [
+       "replicate"
+      ]
      }
     },
-    "group_stack_lens": {
-     "64x32x8": 4
+    "group_census": {
+     "128x64x8": {
+      "factorization": {
+       "C": 8,
+       "d_in": 128,
+       "d_out": 64,
+       "kind": "DenseFactorization"
+      },
+      "stack_len": 1,
+      "stack_pad": 1
+     },
+     "64x32x8": {
+      "factorization": {
+       "C": 8,
+       "d_in": 64,
+       "d_out": 32,
+       "kind": "DenseFactorization"
+      },
+      "stack_len": 4,
+      "stack_pad": 0
+     }
     },
     "ns_compute": {
      "label": "components/ns_compute",
      "rule": {
-      "stack": "replicate"
+      "stack": [
+       "replicate"
+      ]
      }
     },
     "operands": {
      "label": "components/operands",
      "rule": {
-      "C": "tp"
+      "C": [
+       "tp"
+      ]
      }
     },
     "optimizer_state": {
      "label": "components/optimizer_state",
      "rule": {
-      "C": "tp",
-      "d_in": "fsdp",
-      "d_out": "fsdp",
-      "stack": "replicate"
+      "C": [
+       "tp"
+      ],
+      "d_in": [
+       "fsdp"
+      ],
+      "d_out": [
+       "fsdp"
+      ],
+      "stack": [
+       "replicate"
+      ]
      }
     }
    },
@@ -1220,15 +3659,21 @@
      "operand": {
       "label": "target/column.operand",
       "rule": {
-       "d_out": "tp"
+       "d_out": [
+        "tp"
+       ]
       }
      },
      "output": "target/intermediate",
      "persist": {
       "label": "target/column.persist",
       "rule": {
-       "d_in": "fsdp",
-       "d_out": "tp"
+       "d_in": [
+        "fsdp"
+       ],
+       "d_out": [
+        "tp"
+       ]
       }
      }
     },
@@ -1244,7 +3689,9 @@
      "persist": {
       "label": "target/embedding.persist",
       "rule": {
-       "d_model": "fsdp"
+       "d_model": [
+        "fsdp"
+       ]
       }
      }
     },
@@ -1255,9 +3702,15 @@
        "replicate",
        "fsdp"
       ],
-      "feature": "tp",
-      "kv_head": "tp",
-      "q_head": "tp"
+      "feature": [
+       "tp"
+      ],
+      "kv_head": [
+       "tp"
+      ],
+      "q_head": [
+       "tp"
+      ]
      }
     },
     "normalization": {
@@ -1272,7 +3725,9 @@
      "persist": {
       "label": "target/output.persist",
       "rule": {
-       "d_model": "fsdp"
+       "d_model": [
+        "fsdp"
+       ]
       }
      }
     },
@@ -1285,31 +3740,36 @@
      "operand": {
       "label": "target/row.operand",
       "rule": {
-       "d_in": "tp"
+       "d_in": [
+        "tp"
+       ]
       }
      },
      "output": "activations/external",
      "persist": {
       "label": "target/row.persist",
       "rule": {
-       "d_in": "tp",
-       "d_out": "fsdp"
+       "d_in": [
+        "tp"
+       ],
+       "d_out": [
+        "fsdp"
+       ]
       }
      }
     }
    }
   }
  },
- "explicit_owner|replicate4_fsdp8_tp1|mixed": {
-  "refused": "explicit placement table: components/optimizer_state shards the component stack axis (stack -> 'replicate', \u00f74), which these semantic groups' stack lengths do not tile: 128x64x8 (stacks 1). There is no fallback. Use a mesh where every group's stack length divides 4, or a placement whose component rows do not shard the stack axis (`sharding: zero1` rests every master intra-matrix)."
- },
- "explicit_owner|replicate4_fsdp8_tp1|tiling": {
+ "explicit_owner|replicate2_fsdp2_tp2|tiling": {
   "rules": {
    "activations": {
     "component": {
      "label": "activations/component",
      "rule": {
-      "C": "tp",
+      "C": [
+       "tp"
+      ],
       "batch": [
        "replicate",
        "fsdp"
@@ -1326,197 +3786,331 @@
      }
     }
    },
-   "ci_fn": {
-    "activations": {
-     "label": "ci_fn/activations",
-     "rule": {
-      "C": "tp",
-      "batch": [
-       "replicate",
-       "fsdp"
-      ],
-      "ffn_hidden": "tp",
-      "input": "tp",
-      "kv_head": "tp",
-      "q_head": "tp"
-     }
-    },
-    "attention": {
-     "compute_weights": {
-      "label": "ci_fn/attention.compute_weights",
-      "rule": {
-       "d_model": "fsdp",
-       "kv_head": "tp",
-       "q_head": "tp"
-      }
-     },
-     "ns_compute": {
-      "label": "ci_fn/attention.ns_compute",
-      "rule": {}
-     },
-     "operands": {
-      "label": "ci_fn/attention.operands",
-      "rule": {
-       "kv_head": "tp",
-       "q_head": "tp"
-      }
-     },
-     "optimizer_state": {
-      "label": "ci_fn/attention.optimizer_state",
-      "rule": {
-       "d_model": [
-        "fsdp",
-        "replicate"
-       ],
-       "kv_head": "tp",
-       "q_head": "tp"
-      }
-     }
-    },
-    "ffn": {
-     "compute_weights": {
-      "label": "ci_fn/ffn.compute_weights",
-      "rule": {
-       "ffn_hidden": [
-        "fsdp",
-        "tp"
-       ]
-      }
-     },
-     "ns_compute": {
-      "label": "ci_fn/ffn.ns_compute",
-      "rule": {}
-     },
-     "operands": {
-      "label": "ci_fn/ffn.operands",
-      "rule": {
-       "ffn_hidden": "tp"
-      }
-     },
-     "optimizer_state": {
-      "label": "ci_fn/ffn.optimizer_state",
-      "rule": {
-       "ffn_hidden": [
-        "fsdp",
-        "tp",
-        "replicate"
-       ]
-      }
-     }
-    },
-    "input": {
-     "compute_weights": {
-      "label": "ci_fn/input.compute_weights",
-      "rule": {
-       "d_model": "fsdp",
-       "input": "tp"
-      }
-     },
-     "ns_compute": {
-      "label": "ci_fn/input.ns_compute",
-      "rule": {}
-     },
-     "operands": {
-      "label": "ci_fn/input.operands",
-      "rule": {
-       "input": "tp"
-      }
-     },
-     "optimizer_state": {
-      "label": "ci_fn/input.optimizer_state",
-      "rule": {
-       "d_model": [
-        "fsdp",
-        "replicate"
-       ],
-       "input": "tp"
-      }
-     }
-    },
-    "output": {
-     "compute_weights": {
-      "label": "ci_fn/output.compute_weights",
-      "rule": {
-       "C": "tp",
-       "d_model": "fsdp"
-      }
-     },
-     "ns_compute": {
-      "label": "ci_fn/output.ns_compute",
-      "rule": {}
-     },
-     "operands": {
-      "label": "ci_fn/output.operands",
-      "rule": {
-       "C": "tp"
-      }
-     },
-     "optimizer_state": {
-      "label": "ci_fn/output.optimizer_state",
-      "rule": {
-       "C": "tp",
-       "d_model": [
-        "fsdp",
-        "replicate"
-       ]
-      }
-     }
-    },
-    "vectors": {
-     "label": "ci_fn/vectors",
-     "rule": {
-      "C": "tp",
-      "ffn_hidden": "tp"
-     }
-    }
-   },
+   "ci_fn": "zero1",
    "components": {
     "compute_weights": {
      "label": "components/compute_weights",
      "rule": {
-      "C": "tp",
-      "d_in": "fsdp",
-      "d_out": "fsdp"
+      "C": [
+       "tp"
+      ],
+      "d_in": [
+       "fsdp"
+      ],
+      "d_out": [
+       "fsdp"
+      ]
      }
     },
     "faithfulness_deltas": {
      "label": "components/faithfulness_deltas",
      "rule": {
-      "d_out": "fsdp",
-      "stack": "replicate"
+      "d_out": [
+       "fsdp"
+      ],
+      "stack": [
+       "replicate"
+      ]
      }
     },
     "faithfulness_weights": {
      "label": "components/faithfulness_weights",
      "rule": {
-      "C": "tp",
-      "d_in": "fsdp",
-      "d_out": "fsdp",
-      "stack": "replicate"
+      "C": [
+       "tp"
+      ],
+      "d_in": [
+       "fsdp"
+      ],
+      "d_out": [
+       "fsdp"
+      ],
+      "stack": [
+       "replicate"
+      ]
      }
     },
-    "group_stack_lens": {
-     "64x32x8": 4
+    "group_census": {
+     "64x32x8": {
+      "factorization": {
+       "C": 8,
+       "d_in": 64,
+       "d_out": 32,
+       "kind": "DenseFactorization"
+      },
+      "stack_len": 4,
+      "stack_pad": 0
+     }
     },
     "ns_compute": {
      "label": "components/ns_compute",
      "rule": {
-      "stack": "replicate"
+      "stack": [
+       "replicate"
+      ]
      }
     },
     "operands": {
      "label": "components/operands",
      "rule": {
-      "C": "tp"
+      "C": [
+       "tp"
+      ]
      }
     },
     "optimizer_state": {
      "label": "components/optimizer_state",
      "rule": {
-      "C": "tp",
-      "d_in": "fsdp",
-      "d_out": "fsdp",
-      "stack": "replicate"
+      "C": [
+       "tp"
+      ],
+      "d_in": [
+       "fsdp"
+      ],
+      "d_out": [
+       "fsdp"
+      ],
+      "stack": [
+       "replicate"
+      ]
+     }
+    }
+   },
+   "mesh": {
+    "fsdp": 2,
+    "replicate": 2,
+    "tp": 2
+   },
+   "target": {
+    "column": {
+     "input": "activations/external",
+     "operand": {
+      "label": "target/column.operand",
+      "rule": {
+       "d_out": [
+        "tp"
+       ]
+      }
+     },
+     "output": "target/intermediate",
+     "persist": {
+      "label": "target/column.persist",
+      "rule": {
+       "d_in": [
+        "fsdp"
+       ],
+       "d_out": [
+        "tp"
+       ]
+      }
+     }
+    },
+    "component": {
+     "input": "activations/external",
+     "output": "activations/external"
+    },
+    "embedding": {
+     "operand": {
+      "label": "target/embedding.operand",
+      "rule": {}
+     },
+     "persist": {
+      "label": "target/embedding.persist",
+      "rule": {
+       "d_model": [
+        "fsdp"
+       ]
+      }
+     }
+    },
+    "intermediate": {
+     "label": "target/intermediate",
+     "rule": {
+      "batch": [
+       "replicate",
+       "fsdp"
+      ],
+      "feature": [
+       "tp"
+      ],
+      "kv_head": [
+       "tp"
+      ],
+      "q_head": [
+       "tp"
+      ]
+     }
+    },
+    "normalization": {
+     "label": "target/normalization",
+     "rule": {}
+    },
+    "output": {
+     "operand": {
+      "label": "target/output.operand",
+      "rule": {}
+     },
+     "persist": {
+      "label": "target/output.persist",
+      "rule": {
+       "d_model": [
+        "fsdp"
+       ]
+      }
+     }
+    },
+    "position_encoding": {
+     "label": "target/position_encoding",
+     "rule": {}
+    },
+    "row": {
+     "input": "target/intermediate",
+     "operand": {
+      "label": "target/row.operand",
+      "rule": {
+       "d_in": [
+        "tp"
+       ]
+      }
+     },
+     "output": "activations/external",
+     "persist": {
+      "label": "target/row.persist",
+      "rule": {
+       "d_in": [
+        "tp"
+       ],
+       "d_out": [
+        "fsdp"
+       ]
+      }
+     }
+    }
+   }
+  }
+ },
+ "explicit_owner|replicate4_fsdp8_tp1|mixed": {
+  "rules": {
+   "activations": {
+    "component": {
+     "label": "activations/component",
+     "rule": {
+      "C": [
+       "tp"
+      ],
+      "batch": [
+       "replicate",
+       "fsdp"
+      ]
+     }
+    },
+    "external": {
+     "label": "activations/external",
+     "rule": {
+      "batch": [
+       "replicate",
+       "fsdp"
+      ]
+     }
+    }
+   },
+   "ci_fn": "zero1",
+   "components": {
+    "compute_weights": {
+     "label": "components/compute_weights",
+     "rule": {
+      "C": [
+       "tp"
+      ],
+      "d_in": [
+       "fsdp"
+      ],
+      "d_out": [
+       "fsdp"
+      ]
+     }
+    },
+    "faithfulness_deltas": {
+     "label": "components/faithfulness_deltas",
+     "rule": {
+      "d_out": [
+       "fsdp"
+      ],
+      "stack": [
+       "replicate"
+      ]
+     }
+    },
+    "faithfulness_weights": {
+     "label": "components/faithfulness_weights",
+     "rule": {
+      "C": [
+       "tp"
+      ],
+      "d_in": [
+       "fsdp"
+      ],
+      "d_out": [
+       "fsdp"
+      ],
+      "stack": [
+       "replicate"
+      ]
+     }
+    },
+    "group_census": {
+     "128x64x8": {
+      "factorization": {
+       "C": 8,
+       "d_in": 128,
+       "d_out": 64,
+       "kind": "DenseFactorization"
+      },
+      "stack_len": 1,
+      "stack_pad": 3
+     },
+     "64x32x8": {
+      "factorization": {
+       "C": 8,
+       "d_in": 64,
+       "d_out": 32,
+       "kind": "DenseFactorization"
+      },
+      "stack_len": 4,
+      "stack_pad": 0
+     }
+    },
+    "ns_compute": {
+     "label": "components/ns_compute",
+     "rule": {
+      "stack": [
+       "replicate"
+      ]
+     }
+    },
+    "operands": {
+     "label": "components/operands",
+     "rule": {
+      "C": [
+       "tp"
+      ]
+     }
+    },
+    "optimizer_state": {
+     "label": "components/optimizer_state",
+     "rule": {
+      "C": [
+       "tp"
+      ],
+      "d_in": [
+       "fsdp"
+      ],
+      "d_out": [
+       "fsdp"
+      ],
+      "stack": [
+       "replicate"
+      ]
      }
     }
    },
@@ -1531,15 +4125,21 @@
      "operand": {
       "label": "target/column.operand",
       "rule": {
-       "d_out": "tp"
+       "d_out": [
+        "tp"
+       ]
       }
      },
      "output": "target/intermediate",
      "persist": {
       "label": "target/column.persist",
       "rule": {
-       "d_in": "fsdp",
-       "d_out": "tp"
+       "d_in": [
+        "fsdp"
+       ],
+       "d_out": [
+        "tp"
+       ]
       }
      }
     },
@@ -1555,7 +4155,9 @@
      "persist": {
       "label": "target/embedding.persist",
       "rule": {
-       "d_model": "fsdp"
+       "d_model": [
+        "fsdp"
+       ]
       }
      }
     },
@@ -1566,9 +4168,15 @@
        "replicate",
        "fsdp"
       ],
-      "feature": "tp",
-      "kv_head": "tp",
-      "q_head": "tp"
+      "feature": [
+       "tp"
+      ],
+      "kv_head": [
+       "tp"
+      ],
+      "q_head": [
+       "tp"
+      ]
      }
     },
     "normalization": {
@@ -1583,7 +4191,9 @@
      "persist": {
       "label": "target/output.persist",
       "rule": {
-       "d_model": "fsdp"
+       "d_model": [
+        "fsdp"
+       ]
       }
      }
     },
@@ -1596,28 +4206,36 @@
      "operand": {
       "label": "target/row.operand",
       "rule": {
-       "d_in": "tp"
+       "d_in": [
+        "tp"
+       ]
       }
      },
      "output": "activations/external",
      "persist": {
       "label": "target/row.persist",
       "rule": {
-       "d_in": "tp",
-       "d_out": "fsdp"
+       "d_in": [
+        "tp"
+       ],
+       "d_out": [
+        "fsdp"
+       ]
       }
      }
     }
    }
   }
  },
- "preset_ddp|replicate2_fsdp2_tp2|mixed": {
+ "explicit_owner|replicate4_fsdp8_tp1|tiling": {
   "rules": {
    "activations": {
     "component": {
      "label": "activations/component",
      "rule": {
-      "C": "tp",
+      "C": [
+       "tp"
+      ],
       "batch": [
        "replicate",
        "fsdp"
@@ -1634,101 +4252,241 @@
      }
     }
    },
-   "ci_fn": {
-    "activations": {
-     "label": "ci_fn/activations",
+   "ci_fn": "zero1",
+   "components": {
+    "compute_weights": {
+     "label": "components/compute_weights",
      "rule": {
+      "C": [
+       "tp"
+      ],
+      "d_in": [
+       "fsdp"
+      ],
+      "d_out": [
+       "fsdp"
+      ]
+     }
+    },
+    "faithfulness_deltas": {
+     "label": "components/faithfulness_deltas",
+     "rule": {
+      "d_out": [
+       "fsdp"
+      ],
+      "stack": [
+       "replicate"
+      ]
+     }
+    },
+    "faithfulness_weights": {
+     "label": "components/faithfulness_weights",
+     "rule": {
+      "C": [
+       "tp"
+      ],
+      "d_in": [
+       "fsdp"
+      ],
+      "d_out": [
+       "fsdp"
+      ],
+      "stack": [
+       "replicate"
+      ]
+     }
+    },
+    "group_census": {
+     "64x32x8": {
+      "factorization": {
+       "C": 8,
+       "d_in": 64,
+       "d_out": 32,
+       "kind": "DenseFactorization"
+      },
+      "stack_len": 4,
+      "stack_pad": 0
+     }
+    },
+    "ns_compute": {
+     "label": "components/ns_compute",
+     "rule": {
+      "stack": [
+       "replicate"
+      ]
+     }
+    },
+    "operands": {
+     "label": "components/operands",
+     "rule": {
+      "C": [
+       "tp"
+      ]
+     }
+    },
+    "optimizer_state": {
+     "label": "components/optimizer_state",
+     "rule": {
+      "C": [
+       "tp"
+      ],
+      "d_in": [
+       "fsdp"
+      ],
+      "d_out": [
+       "fsdp"
+      ],
+      "stack": [
+       "replicate"
+      ]
+     }
+    }
+   },
+   "mesh": {
+    "fsdp": 8,
+    "replicate": 4,
+    "tp": 1
+   },
+   "target": {
+    "column": {
+     "input": "activations/external",
+     "operand": {
+      "label": "target/column.operand",
+      "rule": {
+       "d_out": [
+        "tp"
+       ]
+      }
+     },
+     "output": "target/intermediate",
+     "persist": {
+      "label": "target/column.persist",
+      "rule": {
+       "d_in": [
+        "fsdp"
+       ],
+       "d_out": [
+        "tp"
+       ]
+      }
+     }
+    },
+    "component": {
+     "input": "activations/external",
+     "output": "activations/external"
+    },
+    "embedding": {
+     "operand": {
+      "label": "target/embedding.operand",
+      "rule": {}
+     },
+     "persist": {
+      "label": "target/embedding.persist",
+      "rule": {
+       "d_model": [
+        "fsdp"
+       ]
+      }
+     }
+    },
+    "intermediate": {
+     "label": "target/intermediate",
+     "rule": {
+      "batch": [
+       "replicate",
+       "fsdp"
+      ],
+      "feature": [
+       "tp"
+      ],
+      "kv_head": [
+       "tp"
+      ],
+      "q_head": [
+       "tp"
+      ]
+     }
+    },
+    "normalization": {
+     "label": "target/normalization",
+     "rule": {}
+    },
+    "output": {
+     "operand": {
+      "label": "target/output.operand",
+      "rule": {}
+     },
+     "persist": {
+      "label": "target/output.persist",
+      "rule": {
+       "d_model": [
+        "fsdp"
+       ]
+      }
+     }
+    },
+    "position_encoding": {
+     "label": "target/position_encoding",
+     "rule": {}
+    },
+    "row": {
+     "input": "target/intermediate",
+     "operand": {
+      "label": "target/row.operand",
+      "rule": {
+       "d_in": [
+        "tp"
+       ]
+      }
+     },
+     "output": "activations/external",
+     "persist": {
+      "label": "target/row.persist",
+      "rule": {
+       "d_in": [
+        "tp"
+       ],
+       "d_out": [
+        "fsdp"
+       ]
+      }
+     }
+    }
+   }
+  }
+ },
+ "preset_ddp|data4_tp2|mixed": {
+  "refused": "sharding preset 'ddp' names mesh axes ['fsdp', 'replicate'] the mesh does not declare (mesh axes: ['data', 'tp']); a table binds only a mesh spelled in its own axis vocabulary \u2014 author `runtime.mesh` with the axes its rows name"
+ },
+ "preset_ddp|data4_tp2|tiling": {
+  "refused": "sharding preset 'ddp' names mesh axes ['fsdp', 'replicate'] the mesh does not declare (mesh axes: ['data', 'tp']); a table binds only a mesh spelled in its own axis vocabulary \u2014 author `runtime.mesh` with the axes its rows name"
+ },
+ "preset_ddp|replicate2_fsdp2_tp2|mixed": {
+  "rules": {
+   "activations": {
+    "component": {
+     "label": "activations/component",
+     "rule": {
+      "C": [
+       "tp"
+      ],
       "batch": [
        "replicate",
        "fsdp"
       ]
      }
     },
-    "attention": {
-     "compute_weights": {
-      "label": "ci_fn/attention.compute_weights",
-      "rule": {}
-     },
-     "ns_compute": {
-      "label": "ci_fn/attention.ns_compute",
-      "rule": {
-       "stack": "replicate"
-      }
-     },
-     "operands": {
-      "label": "ci_fn/attention.operands",
-      "rule": {}
-     },
-     "optimizer_state": {
-      "label": "ci_fn/attention.optimizer_state",
-      "rule": {}
+    "external": {
+     "label": "activations/external",
+     "rule": {
+      "batch": [
+       "replicate",
+       "fsdp"
+      ]
      }
-    },
-    "ffn": {
-     "compute_weights": {
-      "label": "ci_fn/ffn.compute_weights",
-      "rule": {}
-     },
-     "ns_compute": {
-      "label": "ci_fn/ffn.ns_compute",
-      "rule": {
-       "stack": "replicate"
-      }
-     },
-     "operands": {
-      "label": "ci_fn/ffn.operands",
-      "rule": {}
-     },
-     "optimizer_state": {
-      "label": "ci_fn/ffn.optimizer_state",
-      "rule": {}
-     }
-    },
-    "input": {
-     "compute_weights": {
-      "label": "ci_fn/input.compute_weights",
-      "rule": {}
-     },
-     "ns_compute": {
-      "label": "ci_fn/input.ns_compute",
-      "rule": {
-       "stack": "replicate"
-      }
-     },
-     "operands": {
-      "label": "ci_fn/input.operands",
-      "rule": {}
-     },
-     "optimizer_state": {
-      "label": "ci_fn/input.optimizer_state",
-      "rule": {}
-     }
-    },
-    "output": {
-     "compute_weights": {
-      "label": "ci_fn/output.compute_weights",
-      "rule": {}
-     },
-     "ns_compute": {
-      "label": "ci_fn/output.ns_compute",
-      "rule": {
-       "stack": "replicate"
-      }
-     },
-     "operands": {
-      "label": "ci_fn/output.operands",
-      "rule": {}
-     },
-     "optimizer_state": {
-      "label": "ci_fn/output.optimizer_state",
-      "rule": {}
-     }
-    },
-    "vectors": {
-     "label": "ci_fn/vectors",
-     "rule": {}
     }
    },
+   "ci_fn": "ddp",
    "components": {
     "compute_weights": {
      "label": "components/compute_weights",
@@ -1742,14 +4500,34 @@
      "label": "components/faithfulness_weights",
      "rule": {}
     },
-    "group_stack_lens": {
-     "128x64x8": 1,
-     "64x32x8": 4
+    "group_census": {
+     "128x64x8": {
+      "factorization": {
+       "C": 8,
+       "d_in": 128,
+       "d_out": 64,
+       "kind": "DenseFactorization"
+      },
+      "stack_len": 1,
+      "stack_pad": 0
+     },
+     "64x32x8": {
+      "factorization": {
+       "C": 8,
+       "d_in": 64,
+       "d_out": 32,
+       "kind": "DenseFactorization"
+      },
+      "stack_len": 4,
+      "stack_pad": 0
+     }
     },
     "ns_compute": {
      "label": "components/ns_compute",
      "rule": {
-      "stack": "replicate"
+      "stack": [
+       "replicate"
+      ]
      }
     },
     "operands": {
@@ -1841,7 +4619,9 @@
     "component": {
      "label": "activations/component",
      "rule": {
-      "C": "tp",
+      "C": [
+       "tp"
+      ],
       "batch": [
        "replicate",
        "fsdp"
@@ -1858,101 +4638,7 @@
      }
     }
    },
-   "ci_fn": {
-    "activations": {
-     "label": "ci_fn/activations",
-     "rule": {
-      "batch": [
-       "replicate",
-       "fsdp"
-      ]
-     }
-    },
-    "attention": {
-     "compute_weights": {
-      "label": "ci_fn/attention.compute_weights",
-      "rule": {}
-     },
-     "ns_compute": {
-      "label": "ci_fn/attention.ns_compute",
-      "rule": {
-       "stack": "replicate"
-      }
-     },
-     "operands": {
-      "label": "ci_fn/attention.operands",
-      "rule": {}
-     },
-     "optimizer_state": {
-      "label": "ci_fn/attention.optimizer_state",
-      "rule": {}
-     }
-    },
-    "ffn": {
-     "compute_weights": {
-      "label": "ci_fn/ffn.compute_weights",
-      "rule": {}
-     },
-     "ns_compute": {
-      "label": "ci_fn/ffn.ns_compute",
-      "rule": {
-       "stack": "replicate"
-      }
-     },
-     "operands": {
-      "label": "ci_fn/ffn.operands",
-      "rule": {}
-     },
-     "optimizer_state": {
-      "label": "ci_fn/ffn.optimizer_state",
-      "rule": {}
-     }
-    },
-    "input": {
-     "compute_weights": {
-      "label": "ci_fn/input.compute_weights",
-      "rule": {}
-     },
-     "ns_compute": {
-      "label": "ci_fn/input.ns_compute",
-      "rule": {
-       "stack": "replicate"
-      }
-     },
-     "operands": {
-      "label": "ci_fn/input.operands",
-      "rule": {}
-     },
-     "optimizer_state": {
-      "label": "ci_fn/input.optimizer_state",
-      "rule": {}
-     }
-    },
-    "output": {
-     "compute_weights": {
-      "label": "ci_fn/output.compute_weights",
-      "rule": {}
-     },
-     "ns_compute": {
-      "label": "ci_fn/output.ns_compute",
-      "rule": {
-       "stack": "replicate"
-      }
-     },
-     "operands": {
-      "label": "ci_fn/output.operands",
-      "rule": {}
-     },
-     "optimizer_state": {
-      "label": "ci_fn/output.optimizer_state",
-      "rule": {}
-     }
-    },
-    "vectors": {
-     "label": "ci_fn/vectors",
-     "rule": {}
-    }
-   },
+   "ci_fn": "ddp",
    "components": {
     "compute_weights": {
      "label": "components/compute_weights",
@@ -1966,13 +4652,24 @@
      "label": "components/faithfulness_weights",
      "rule": {}
     },
-    "group_stack_lens": {
-     "64x32x8": 4
+    "group_census": {
+     "64x32x8": {
+      "factorization": {
+       "C": 8,
+       "d_in": 64,
+       "d_out": 32,
+       "kind": "DenseFactorization"
+      },
+      "stack_len": 4,
+      "stack_pad": 0
+     }
     },
     "ns_compute": {
      "label": "components/ns_compute",
      "rule": {
-      "stack": "replicate"
+      "stack": [
+       "replicate"
+      ]
      }
     },
     "operands": {
@@ -2064,7 +4761,9 @@
     "component": {
      "label": "activations/component",
      "rule": {
-      "C": "tp",
+      "C": [
+       "tp"
+      ],
       "batch": [
        "replicate",
        "fsdp"
@@ -2081,101 +4780,7 @@
      }
     }
    },
-   "ci_fn": {
-    "activations": {
-     "label": "ci_fn/activations",
-     "rule": {
-      "batch": [
-       "replicate",
-       "fsdp"
-      ]
-     }
-    },
-    "attention": {
-     "compute_weights": {
-      "label": "ci_fn/attention.compute_weights",
-      "rule": {}
-     },
-     "ns_compute": {
-      "label": "ci_fn/attention.ns_compute",
-      "rule": {
-       "stack": "replicate"
-      }
-     },
-     "operands": {
-      "label": "ci_fn/attention.operands",
-      "rule": {}
-     },
-     "optimizer_state": {
-      "label": "ci_fn/attention.optimizer_state",
-      "rule": {}
-     }
-    },
-    "ffn": {
-     "compute_weights": {
-      "label": "ci_fn/ffn.compute_weights",
-      "rule": {}
-     },
-     "ns_compute": {
-      "label": "ci_fn/ffn.ns_compute",
-      "rule": {
-       "stack": "replicate"
-      }
-     },
-     "operands": {
-      "label": "ci_fn/ffn.operands",
-      "rule": {}
-     },
-     "optimizer_state": {
-      "label": "ci_fn/ffn.optimizer_state",
-      "rule": {}
-     }
-    },
-    "input": {
-     "compute_weights": {
-      "label": "ci_fn/input.compute_weights",
-      "rule": {}
-     },
-     "ns_compute": {
-      "label": "ci_fn/input.ns_compute",
-      "rule": {
-       "stack": "replicate"
-      }
-     },
-     "operands": {
-      "label": "ci_fn/input.operands",
-      "rule": {}
-     },
-     "optimizer_state": {
-      "label": "ci_fn/input.optimizer_state",
-      "rule": {}
-     }
-    },
-    "output": {
-     "compute_weights": {
-      "label": "ci_fn/output.compute_weights",
-      "rule": {}
-     },
-     "ns_compute": {
-      "label": "ci_fn/output.ns_compute",
-      "rule": {
-       "stack": "replicate"
-      }
-     },
-     "operands": {
-      "label": "ci_fn/output.operands",
-      "rule": {}
-     },
-     "optimizer_state": {
-      "label": "ci_fn/output.optimizer_state",
-      "rule": {}
-     }
-    },
-    "vectors": {
-     "label": "ci_fn/vectors",
-     "rule": {}
-    }
-   },
+   "ci_fn": "ddp",
    "components": {
     "compute_weights": {
      "label": "components/compute_weights",
@@ -2189,14 +4794,34 @@
      "label": "components/faithfulness_weights",
      "rule": {}
     },
-    "group_stack_lens": {
-     "128x64x8": 1,
-     "64x32x8": 4
+    "group_census": {
+     "128x64x8": {
+      "factorization": {
+       "C": 8,
+       "d_in": 128,
+       "d_out": 64,
+       "kind": "DenseFactorization"
+      },
+      "stack_len": 1,
+      "stack_pad": 0
+     },
+     "64x32x8": {
+      "factorization": {
+       "C": 8,
+       "d_in": 64,
+       "d_out": 32,
+       "kind": "DenseFactorization"
+      },
+      "stack_len": 4,
+      "stack_pad": 0
+     }
     },
     "ns_compute": {
      "label": "components/ns_compute",
      "rule": {
-      "stack": "replicate"
+      "stack": [
+       "replicate"
+      ]
      }
     },
     "operands": {
@@ -2288,7 +4913,9 @@
     "component": {
      "label": "activations/component",
      "rule": {
-      "C": "tp",
+      "C": [
+       "tp"
+      ],
       "batch": [
        "replicate",
        "fsdp"
@@ -2305,101 +4932,7 @@
      }
     }
    },
-   "ci_fn": {
-    "activations": {
-     "label": "ci_fn/activations",
-     "rule": {
-      "batch": [
-       "replicate",
-       "fsdp"
-      ]
-     }
-    },
-    "attention": {
-     "compute_weights": {
-      "label": "ci_fn/attention.compute_weights",
-      "rule": {}
-     },
-     "ns_compute": {
-      "label": "ci_fn/attention.ns_compute",
-      "rule": {
-       "stack": "replicate"
-      }
-     },
-     "operands": {
-      "label": "ci_fn/attention.operands",
-      "rule": {}
-     },
-     "optimizer_state": {
-      "label": "ci_fn/attention.optimizer_state",
-      "rule": {}
-     }
-    },
-    "ffn": {
-     "compute_weights": {
-      "label": "ci_fn/ffn.compute_weights",
-      "rule": {}
-     },
-     "ns_compute": {
-      "label": "ci_fn/ffn.ns_compute",
-      "rule": {
-       "stack": "replicate"
-      }
-     },
-     "operands": {
-      "label": "ci_fn/ffn.operands",
-      "rule": {}
-     },
-     "optimizer_state": {
-      "label": "ci_fn/ffn.optimizer_state",
-      "rule": {}
-     }
-    },
-    "input": {
-     "compute_weights": {
-      "label": "ci_fn/input.compute_weights",
-      "rule": {}
-     },
-     "ns_compute": {
-      "label": "ci_fn/input.ns_compute",
-      "rule": {
-       "stack": "replicate"
-      }
-     },
-     "operands": {
-      "label": "ci_fn/input.operands",
-      "rule": {}
-     },
-     "optimizer_state": {
-      "label": "ci_fn/input.optimizer_state",
-      "rule": {}
-     }
-    },
-    "output": {
-     "compute_weights": {
-      "label": "ci_fn/output.compute_weights",
-      "rule": {}
-     },
-     "ns_compute": {
-      "label": "ci_fn/output.ns_compute",
-      "rule": {
-       "stack": "replicate"
-      }
-     },
-     "operands": {
-      "label": "ci_fn/output.operands",
-      "rule": {}
-     },
-     "optimizer_state": {
-      "label": "ci_fn/output.optimizer_state",
-      "rule": {}
-     }
-    },
-    "vectors": {
-     "label": "ci_fn/vectors",
-     "rule": {}
-    }
-   },
+   "ci_fn": "ddp",
    "components": {
     "compute_weights": {
      "label": "components/compute_weights",
@@ -2413,13 +4946,24 @@
      "label": "components/faithfulness_weights",
      "rule": {}
     },
-    "group_stack_lens": {
-     "64x32x8": 4
+    "group_census": {
+     "64x32x8": {
+      "factorization": {
+       "C": 8,
+       "d_in": 64,
+       "d_out": 32,
+       "kind": "DenseFactorization"
+      },
+      "stack_len": 4,
+      "stack_pad": 0
+     }
     },
     "ns_compute": {
      "label": "components/ns_compute",
      "rule": {
-      "stack": "replicate"
+      "stack": [
+       "replicate"
+      ]
      }
     },
     "operands": {
@@ -2505,28 +5049,457 @@
    }
   }
  },
- "preset_owner_zero1|replicate2_fsdp2_tp2|mixed": {
-  "refused": "unknown placement preset 'owner+zero1' (have ('owner', 'zero1', 'ddp'))"
+ "preset_owner_replicated_resident_moe|data4_tp2|mixed": {
+  "refused": "sharding preset 'owner-replicated-resident-moe': row 'components/optimizer_state' keys ['expert'] name no semantic axis any tensor consumes at this row (consumable: ['C', 'd_in', 'd_out', 'stack']); an unconsumed key silently replicates the tensor it meant to shard"
  },
- "preset_owner_zero1|replicate2_fsdp2_tp2|tiling": {
-  "refused": "unknown placement preset 'owner+zero1' (have ('owner', 'zero1', 'ddp'))"
+ "preset_owner_replicated_resident_moe|data4_tp2|tiling": {
+  "refused": "sharding preset 'owner-replicated-resident-moe': row 'components/optimizer_state' keys ['expert'] name no semantic axis any tensor consumes at this row (consumable: ['C', 'd_in', 'd_out', 'stack']); an unconsumed key silently replicates the tensor it meant to shard"
  },
- "preset_owner_zero1|replicate4_fsdp8_tp1|mixed": {
-  "refused": "unknown placement preset 'owner+zero1' (have ('owner', 'zero1', 'ddp'))"
+ "preset_owner_replicated_resident_moe|replicate2_fsdp2_tp2|mixed": {
+  "refused": "sharding preset 'owner-replicated-resident-moe' names mesh axes ['data'] the mesh does not declare (mesh axes: ['replicate', 'fsdp', 'tp']); a table binds only a mesh spelled in its own axis vocabulary \u2014 author `runtime.mesh` with the axes its rows name"
  },
- "preset_owner_zero1|replicate4_fsdp8_tp1|tiling": {
-  "refused": "unknown placement preset 'owner+zero1' (have ('owner', 'zero1', 'ddp'))"
+ "preset_owner_replicated_resident_moe|replicate2_fsdp2_tp2|tiling": {
+  "refused": "sharding preset 'owner-replicated-resident-moe' names mesh axes ['data'] the mesh does not declare (mesh axes: ['replicate', 'fsdp', 'tp']); a table binds only a mesh spelled in its own axis vocabulary \u2014 author `runtime.mesh` with the axes its rows name"
  },
- "preset_owner|replicate2_fsdp2_tp2|mixed": {
-  "refused": "sharding preset 'owner': components/optimizer_state shards the component stack axis (stack -> 'replicate', \u00f72), which these semantic groups' stack lengths do not tile: 128x64x8 (stacks 1). There is no fallback. Use a mesh where every group's stack length divides 2, or a placement whose component rows do not shard the stack axis (`sharding: zero1` rests every master intra-matrix)."
+ "preset_owner_replicated_resident_moe|replicate4_fsdp8_tp1|mixed": {
+  "refused": "sharding preset 'owner-replicated-resident-moe' names mesh axes ['data'] the mesh does not declare (mesh axes: ['replicate', 'fsdp', 'tp']); a table binds only a mesh spelled in its own axis vocabulary \u2014 author `runtime.mesh` with the axes its rows name"
  },
- "preset_owner|replicate2_fsdp2_tp2|tiling": {
+ "preset_owner_replicated_resident_moe|replicate4_fsdp8_tp1|tiling": {
+  "refused": "sharding preset 'owner-replicated-resident-moe' names mesh axes ['data'] the mesh does not declare (mesh axes: ['replicate', 'fsdp', 'tp']); a table binds only a mesh spelled in its own axis vocabulary \u2014 author `runtime.mesh` with the axes its rows name"
+ },
+ "preset_owner_replicated_resident|data4_tp2|mixed": {
   "rules": {
    "activations": {
     "component": {
      "label": "activations/component",
      "rule": {
-      "C": "tp",
+      "C": [
+       "tp"
+      ],
+      "batch": [
+       "data"
+      ]
+     }
+    },
+    "external": {
+     "label": "activations/external",
+     "rule": {
+      "batch": [
+       "data"
+      ]
+     }
+    }
+   },
+   "ci_fn": "owner-replicated-resident",
+   "components": {
+    "compute_weights": {
+     "label": "components/compute_weights",
+     "rule": {
+      "C": [
+       "tp"
+      ]
+     }
+    },
+    "faithfulness_deltas": {
+     "label": "components/faithfulness_deltas",
+     "rule": {
+      "stack": [
+       "data"
+      ]
+     }
+    },
+    "faithfulness_weights": {
+     "label": "components/faithfulness_weights",
+     "rule": {
+      "C": [
+       "tp"
+      ],
+      "stack": [
+       "data"
+      ]
+     }
+    },
+    "group_census": {
+     "128x64x8": {
+      "factorization": {
+       "C": 8,
+       "d_in": 128,
+       "d_out": 64,
+       "kind": "DenseFactorization"
+      },
+      "stack_len": 1,
+      "stack_pad": 3
+     },
+     "64x32x8": {
+      "factorization": {
+       "C": 8,
+       "d_in": 64,
+       "d_out": 32,
+       "kind": "DenseFactorization"
+      },
+      "stack_len": 4,
+      "stack_pad": 0
+     }
+    },
+    "ns_compute": {
+     "label": "components/ns_compute",
+     "rule": {
+      "stack": [
+       "data"
+      ]
+     }
+    },
+    "operands": {
+     "label": "components/operands",
+     "rule": {
+      "C": [
+       "tp"
+      ]
+     }
+    },
+    "optimizer_state": {
+     "label": "components/optimizer_state",
+     "rule": {
+      "C": [
+       "tp"
+      ],
+      "stack": [
+       "data"
+      ]
+     }
+    }
+   },
+   "mesh": {
+    "data": 4,
+    "tp": 2
+   },
+   "target": {
+    "column": {
+     "input": "activations/external",
+     "operand": {
+      "label": "target/column.operand",
+      "rule": {
+       "d_out": [
+        "tp"
+       ]
+      }
+     },
+     "output": "target/intermediate",
+     "persist": {
+      "label": "target/column.persist",
+      "rule": {
+       "d_out": [
+        "tp"
+       ]
+      }
+     }
+    },
+    "component": {
+     "input": "activations/external",
+     "output": "activations/external"
+    },
+    "embedding": {
+     "operand": {
+      "label": "target/embedding.operand",
+      "rule": {}
+     },
+     "persist": {
+      "label": "target/embedding.persist",
+      "rule": {}
+     }
+    },
+    "intermediate": {
+     "label": "target/intermediate",
+     "rule": {
+      "batch": [
+       "data"
+      ],
+      "feature": [
+       "tp"
+      ],
+      "kv_head": [
+       "tp"
+      ],
+      "q_head": [
+       "tp"
+      ]
+     }
+    },
+    "normalization": {
+     "label": "target/normalization",
+     "rule": {}
+    },
+    "output": {
+     "operand": {
+      "label": "target/output.operand",
+      "rule": {}
+     },
+     "persist": {
+      "label": "target/output.persist",
+      "rule": {}
+     }
+    },
+    "position_encoding": {
+     "label": "target/position_encoding",
+     "rule": {}
+    },
+    "row": {
+     "input": "target/intermediate",
+     "operand": {
+      "label": "target/row.operand",
+      "rule": {
+       "d_in": [
+        "tp"
+       ]
+      }
+     },
+     "output": "activations/external",
+     "persist": {
+      "label": "target/row.persist",
+      "rule": {
+       "d_in": [
+        "tp"
+       ]
+      }
+     }
+    }
+   }
+  }
+ },
+ "preset_owner_replicated_resident|data4_tp2|tiling": {
+  "rules": {
+   "activations": {
+    "component": {
+     "label": "activations/component",
+     "rule": {
+      "C": [
+       "tp"
+      ],
+      "batch": [
+       "data"
+      ]
+     }
+    },
+    "external": {
+     "label": "activations/external",
+     "rule": {
+      "batch": [
+       "data"
+      ]
+     }
+    }
+   },
+   "ci_fn": "owner-replicated-resident",
+   "components": {
+    "compute_weights": {
+     "label": "components/compute_weights",
+     "rule": {
+      "C": [
+       "tp"
+      ]
+     }
+    },
+    "faithfulness_deltas": {
+     "label": "components/faithfulness_deltas",
+     "rule": {
+      "stack": [
+       "data"
+      ]
+     }
+    },
+    "faithfulness_weights": {
+     "label": "components/faithfulness_weights",
+     "rule": {
+      "C": [
+       "tp"
+      ],
+      "stack": [
+       "data"
+      ]
+     }
+    },
+    "group_census": {
+     "64x32x8": {
+      "factorization": {
+       "C": 8,
+       "d_in": 64,
+       "d_out": 32,
+       "kind": "DenseFactorization"
+      },
+      "stack_len": 4,
+      "stack_pad": 0
+     }
+    },
+    "ns_compute": {
+     "label": "components/ns_compute",
+     "rule": {
+      "stack": [
+       "data"
+      ]
+     }
+    },
+    "operands": {
+     "label": "components/operands",
+     "rule": {
+      "C": [
+       "tp"
+      ]
+     }
+    },
+    "optimizer_state": {
+     "label": "components/optimizer_state",
+     "rule": {
+      "C": [
+       "tp"
+      ],
+      "stack": [
+       "data"
+      ]
+     }
+    }
+   },
+   "mesh": {
+    "data": 4,
+    "tp": 2
+   },
+   "target": {
+    "column": {
+     "input": "activations/external",
+     "operand": {
+      "label": "target/column.operand",
+      "rule": {
+       "d_out": [
+        "tp"
+       ]
+      }
+     },
+     "output": "target/intermediate",
+     "persist": {
+      "label": "target/column.persist",
+      "rule": {
+       "d_out": [
+        "tp"
+       ]
+      }
+     }
+    },
+    "component": {
+     "input": "activations/external",
+     "output": "activations/external"
+    },
+    "embedding": {
+     "operand": {
+      "label": "target/embedding.operand",
+      "rule": {}
+     },
+     "persist": {
+      "label": "target/embedding.persist",
+      "rule": {}
+     }
+    },
+    "intermediate": {
+     "label": "target/intermediate",
+     "rule": {
+      "batch": [
+       "data"
+      ],
+      "feature": [
+       "tp"
+      ],
+      "kv_head": [
+       "tp"
+      ],
+      "q_head": [
+       "tp"
+      ]
+     }
+    },
+    "normalization": {
+     "label": "target/normalization",
+     "rule": {}
+    },
+    "output": {
+     "operand": {
+      "label": "target/output.operand",
+      "rule": {}
+     },
+     "persist": {
+      "label": "target/output.persist",
+      "rule": {}
+     }
+    },
+    "position_encoding": {
+     "label": "target/position_encoding",
+     "rule": {}
+    },
+    "row": {
+     "input": "target/intermediate",
+     "operand": {
+      "label": "target/row.operand",
+      "rule": {
+       "d_in": [
+        "tp"
+       ]
+      }
+     },
+     "output": "activations/external",
+     "persist": {
+      "label": "target/row.persist",
+      "rule": {
+       "d_in": [
+        "tp"
+       ]
+      }
+     }
+    }
+   }
+  }
+ },
+ "preset_owner_replicated_resident|replicate2_fsdp2_tp2|mixed": {
+  "refused": "sharding preset 'owner-replicated-resident' names mesh axes ['data'] the mesh does not declare (mesh axes: ['replicate', 'fsdp', 'tp']); a table binds only a mesh spelled in its own axis vocabulary \u2014 author `runtime.mesh` with the axes its rows name"
+ },
+ "preset_owner_replicated_resident|replicate2_fsdp2_tp2|tiling": {
+  "refused": "sharding preset 'owner-replicated-resident' names mesh axes ['data'] the mesh does not declare (mesh axes: ['replicate', 'fsdp', 'tp']); a table binds only a mesh spelled in its own axis vocabulary \u2014 author `runtime.mesh` with the axes its rows name"
+ },
+ "preset_owner_replicated_resident|replicate4_fsdp8_tp1|mixed": {
+  "refused": "sharding preset 'owner-replicated-resident' names mesh axes ['data'] the mesh does not declare (mesh axes: ['replicate', 'fsdp', 'tp']); a table binds only a mesh spelled in its own axis vocabulary \u2014 author `runtime.mesh` with the axes its rows name"
+ },
+ "preset_owner_replicated_resident|replicate4_fsdp8_tp1|tiling": {
+  "refused": "sharding preset 'owner-replicated-resident' names mesh axes ['data'] the mesh does not declare (mesh axes: ['replicate', 'fsdp', 'tp']); a table binds only a mesh spelled in its own axis vocabulary \u2014 author `runtime.mesh` with the axes its rows name"
+ },
+ "preset_owner_zero1|data4_tp2|mixed": {
+  "refused": "unknown placement preset 'owner+zero1' (have ('owner', 'zero1', 'zero1-replicated-resident', 'owner-replicated-resident', 'zero1-replicated-resident-moe', 'owner-replicated-resident-moe', 'zero1-replicated-resident-moe-replicated-ns', 'ddp'))"
+ },
+ "preset_owner_zero1|data4_tp2|tiling": {
+  "refused": "unknown placement preset 'owner+zero1' (have ('owner', 'zero1', 'zero1-replicated-resident', 'owner-replicated-resident', 'zero1-replicated-resident-moe', 'owner-replicated-resident-moe', 'zero1-replicated-resident-moe-replicated-ns', 'ddp'))"
+ },
+ "preset_owner_zero1|replicate2_fsdp2_tp2|mixed": {
+  "refused": "unknown placement preset 'owner+zero1' (have ('owner', 'zero1', 'zero1-replicated-resident', 'owner-replicated-resident', 'zero1-replicated-resident-moe', 'owner-replicated-resident-moe', 'zero1-replicated-resident-moe-replicated-ns', 'ddp'))"
+ },
+ "preset_owner_zero1|replicate2_fsdp2_tp2|tiling": {
+  "refused": "unknown placement preset 'owner+zero1' (have ('owner', 'zero1', 'zero1-replicated-resident', 'owner-replicated-resident', 'zero1-replicated-resident-moe', 'owner-replicated-resident-moe', 'zero1-replicated-resident-moe-replicated-ns', 'ddp'))"
+ },
+ "preset_owner_zero1|replicate4_fsdp8_tp1|mixed": {
+  "refused": "unknown placement preset 'owner+zero1' (have ('owner', 'zero1', 'zero1-replicated-resident', 'owner-replicated-resident', 'zero1-replicated-resident-moe', 'owner-replicated-resident-moe', 'zero1-replicated-resident-moe-replicated-ns', 'ddp'))"
+ },
+ "preset_owner_zero1|replicate4_fsdp8_tp1|tiling": {
+  "refused": "unknown placement preset 'owner+zero1' (have ('owner', 'zero1', 'zero1-replicated-resident', 'owner-replicated-resident', 'zero1-replicated-resident-moe', 'owner-replicated-resident-moe', 'zero1-replicated-resident-moe-replicated-ns', 'ddp'))"
+ },
+ "preset_owner|data4_tp2|mixed": {
+  "refused": "sharding preset 'owner' names mesh axes ['fsdp', 'replicate'] the mesh does not declare (mesh axes: ['data', 'tp']); a table binds only a mesh spelled in its own axis vocabulary \u2014 author `runtime.mesh` with the axes its rows name"
+ },
+ "preset_owner|data4_tp2|tiling": {
+  "refused": "sharding preset 'owner' names mesh axes ['fsdp', 'replicate'] the mesh does not declare (mesh axes: ['data', 'tp']); a table binds only a mesh spelled in its own axis vocabulary \u2014 author `runtime.mesh` with the axes its rows name"
+ },
+ "preset_owner|replicate2_fsdp2_tp2|mixed": {
+  "rules": {
+   "activations": {
+    "component": {
+     "label": "activations/component",
+     "rule": {
+      "C": [
+       "tp"
+      ],
       "batch": [
        "replicate",
        "fsdp"
@@ -2543,199 +5516,103 @@
      }
     }
    },
-   "ci_fn": {
-    "activations": {
-     "label": "ci_fn/activations",
-     "rule": {
-      "C": "tp",
-      "batch": [
-       "replicate",
-       "fsdp"
-      ],
-      "ffn_hidden": "tp",
-      "input": "tp",
-      "kv_head": "tp",
-      "q_head": "tp"
-     }
-    },
-    "attention": {
-     "compute_weights": {
-      "label": "ci_fn/attention.compute_weights",
-      "rule": {
-       "d_model": "fsdp",
-       "kv_head": "tp",
-       "q_head": "tp"
-      }
-     },
-     "ns_compute": {
-      "label": "ci_fn/attention.ns_compute",
-      "rule": {
-       "stack": "replicate"
-      }
-     },
-     "operands": {
-      "label": "ci_fn/attention.operands",
-      "rule": {
-       "kv_head": "tp",
-       "q_head": "tp"
-      }
-     },
-     "optimizer_state": {
-      "label": "ci_fn/attention.optimizer_state",
-      "rule": {
-       "d_model": "fsdp",
-       "kv_head": "tp",
-       "q_head": "tp",
-       "stack": "replicate"
-      }
-     }
-    },
-    "ffn": {
-     "compute_weights": {
-      "label": "ci_fn/ffn.compute_weights",
-      "rule": {
-       "ffn_hidden": [
-        "tp",
-        "fsdp"
-       ]
-      }
-     },
-     "ns_compute": {
-      "label": "ci_fn/ffn.ns_compute",
-      "rule": {
-       "stack": "replicate"
-      }
-     },
-     "operands": {
-      "label": "ci_fn/ffn.operands",
-      "rule": {
-       "ffn_hidden": "tp"
-      }
-     },
-     "optimizer_state": {
-      "label": "ci_fn/ffn.optimizer_state",
-      "rule": {
-       "ffn_hidden": [
-        "tp",
-        "fsdp"
-       ],
-       "stack": "replicate"
-      }
-     }
-    },
-    "input": {
-     "compute_weights": {
-      "label": "ci_fn/input.compute_weights",
-      "rule": {
-       "d_model": "fsdp",
-       "input": "tp"
-      }
-     },
-     "ns_compute": {
-      "label": "ci_fn/input.ns_compute",
-      "rule": {
-       "stack": "replicate"
-      }
-     },
-     "operands": {
-      "label": "ci_fn/input.operands",
-      "rule": {
-       "input": "tp"
-      }
-     },
-     "optimizer_state": {
-      "label": "ci_fn/input.optimizer_state",
-      "rule": {
-       "d_model": "fsdp",
-       "input": "tp",
-       "stack": "replicate"
-      }
-     }
-    },
-    "output": {
-     "compute_weights": {
-      "label": "ci_fn/output.compute_weights",
-      "rule": {
-       "C": "tp",
-       "d_model": "fsdp"
-      }
-     },
-     "ns_compute": {
-      "label": "ci_fn/output.ns_compute",
-      "rule": {
-       "stack": "replicate"
-      }
-     },
-     "operands": {
-      "label": "ci_fn/output.operands",
-      "rule": {
-       "C": "tp"
-      }
-     },
-     "optimizer_state": {
-      "label": "ci_fn/output.optimizer_state",
-      "rule": {
-       "C": "tp",
-       "d_model": "fsdp",
-       "stack": "replicate"
-      }
-     }
-    },
-    "vectors": {
-     "label": "ci_fn/vectors",
-     "rule": {
-      "C": "tp",
-      "ffn_hidden": "tp"
-     }
-    }
-   },
+   "ci_fn": "owner",
    "components": {
     "compute_weights": {
      "label": "components/compute_weights",
      "rule": {
-      "C": "tp",
-      "d_in": "fsdp",
-      "d_out": "fsdp"
+      "C": [
+       "tp"
+      ],
+      "d_in": [
+       "fsdp"
+      ],
+      "d_out": [
+       "fsdp"
+      ]
      }
     },
     "faithfulness_deltas": {
      "label": "components/faithfulness_deltas",
      "rule": {
-      "d_out": "fsdp",
-      "stack": "replicate"
+      "d_out": [
+       "fsdp"
+      ],
+      "stack": [
+       "replicate"
+      ]
      }
     },
     "faithfulness_weights": {
      "label": "components/faithfulness_weights",
      "rule": {
-      "C": "tp",
-      "d_in": "fsdp",
-      "d_out": "fsdp",
-      "stack": "replicate"
+      "C": [
+       "tp"
+      ],
+      "d_in": [
+       "fsdp"
+      ],
+      "d_out": [
+       "fsdp"
+      ],
+      "stack": [
+       "replicate"
+      ]
      }
     },
-    "group_stack_lens": {
-     "64x32x8": 4
+    "group_census": {
+     "128x64x8": {
+      "factorization": {
+       "C": 8,
+       "d_in": 128,
+       "d_out": 64,
+       "kind": "DenseFactorization"
+      },
+      "stack_len": 1,
+      "stack_pad": 1
+     },
+     "64x32x8": {
+      "factorization": {
+       "C": 8,
+       "d_in": 64,
+       "d_out": 32,
+       "kind": "DenseFactorization"
+      },
+      "stack_len": 4,
+      "stack_pad": 0
+     }
     },
     "ns_compute": {
      "label": "components/ns_compute",
      "rule": {
-      "stack": "replicate"
+      "stack": [
+       "replicate"
+      ]
      }
     },
     "operands": {
      "label": "components/operands",
      "rule": {
-      "C": "tp"
+      "C": [
+       "tp"
+      ]
      }
     },
     "optimizer_state": {
      "label": "components/optimizer_state",
      "rule": {
-      "C": "tp",
-      "d_in": "fsdp",
-      "d_out": "fsdp",
-      "stack": "replicate"
+      "C": [
+       "tp"
+      ],
+      "d_in": [
+       "fsdp"
+      ],
+      "d_out": [
+       "fsdp"
+      ],
+      "stack": [
+       "replicate"
+      ]
      }
     }
    },
@@ -2750,15 +5627,21 @@
      "operand": {
       "label": "target/column.operand",
       "rule": {
-       "d_out": "tp"
+       "d_out": [
+        "tp"
+       ]
       }
      },
      "output": "target/intermediate",
      "persist": {
       "label": "target/column.persist",
       "rule": {
-       "d_in": "fsdp",
-       "d_out": "tp"
+       "d_in": [
+        "fsdp"
+       ],
+       "d_out": [
+        "tp"
+       ]
       }
      }
     },
@@ -2774,7 +5657,9 @@
      "persist": {
       "label": "target/embedding.persist",
       "rule": {
-       "d_model": "fsdp"
+       "d_model": [
+        "fsdp"
+       ]
       }
      }
     },
@@ -2785,9 +5670,15 @@
        "replicate",
        "fsdp"
       ],
-      "feature": "tp",
-      "kv_head": "tp",
-      "q_head": "tp"
+      "feature": [
+       "tp"
+      ],
+      "kv_head": [
+       "tp"
+      ],
+      "q_head": [
+       "tp"
+      ]
      }
     },
     "normalization": {
@@ -2802,7 +5693,9 @@
      "persist": {
       "label": "target/output.persist",
       "rule": {
-       "d_model": "fsdp"
+       "d_model": [
+        "fsdp"
+       ]
       }
      }
     },
@@ -2815,31 +5708,36 @@
      "operand": {
       "label": "target/row.operand",
       "rule": {
-       "d_in": "tp"
+       "d_in": [
+        "tp"
+       ]
       }
      },
      "output": "activations/external",
      "persist": {
       "label": "target/row.persist",
       "rule": {
-       "d_in": "tp",
-       "d_out": "fsdp"
+       "d_in": [
+        "tp"
+       ],
+       "d_out": [
+        "fsdp"
+       ]
       }
      }
     }
    }
   }
  },
- "preset_owner|replicate4_fsdp8_tp1|mixed": {
-  "refused": "sharding preset 'owner': components/optimizer_state shards the component stack axis (stack -> 'replicate', \u00f74), which these semantic groups' stack lengths do not tile: 128x64x8 (stacks 1). There is no fallback. Use a mesh where every group's stack length divides 4, or a placement whose component rows do not shard the stack axis (`sharding: zero1` rests every master intra-matrix)."
- },
- "preset_owner|replicate4_fsdp8_tp1|tiling": {
+ "preset_owner|replicate2_fsdp2_tp2|tiling": {
   "rules": {
    "activations": {
     "component": {
      "label": "activations/component",
      "rule": {
-      "C": "tp",
+      "C": [
+       "tp"
+      ],
       "batch": [
        "replicate",
        "fsdp"
@@ -2856,199 +5754,331 @@
      }
     }
    },
-   "ci_fn": {
-    "activations": {
-     "label": "ci_fn/activations",
-     "rule": {
-      "C": "tp",
-      "batch": [
-       "replicate",
-       "fsdp"
-      ],
-      "ffn_hidden": "tp",
-      "input": "tp",
-      "kv_head": "tp",
-      "q_head": "tp"
-     }
-    },
-    "attention": {
-     "compute_weights": {
-      "label": "ci_fn/attention.compute_weights",
-      "rule": {
-       "d_model": "fsdp",
-       "kv_head": "tp",
-       "q_head": "tp"
-      }
-     },
-     "ns_compute": {
-      "label": "ci_fn/attention.ns_compute",
-      "rule": {
-       "stack": "replicate"
-      }
-     },
-     "operands": {
-      "label": "ci_fn/attention.operands",
-      "rule": {
-       "kv_head": "tp",
-       "q_head": "tp"
-      }
-     },
-     "optimizer_state": {
-      "label": "ci_fn/attention.optimizer_state",
-      "rule": {
-       "d_model": "fsdp",
-       "kv_head": "tp",
-       "q_head": "tp",
-       "stack": "replicate"
-      }
-     }
-    },
-    "ffn": {
-     "compute_weights": {
-      "label": "ci_fn/ffn.compute_weights",
-      "rule": {
-       "ffn_hidden": [
-        "tp",
-        "fsdp"
-       ]
-      }
-     },
-     "ns_compute": {
-      "label": "ci_fn/ffn.ns_compute",
-      "rule": {
-       "stack": "replicate"
-      }
-     },
-     "operands": {
-      "label": "ci_fn/ffn.operands",
-      "rule": {
-       "ffn_hidden": "tp"
-      }
-     },
-     "optimizer_state": {
-      "label": "ci_fn/ffn.optimizer_state",
-      "rule": {
-       "ffn_hidden": [
-        "tp",
-        "fsdp"
-       ],
-       "stack": "replicate"
-      }
-     }
-    },
-    "input": {
-     "compute_weights": {
-      "label": "ci_fn/input.compute_weights",
-      "rule": {
-       "d_model": "fsdp",
-       "input": "tp"
-      }
-     },
-     "ns_compute": {
-      "label": "ci_fn/input.ns_compute",
-      "rule": {
-       "stack": "replicate"
-      }
-     },
-     "operands": {
-      "label": "ci_fn/input.operands",
-      "rule": {
-       "input": "tp"
-      }
-     },
-     "optimizer_state": {
-      "label": "ci_fn/input.optimizer_state",
-      "rule": {
-       "d_model": "fsdp",
-       "input": "tp",
-       "stack": "replicate"
-      }
-     }
-    },
-    "output": {
-     "compute_weights": {
-      "label": "ci_fn/output.compute_weights",
-      "rule": {
-       "C": "tp",
-       "d_model": "fsdp"
-      }
-     },
-     "ns_compute": {
-      "label": "ci_fn/output.ns_compute",
-      "rule": {
-       "stack": "replicate"
-      }
-     },
-     "operands": {
-      "label": "ci_fn/output.operands",
-      "rule": {
-       "C": "tp"
-      }
-     },
-     "optimizer_state": {
-      "label": "ci_fn/output.optimizer_state",
-      "rule": {
-       "C": "tp",
-       "d_model": "fsdp",
-       "stack": "replicate"
-      }
-     }
-    },
-    "vectors": {
-     "label": "ci_fn/vectors",
-     "rule": {
-      "C": "tp",
-      "ffn_hidden": "tp"
-     }
-    }
-   },
+   "ci_fn": "owner",
    "components": {
     "compute_weights": {
      "label": "components/compute_weights",
      "rule": {
-      "C": "tp",
-      "d_in": "fsdp",
-      "d_out": "fsdp"
+      "C": [
+       "tp"
+      ],
+      "d_in": [
+       "fsdp"
+      ],
+      "d_out": [
+       "fsdp"
+      ]
      }
     },
     "faithfulness_deltas": {
      "label": "components/faithfulness_deltas",
      "rule": {
-      "d_out": "fsdp",
-      "stack": "replicate"
+      "d_out": [
+       "fsdp"
+      ],
+      "stack": [
+       "replicate"
+      ]
      }
     },
     "faithfulness_weights": {
      "label": "components/faithfulness_weights",
      "rule": {
-      "C": "tp",
-      "d_in": "fsdp",
-      "d_out": "fsdp",
-      "stack": "replicate"
+      "C": [
+       "tp"
+      ],
+      "d_in": [
+       "fsdp"
+      ],
+      "d_out": [
+       "fsdp"
+      ],
+      "stack": [
+       "replicate"
+      ]
      }
     },
-    "group_stack_lens": {
-     "64x32x8": 4
+    "group_census": {
+     "64x32x8": {
+      "factorization": {
+       "C": 8,
+       "d_in": 64,
+       "d_out": 32,
+       "kind": "DenseFactorization"
+      },
+      "stack_len": 4,
+      "stack_pad": 0
+     }
     },
     "ns_compute": {
      "label": "components/ns_compute",
      "rule": {
-      "stack": "replicate"
+      "stack": [
+       "replicate"
+      ]
      }
     },
     "operands": {
      "label": "components/operands",
      "rule": {
-      "C": "tp"
+      "C": [
+       "tp"
+      ]
      }
     },
     "optimizer_state": {
      "label": "components/optimizer_state",
      "rule": {
-      "C": "tp",
-      "d_in": "fsdp",
-      "d_out": "fsdp",
-      "stack": "replicate"
+      "C": [
+       "tp"
+      ],
+      "d_in": [
+       "fsdp"
+      ],
+      "d_out": [
+       "fsdp"
+      ],
+      "stack": [
+       "replicate"
+      ]
+     }
+    }
+   },
+   "mesh": {
+    "fsdp": 2,
+    "replicate": 2,
+    "tp": 2
+   },
+   "target": {
+    "column": {
+     "input": "activations/external",
+     "operand": {
+      "label": "target/column.operand",
+      "rule": {
+       "d_out": [
+        "tp"
+       ]
+      }
+     },
+     "output": "target/intermediate",
+     "persist": {
+      "label": "target/column.persist",
+      "rule": {
+       "d_in": [
+        "fsdp"
+       ],
+       "d_out": [
+        "tp"
+       ]
+      }
+     }
+    },
+    "component": {
+     "input": "activations/external",
+     "output": "activations/external"
+    },
+    "embedding": {
+     "operand": {
+      "label": "target/embedding.operand",
+      "rule": {}
+     },
+     "persist": {
+      "label": "target/embedding.persist",
+      "rule": {
+       "d_model": [
+        "fsdp"
+       ]
+      }
+     }
+    },
+    "intermediate": {
+     "label": "target/intermediate",
+     "rule": {
+      "batch": [
+       "replicate",
+       "fsdp"
+      ],
+      "feature": [
+       "tp"
+      ],
+      "kv_head": [
+       "tp"
+      ],
+      "q_head": [
+       "tp"
+      ]
+     }
+    },
+    "normalization": {
+     "label": "target/normalization",
+     "rule": {}
+    },
+    "output": {
+     "operand": {
+      "label": "target/output.operand",
+      "rule": {}
+     },
+     "persist": {
+      "label": "target/output.persist",
+      "rule": {
+       "d_model": [
+        "fsdp"
+       ]
+      }
+     }
+    },
+    "position_encoding": {
+     "label": "target/position_encoding",
+     "rule": {}
+    },
+    "row": {
+     "input": "target/intermediate",
+     "operand": {
+      "label": "target/row.operand",
+      "rule": {
+       "d_in": [
+        "tp"
+       ]
+      }
+     },
+     "output": "activations/external",
+     "persist": {
+      "label": "target/row.persist",
+      "rule": {
+       "d_in": [
+        "tp"
+       ],
+       "d_out": [
+        "fsdp"
+       ]
+      }
+     }
+    }
+   }
+  }
+ },
+ "preset_owner|replicate4_fsdp8_tp1|mixed": {
+  "rules": {
+   "activations": {
+    "component": {
+     "label": "activations/component",
+     "rule": {
+      "C": [
+       "tp"
+      ],
+      "batch": [
+       "replicate",
+       "fsdp"
+      ]
+     }
+    },
+    "external": {
+     "label": "activations/external",
+     "rule": {
+      "batch": [
+       "replicate",
+       "fsdp"
+      ]
+     }
+    }
+   },
+   "ci_fn": "owner",
+   "components": {
+    "compute_weights": {
+     "label": "components/compute_weights",
+     "rule": {
+      "C": [
+       "tp"
+      ],
+      "d_in": [
+       "fsdp"
+      ],
+      "d_out": [
+       "fsdp"
+      ]
+     }
+    },
+    "faithfulness_deltas": {
+     "label": "components/faithfulness_deltas",
+     "rule": {
+      "d_out": [
+       "fsdp"
+      ],
+      "stack": [
+       "replicate"
+      ]
+     }
+    },
+    "faithfulness_weights": {
+     "label": "components/faithfulness_weights",
+     "rule": {
+      "C": [
+       "tp"
+      ],
+      "d_in": [
+       "fsdp"
+      ],
+      "d_out": [
+       "fsdp"
+      ],
+      "stack": [
+       "replicate"
+      ]
+     }
+    },
+    "group_census": {
+     "128x64x8": {
+      "factorization": {
+       "C": 8,
+       "d_in": 128,
+       "d_out": 64,
+       "kind": "DenseFactorization"
+      },
+      "stack_len": 1,
+      "stack_pad": 3
+     },
+     "64x32x8": {
+      "factorization": {
+       "C": 8,
+       "d_in": 64,
+       "d_out": 32,
+       "kind": "DenseFactorization"
+      },
+      "stack_len": 4,
+      "stack_pad": 0
+     }
+    },
+    "ns_compute": {
+     "label": "components/ns_compute",
+     "rule": {
+      "stack": [
+       "replicate"
+      ]
+     }
+    },
+    "operands": {
+     "label": "components/operands",
+     "rule": {
+      "C": [
+       "tp"
+      ]
+     }
+    },
+    "optimizer_state": {
+     "label": "components/optimizer_state",
+     "rule": {
+      "C": [
+       "tp"
+      ],
+      "d_in": [
+       "fsdp"
+      ],
+      "d_out": [
+       "fsdp"
+      ],
+      "stack": [
+       "replicate"
+      ]
      }
     }
    },
@@ -3063,15 +6093,21 @@
      "operand": {
       "label": "target/column.operand",
       "rule": {
-       "d_out": "tp"
+       "d_out": [
+        "tp"
+       ]
       }
      },
      "output": "target/intermediate",
      "persist": {
       "label": "target/column.persist",
       "rule": {
-       "d_in": "fsdp",
-       "d_out": "tp"
+       "d_in": [
+        "fsdp"
+       ],
+       "d_out": [
+        "tp"
+       ]
       }
      }
     },
@@ -3087,7 +6123,9 @@
      "persist": {
       "label": "target/embedding.persist",
       "rule": {
-       "d_model": "fsdp"
+       "d_model": [
+        "fsdp"
+       ]
       }
      }
     },
@@ -3098,9 +6136,15 @@
        "replicate",
        "fsdp"
       ],
-      "feature": "tp",
-      "kv_head": "tp",
-      "q_head": "tp"
+      "feature": [
+       "tp"
+      ],
+      "kv_head": [
+       "tp"
+      ],
+      "q_head": [
+       "tp"
+      ]
      }
     },
     "normalization": {
@@ -3115,7 +6159,9 @@
      "persist": {
       "label": "target/output.persist",
       "rule": {
-       "d_model": "fsdp"
+       "d_model": [
+        "fsdp"
+       ]
       }
      }
     },
@@ -3128,28 +6174,36 @@
      "operand": {
       "label": "target/row.operand",
       "rule": {
-       "d_in": "tp"
+       "d_in": [
+        "tp"
+       ]
       }
      },
      "output": "activations/external",
      "persist": {
       "label": "target/row.persist",
       "rule": {
-       "d_in": "tp",
-       "d_out": "fsdp"
+       "d_in": [
+        "tp"
+       ],
+       "d_out": [
+        "fsdp"
+       ]
       }
      }
     }
    }
   }
  },
- "preset_zero1|replicate2_fsdp2_tp2|mixed": {
+ "preset_owner|replicate4_fsdp8_tp1|tiling": {
   "rules": {
    "activations": {
     "component": {
      "label": "activations/component",
      "rule": {
-      "C": "tp",
+      "C": [
+       "tp"
+      ],
       "batch": [
        "replicate",
        "fsdp"
@@ -3166,165 +6220,684 @@
      }
     }
    },
-   "ci_fn": {
-    "activations": {
-     "label": "ci_fn/activations",
-     "rule": {
-      "C": "tp",
-      "batch": [
-       "replicate",
-       "fsdp"
-      ],
-      "ffn_hidden": "tp",
-      "input": "tp",
-      "kv_head": "tp",
-      "q_head": "tp"
-     }
-    },
-    "attention": {
-     "compute_weights": {
-      "label": "ci_fn/attention.compute_weights",
-      "rule": {
-       "d_model": "fsdp",
-       "kv_head": "tp",
-       "q_head": "tp"
-      }
-     },
-     "ns_compute": {
-      "label": "ci_fn/attention.ns_compute",
-      "rule": {
-       "stack": "replicate"
-      }
-     },
-     "operands": {
-      "label": "ci_fn/attention.operands",
-      "rule": {
-       "kv_head": "tp",
-       "q_head": "tp"
-      }
-     },
-     "optimizer_state": {
-      "label": "ci_fn/attention.optimizer_state",
-      "rule": {
-       "d_model": [
-        "fsdp",
-        "replicate"
-       ],
-       "kv_head": "tp",
-       "q_head": "tp"
-      }
-     }
-    },
-    "ffn": {
-     "compute_weights": {
-      "label": "ci_fn/ffn.compute_weights",
-      "rule": {
-       "ffn_hidden": [
-        "tp",
-        "fsdp"
-       ]
-      }
-     },
-     "ns_compute": {
-      "label": "ci_fn/ffn.ns_compute",
-      "rule": {
-       "stack": "replicate"
-      }
-     },
-     "operands": {
-      "label": "ci_fn/ffn.operands",
-      "rule": {
-       "ffn_hidden": "tp"
-      }
-     },
-     "optimizer_state": {
-      "label": "ci_fn/ffn.optimizer_state",
-      "rule": {
-       "ffn_hidden": [
-        "tp",
-        "fsdp",
-        "replicate"
-       ]
-      }
-     }
-    },
-    "input": {
-     "compute_weights": {
-      "label": "ci_fn/input.compute_weights",
-      "rule": {
-       "d_model": "fsdp",
-       "input": "tp"
-      }
-     },
-     "ns_compute": {
-      "label": "ci_fn/input.ns_compute",
-      "rule": {
-       "stack": "replicate"
-      }
-     },
-     "operands": {
-      "label": "ci_fn/input.operands",
-      "rule": {
-       "input": "tp"
-      }
-     },
-     "optimizer_state": {
-      "label": "ci_fn/input.optimizer_state",
-      "rule": {
-       "d_model": [
-        "fsdp",
-        "replicate"
-       ],
-       "input": "tp"
-      }
-     }
-    },
-    "output": {
-     "compute_weights": {
-      "label": "ci_fn/output.compute_weights",
-      "rule": {
-       "C": "tp",
-       "d_model": "fsdp"
-      }
-     },
-     "ns_compute": {
-      "label": "ci_fn/output.ns_compute",
-      "rule": {
-       "stack": "replicate"
-      }
-     },
-     "operands": {
-      "label": "ci_fn/output.operands",
-      "rule": {
-       "C": "tp"
-      }
-     },
-     "optimizer_state": {
-      "label": "ci_fn/output.optimizer_state",
-      "rule": {
-       "C": "tp",
-       "d_model": [
-        "fsdp",
-        "replicate"
-       ]
-      }
-     }
-    },
-    "vectors": {
-     "label": "ci_fn/vectors",
-     "rule": {
-      "C": "tp",
-      "ffn_hidden": "tp"
-     }
-    }
-   },
+   "ci_fn": "owner",
    "components": {
     "compute_weights": {
      "label": "components/compute_weights",
      "rule": {
-      "C": "tp",
-      "d_in": "fsdp",
-      "d_out": "fsdp"
+      "C": [
+       "tp"
+      ],
+      "d_in": [
+       "fsdp"
+      ],
+      "d_out": [
+       "fsdp"
+      ]
+     }
+    },
+    "faithfulness_deltas": {
+     "label": "components/faithfulness_deltas",
+     "rule": {
+      "d_out": [
+       "fsdp"
+      ],
+      "stack": [
+       "replicate"
+      ]
+     }
+    },
+    "faithfulness_weights": {
+     "label": "components/faithfulness_weights",
+     "rule": {
+      "C": [
+       "tp"
+      ],
+      "d_in": [
+       "fsdp"
+      ],
+      "d_out": [
+       "fsdp"
+      ],
+      "stack": [
+       "replicate"
+      ]
+     }
+    },
+    "group_census": {
+     "64x32x8": {
+      "factorization": {
+       "C": 8,
+       "d_in": 64,
+       "d_out": 32,
+       "kind": "DenseFactorization"
+      },
+      "stack_len": 4,
+      "stack_pad": 0
+     }
+    },
+    "ns_compute": {
+     "label": "components/ns_compute",
+     "rule": {
+      "stack": [
+       "replicate"
+      ]
+     }
+    },
+    "operands": {
+     "label": "components/operands",
+     "rule": {
+      "C": [
+       "tp"
+      ]
+     }
+    },
+    "optimizer_state": {
+     "label": "components/optimizer_state",
+     "rule": {
+      "C": [
+       "tp"
+      ],
+      "d_in": [
+       "fsdp"
+      ],
+      "d_out": [
+       "fsdp"
+      ],
+      "stack": [
+       "replicate"
+      ]
+     }
+    }
+   },
+   "mesh": {
+    "fsdp": 8,
+    "replicate": 4,
+    "tp": 1
+   },
+   "target": {
+    "column": {
+     "input": "activations/external",
+     "operand": {
+      "label": "target/column.operand",
+      "rule": {
+       "d_out": [
+        "tp"
+       ]
+      }
+     },
+     "output": "target/intermediate",
+     "persist": {
+      "label": "target/column.persist",
+      "rule": {
+       "d_in": [
+        "fsdp"
+       ],
+       "d_out": [
+        "tp"
+       ]
+      }
+     }
+    },
+    "component": {
+     "input": "activations/external",
+     "output": "activations/external"
+    },
+    "embedding": {
+     "operand": {
+      "label": "target/embedding.operand",
+      "rule": {}
+     },
+     "persist": {
+      "label": "target/embedding.persist",
+      "rule": {
+       "d_model": [
+        "fsdp"
+       ]
+      }
+     }
+    },
+    "intermediate": {
+     "label": "target/intermediate",
+     "rule": {
+      "batch": [
+       "replicate",
+       "fsdp"
+      ],
+      "feature": [
+       "tp"
+      ],
+      "kv_head": [
+       "tp"
+      ],
+      "q_head": [
+       "tp"
+      ]
+     }
+    },
+    "normalization": {
+     "label": "target/normalization",
+     "rule": {}
+    },
+    "output": {
+     "operand": {
+      "label": "target/output.operand",
+      "rule": {}
+     },
+     "persist": {
+      "label": "target/output.persist",
+      "rule": {
+       "d_model": [
+        "fsdp"
+       ]
+      }
+     }
+    },
+    "position_encoding": {
+     "label": "target/position_encoding",
+     "rule": {}
+    },
+    "row": {
+     "input": "target/intermediate",
+     "operand": {
+      "label": "target/row.operand",
+      "rule": {
+       "d_in": [
+        "tp"
+       ]
+      }
+     },
+     "output": "activations/external",
+     "persist": {
+      "label": "target/row.persist",
+      "rule": {
+       "d_in": [
+        "tp"
+       ],
+       "d_out": [
+        "fsdp"
+       ]
+      }
+     }
+    }
+   }
+  }
+ },
+ "preset_zero1_replicated_resident_moe_replicated_ns|data4_tp2|mixed": {
+  "refused": "sharding preset 'zero1-replicated-resident-moe-replicated-ns': row 'components/optimizer_state' keys ['C_block', 'expert'] name no semantic axis any tensor consumes at this row (consumable: ['C', 'd_in', 'd_out', 'stack']); an unconsumed key silently replicates the tensor it meant to shard"
+ },
+ "preset_zero1_replicated_resident_moe_replicated_ns|data4_tp2|tiling": {
+  "refused": "sharding preset 'zero1-replicated-resident-moe-replicated-ns': row 'components/optimizer_state' keys ['C_block', 'expert'] name no semantic axis any tensor consumes at this row (consumable: ['C', 'd_in', 'd_out', 'stack']); an unconsumed key silently replicates the tensor it meant to shard"
+ },
+ "preset_zero1_replicated_resident_moe_replicated_ns|replicate2_fsdp2_tp2|mixed": {
+  "refused": "sharding preset 'zero1-replicated-resident-moe-replicated-ns' names mesh axes ['data'] the mesh does not declare (mesh axes: ['replicate', 'fsdp', 'tp']); a table binds only a mesh spelled in its own axis vocabulary \u2014 author `runtime.mesh` with the axes its rows name"
+ },
+ "preset_zero1_replicated_resident_moe_replicated_ns|replicate2_fsdp2_tp2|tiling": {
+  "refused": "sharding preset 'zero1-replicated-resident-moe-replicated-ns' names mesh axes ['data'] the mesh does not declare (mesh axes: ['replicate', 'fsdp', 'tp']); a table binds only a mesh spelled in its own axis vocabulary \u2014 author `runtime.mesh` with the axes its rows name"
+ },
+ "preset_zero1_replicated_resident_moe_replicated_ns|replicate4_fsdp8_tp1|mixed": {
+  "refused": "sharding preset 'zero1-replicated-resident-moe-replicated-ns' names mesh axes ['data'] the mesh does not declare (mesh axes: ['replicate', 'fsdp', 'tp']); a table binds only a mesh spelled in its own axis vocabulary \u2014 author `runtime.mesh` with the axes its rows name"
+ },
+ "preset_zero1_replicated_resident_moe_replicated_ns|replicate4_fsdp8_tp1|tiling": {
+  "refused": "sharding preset 'zero1-replicated-resident-moe-replicated-ns' names mesh axes ['data'] the mesh does not declare (mesh axes: ['replicate', 'fsdp', 'tp']); a table binds only a mesh spelled in its own axis vocabulary \u2014 author `runtime.mesh` with the axes its rows name"
+ },
+ "preset_zero1_replicated_resident_moe|data4_tp2|mixed": {
+  "refused": "sharding preset 'zero1-replicated-resident-moe': row 'components/optimizer_state' keys ['C_block', 'expert'] name no semantic axis any tensor consumes at this row (consumable: ['C', 'd_in', 'd_out', 'stack']); an unconsumed key silently replicates the tensor it meant to shard"
+ },
+ "preset_zero1_replicated_resident_moe|data4_tp2|tiling": {
+  "refused": "sharding preset 'zero1-replicated-resident-moe': row 'components/optimizer_state' keys ['C_block', 'expert'] name no semantic axis any tensor consumes at this row (consumable: ['C', 'd_in', 'd_out', 'stack']); an unconsumed key silently replicates the tensor it meant to shard"
+ },
+ "preset_zero1_replicated_resident_moe|replicate2_fsdp2_tp2|mixed": {
+  "refused": "sharding preset 'zero1-replicated-resident-moe' names mesh axes ['data'] the mesh does not declare (mesh axes: ['replicate', 'fsdp', 'tp']); a table binds only a mesh spelled in its own axis vocabulary \u2014 author `runtime.mesh` with the axes its rows name"
+ },
+ "preset_zero1_replicated_resident_moe|replicate2_fsdp2_tp2|tiling": {
+  "refused": "sharding preset 'zero1-replicated-resident-moe' names mesh axes ['data'] the mesh does not declare (mesh axes: ['replicate', 'fsdp', 'tp']); a table binds only a mesh spelled in its own axis vocabulary \u2014 author `runtime.mesh` with the axes its rows name"
+ },
+ "preset_zero1_replicated_resident_moe|replicate4_fsdp8_tp1|mixed": {
+  "refused": "sharding preset 'zero1-replicated-resident-moe' names mesh axes ['data'] the mesh does not declare (mesh axes: ['replicate', 'fsdp', 'tp']); a table binds only a mesh spelled in its own axis vocabulary \u2014 author `runtime.mesh` with the axes its rows name"
+ },
+ "preset_zero1_replicated_resident_moe|replicate4_fsdp8_tp1|tiling": {
+  "refused": "sharding preset 'zero1-replicated-resident-moe' names mesh axes ['data'] the mesh does not declare (mesh axes: ['replicate', 'fsdp', 'tp']); a table binds only a mesh spelled in its own axis vocabulary \u2014 author `runtime.mesh` with the axes its rows name"
+ },
+ "preset_zero1_replicated_resident|data4_tp2|mixed": {
+  "rules": {
+   "activations": {
+    "component": {
+     "label": "activations/component",
+     "rule": {
+      "C": [
+       "tp"
+      ],
+      "batch": [
+       "data"
+      ]
+     }
+    },
+    "external": {
+     "label": "activations/external",
+     "rule": {
+      "batch": [
+       "data"
+      ]
+     }
+    }
+   },
+   "ci_fn": "zero1-replicated-resident",
+   "components": {
+    "compute_weights": {
+     "label": "components/compute_weights",
+     "rule": {
+      "C": [
+       "tp"
+      ]
+     }
+    },
+    "faithfulness_deltas": {
+     "label": "components/faithfulness_deltas",
+     "rule": {
+      "d_in": [
+       "tp",
+       "data"
+      ]
+     }
+    },
+    "faithfulness_weights": {
+     "label": "components/faithfulness_weights",
+     "rule": {
+      "C": [
+       "tp",
+       "data"
+      ]
+     }
+    },
+    "group_census": {
+     "128x64x8": {
+      "factorization": {
+       "C": 8,
+       "d_in": 128,
+       "d_out": 64,
+       "kind": "DenseFactorization"
+      },
+      "stack_len": 1,
+      "stack_pad": 0
+     },
+     "64x32x8": {
+      "factorization": {
+       "C": 8,
+       "d_in": 64,
+       "d_out": 32,
+       "kind": "DenseFactorization"
+      },
+      "stack_len": 4,
+      "stack_pad": 0
+     }
+    },
+    "ns_compute": {
+     "label": "components/ns_compute",
+     "rule": {
+      "stack": [
+       "data"
+      ]
+     }
+    },
+    "operands": {
+     "label": "components/operands",
+     "rule": {
+      "C": [
+       "tp"
+      ]
+     }
+    },
+    "optimizer_state": {
+     "label": "components/optimizer_state",
+     "rule": {
+      "C": [
+       "tp",
+       "data"
+      ]
+     }
+    }
+   },
+   "mesh": {
+    "data": 4,
+    "tp": 2
+   },
+   "target": {
+    "column": {
+     "input": "activations/external",
+     "operand": {
+      "label": "target/column.operand",
+      "rule": {
+       "d_out": [
+        "tp"
+       ]
+      }
+     },
+     "output": "target/intermediate",
+     "persist": {
+      "label": "target/column.persist",
+      "rule": {
+       "d_out": [
+        "tp"
+       ]
+      }
+     }
+    },
+    "component": {
+     "input": "activations/external",
+     "output": "activations/external"
+    },
+    "embedding": {
+     "operand": {
+      "label": "target/embedding.operand",
+      "rule": {}
+     },
+     "persist": {
+      "label": "target/embedding.persist",
+      "rule": {}
+     }
+    },
+    "intermediate": {
+     "label": "target/intermediate",
+     "rule": {
+      "batch": [
+       "data"
+      ],
+      "feature": [
+       "tp"
+      ],
+      "kv_head": [
+       "tp"
+      ],
+      "q_head": [
+       "tp"
+      ]
+     }
+    },
+    "normalization": {
+     "label": "target/normalization",
+     "rule": {}
+    },
+    "output": {
+     "operand": {
+      "label": "target/output.operand",
+      "rule": {}
+     },
+     "persist": {
+      "label": "target/output.persist",
+      "rule": {}
+     }
+    },
+    "position_encoding": {
+     "label": "target/position_encoding",
+     "rule": {}
+    },
+    "row": {
+     "input": "target/intermediate",
+     "operand": {
+      "label": "target/row.operand",
+      "rule": {
+       "d_in": [
+        "tp"
+       ]
+      }
+     },
+     "output": "activations/external",
+     "persist": {
+      "label": "target/row.persist",
+      "rule": {
+       "d_in": [
+        "tp"
+       ]
+      }
+     }
+    }
+   }
+  }
+ },
+ "preset_zero1_replicated_resident|data4_tp2|tiling": {
+  "rules": {
+   "activations": {
+    "component": {
+     "label": "activations/component",
+     "rule": {
+      "C": [
+       "tp"
+      ],
+      "batch": [
+       "data"
+      ]
+     }
+    },
+    "external": {
+     "label": "activations/external",
+     "rule": {
+      "batch": [
+       "data"
+      ]
+     }
+    }
+   },
+   "ci_fn": "zero1-replicated-resident",
+   "components": {
+    "compute_weights": {
+     "label": "components/compute_weights",
+     "rule": {
+      "C": [
+       "tp"
+      ]
+     }
+    },
+    "faithfulness_deltas": {
+     "label": "components/faithfulness_deltas",
+     "rule": {
+      "d_in": [
+       "tp",
+       "data"
+      ]
+     }
+    },
+    "faithfulness_weights": {
+     "label": "components/faithfulness_weights",
+     "rule": {
+      "C": [
+       "tp",
+       "data"
+      ]
+     }
+    },
+    "group_census": {
+     "64x32x8": {
+      "factorization": {
+       "C": 8,
+       "d_in": 64,
+       "d_out": 32,
+       "kind": "DenseFactorization"
+      },
+      "stack_len": 4,
+      "stack_pad": 0
+     }
+    },
+    "ns_compute": {
+     "label": "components/ns_compute",
+     "rule": {
+      "stack": [
+       "data"
+      ]
+     }
+    },
+    "operands": {
+     "label": "components/operands",
+     "rule": {
+      "C": [
+       "tp"
+      ]
+     }
+    },
+    "optimizer_state": {
+     "label": "components/optimizer_state",
+     "rule": {
+      "C": [
+       "tp",
+       "data"
+      ]
+     }
+    }
+   },
+   "mesh": {
+    "data": 4,
+    "tp": 2
+   },
+   "target": {
+    "column": {
+     "input": "activations/external",
+     "operand": {
+      "label": "target/column.operand",
+      "rule": {
+       "d_out": [
+        "tp"
+       ]
+      }
+     },
+     "output": "target/intermediate",
+     "persist": {
+      "label": "target/column.persist",
+      "rule": {
+       "d_out": [
+        "tp"
+       ]
+      }
+     }
+    },
+    "component": {
+     "input": "activations/external",
+     "output": "activations/external"
+    },
+    "embedding": {
+     "operand": {
+      "label": "target/embedding.operand",
+      "rule": {}
+     },
+     "persist": {
+      "label": "target/embedding.persist",
+      "rule": {}
+     }
+    },
+    "intermediate": {
+     "label": "target/intermediate",
+     "rule": {
+      "batch": [
+       "data"
+      ],
+      "feature": [
+       "tp"
+      ],
+      "kv_head": [
+       "tp"
+      ],
+      "q_head": [
+       "tp"
+      ]
+     }
+    },
+    "normalization": {
+     "label": "target/normalization",
+     "rule": {}
+    },
+    "output": {
+     "operand": {
+      "label": "target/output.operand",
+      "rule": {}
+     },
+     "persist": {
+      "label": "target/output.persist",
+      "rule": {}
+     }
+    },
+    "position_encoding": {
+     "label": "target/position_encoding",
+     "rule": {}
+    },
+    "row": {
+     "input": "target/intermediate",
+     "operand": {
+      "label": "target/row.operand",
+      "rule": {
+       "d_in": [
+        "tp"
+       ]
+      }
+     },
+     "output": "activations/external",
+     "persist": {
+      "label": "target/row.persist",
+      "rule": {
+       "d_in": [
+        "tp"
+       ]
+      }
+     }
+    }
+   }
+  }
+ },
+ "preset_zero1_replicated_resident|replicate2_fsdp2_tp2|mixed": {
+  "refused": "sharding preset 'zero1-replicated-resident' names mesh axes ['data'] the mesh does not declare (mesh axes: ['replicate', 'fsdp', 'tp']); a table binds only a mesh spelled in its own axis vocabulary \u2014 author `runtime.mesh` with the axes its rows name"
+ },
+ "preset_zero1_replicated_resident|replicate2_fsdp2_tp2|tiling": {
+  "refused": "sharding preset 'zero1-replicated-resident' names mesh axes ['data'] the mesh does not declare (mesh axes: ['replicate', 'fsdp', 'tp']); a table binds only a mesh spelled in its own axis vocabulary \u2014 author `runtime.mesh` with the axes its rows name"
+ },
+ "preset_zero1_replicated_resident|replicate4_fsdp8_tp1|mixed": {
+  "refused": "sharding preset 'zero1-replicated-resident' names mesh axes ['data'] the mesh does not declare (mesh axes: ['replicate', 'fsdp', 'tp']); a table binds only a mesh spelled in its own axis vocabulary \u2014 author `runtime.mesh` with the axes its rows name"
+ },
+ "preset_zero1_replicated_resident|replicate4_fsdp8_tp1|tiling": {
+  "refused": "sharding preset 'zero1-replicated-resident' names mesh axes ['data'] the mesh does not declare (mesh axes: ['replicate', 'fsdp', 'tp']); a table binds only a mesh spelled in its own axis vocabulary \u2014 author `runtime.mesh` with the axes its rows name"
+ },
+ "preset_zero1|data4_tp2|mixed": {
+  "refused": "sharding preset 'zero1' names mesh axes ['fsdp', 'replicate'] the mesh does not declare (mesh axes: ['data', 'tp']); a table binds only a mesh spelled in its own axis vocabulary \u2014 author `runtime.mesh` with the axes its rows name"
+ },
+ "preset_zero1|data4_tp2|tiling": {
+  "refused": "sharding preset 'zero1' names mesh axes ['fsdp', 'replicate'] the mesh does not declare (mesh axes: ['data', 'tp']); a table binds only a mesh spelled in its own axis vocabulary \u2014 author `runtime.mesh` with the axes its rows name"
+ },
+ "preset_zero1|replicate2_fsdp2_tp2|mixed": {
+  "rules": {
+   "activations": {
+    "component": {
+     "label": "activations/component",
+     "rule": {
+      "C": [
+       "tp"
+      ],
+      "batch": [
+       "replicate",
+       "fsdp"
+      ]
+     }
+    },
+    "external": {
+     "label": "activations/external",
+     "rule": {
+      "batch": [
+       "replicate",
+       "fsdp"
+      ]
+     }
+    }
+   },
+   "ci_fn": "zero1",
+   "components": {
+    "compute_weights": {
+     "label": "components/compute_weights",
+     "rule": {
+      "C": [
+       "tp"
+      ],
+      "d_in": [
+       "fsdp"
+      ],
+      "d_out": [
+       "fsdp"
+      ]
      }
     },
     "faithfulness_deltas": {
@@ -3334,7 +6907,9 @@
        "tp",
        "replicate"
       ],
-      "d_out": "fsdp"
+      "d_out": [
+       "fsdp"
+      ]
      }
     },
     "faithfulness_weights": {
@@ -3344,24 +6919,50 @@
        "tp",
        "replicate"
       ],
-      "d_in": "fsdp",
-      "d_out": "fsdp"
+      "d_in": [
+       "fsdp"
+      ],
+      "d_out": [
+       "fsdp"
+      ]
      }
     },
-    "group_stack_lens": {
-     "128x64x8": 1,
-     "64x32x8": 4
+    "group_census": {
+     "128x64x8": {
+      "factorization": {
+       "C": 8,
+       "d_in": 128,
+       "d_out": 64,
+       "kind": "DenseFactorization"
+      },
+      "stack_len": 1,
+      "stack_pad": 0
+     },
+     "64x32x8": {
+      "factorization": {
+       "C": 8,
+       "d_in": 64,
+       "d_out": 32,
+       "kind": "DenseFactorization"
+      },
+      "stack_len": 4,
+      "stack_pad": 0
+     }
     },
     "ns_compute": {
      "label": "components/ns_compute",
      "rule": {
-      "stack": "replicate"
+      "stack": [
+       "replicate"
+      ]
      }
     },
     "operands": {
      "label": "components/operands",
      "rule": {
-      "C": "tp"
+      "C": [
+       "tp"
+      ]
      }
     },
     "optimizer_state": {
@@ -3371,8 +6972,12 @@
        "tp",
        "replicate"
       ],
-      "d_in": "fsdp",
-      "d_out": "fsdp"
+      "d_in": [
+       "fsdp"
+      ],
+      "d_out": [
+       "fsdp"
+      ]
      }
     }
    },
@@ -3387,15 +6992,21 @@
      "operand": {
       "label": "target/column.operand",
       "rule": {
-       "d_out": "tp"
+       "d_out": [
+        "tp"
+       ]
       }
      },
      "output": "target/intermediate",
      "persist": {
       "label": "target/column.persist",
       "rule": {
-       "d_in": "fsdp",
-       "d_out": "tp"
+       "d_in": [
+        "fsdp"
+       ],
+       "d_out": [
+        "tp"
+       ]
       }
      }
     },
@@ -3411,7 +7022,9 @@
      "persist": {
       "label": "target/embedding.persist",
       "rule": {
-       "d_model": "fsdp"
+       "d_model": [
+        "fsdp"
+       ]
       }
      }
     },
@@ -3422,9 +7035,15 @@
        "replicate",
        "fsdp"
       ],
-      "feature": "tp",
-      "kv_head": "tp",
-      "q_head": "tp"
+      "feature": [
+       "tp"
+      ],
+      "kv_head": [
+       "tp"
+      ],
+      "q_head": [
+       "tp"
+      ]
      }
     },
     "normalization": {
@@ -3439,7 +7058,9 @@
      "persist": {
       "label": "target/output.persist",
       "rule": {
-       "d_model": "fsdp"
+       "d_model": [
+        "fsdp"
+       ]
       }
      }
     },
@@ -3452,15 +7073,21 @@
      "operand": {
       "label": "target/row.operand",
       "rule": {
-       "d_in": "tp"
+       "d_in": [
+        "tp"
+       ]
       }
      },
      "output": "activations/external",
      "persist": {
       "label": "target/row.persist",
       "rule": {
-       "d_in": "tp",
-       "d_out": "fsdp"
+       "d_in": [
+        "tp"
+       ],
+       "d_out": [
+        "fsdp"
+       ]
       }
      }
     }
@@ -3473,7 +7100,9 @@
     "component": {
      "label": "activations/component",
      "rule": {
-      "C": "tp",
+      "C": [
+       "tp"
+      ],
       "batch": [
        "replicate",
        "fsdp"
@@ -3490,165 +7119,20 @@
      }
     }
    },
-   "ci_fn": {
-    "activations": {
-     "label": "ci_fn/activations",
-     "rule": {
-      "C": "tp",
-      "batch": [
-       "replicate",
-       "fsdp"
-      ],
-      "ffn_hidden": "tp",
-      "input": "tp",
-      "kv_head": "tp",
-      "q_head": "tp"
-     }
-    },
-    "attention": {
-     "compute_weights": {
-      "label": "ci_fn/attention.compute_weights",
-      "rule": {
-       "d_model": "fsdp",
-       "kv_head": "tp",
-       "q_head": "tp"
-      }
-     },
-     "ns_compute": {
-      "label": "ci_fn/attention.ns_compute",
-      "rule": {
-       "stack": "replicate"
-      }
-     },
-     "operands": {
-      "label": "ci_fn/attention.operands",
-      "rule": {
-       "kv_head": "tp",
-       "q_head": "tp"
-      }
-     },
-     "optimizer_state": {
-      "label": "ci_fn/attention.optimizer_state",
-      "rule": {
-       "d_model": [
-        "fsdp",
-        "replicate"
-       ],
-       "kv_head": "tp",
-       "q_head": "tp"
-      }
-     }
-    },
-    "ffn": {
-     "compute_weights": {
-      "label": "ci_fn/ffn.compute_weights",
-      "rule": {
-       "ffn_hidden": [
-        "tp",
-        "fsdp"
-       ]
-      }
-     },
-     "ns_compute": {
-      "label": "ci_fn/ffn.ns_compute",
-      "rule": {
-       "stack": "replicate"
-      }
-     },
-     "operands": {
-      "label": "ci_fn/ffn.operands",
-      "rule": {
-       "ffn_hidden": "tp"
-      }
-     },
-     "optimizer_state": {
-      "label": "ci_fn/ffn.optimizer_state",
-      "rule": {
-       "ffn_hidden": [
-        "tp",
-        "fsdp",
-        "replicate"
-       ]
-      }
-     }
-    },
-    "input": {
-     "compute_weights": {
-      "label": "ci_fn/input.compute_weights",
-      "rule": {
-       "d_model": "fsdp",
-       "input": "tp"
-      }
-     },
-     "ns_compute": {
-      "label": "ci_fn/input.ns_compute",
-      "rule": {
-       "stack": "replicate"
-      }
-     },
-     "operands": {
-      "label": "ci_fn/input.operands",
-      "rule": {
-       "input": "tp"
-      }
-     },
-     "optimizer_state": {
-      "label": "ci_fn/input.optimizer_state",
-      "rule": {
-       "d_model": [
-        "fsdp",
-        "replicate"
-       ],
-       "input": "tp"
-      }
-     }
-    },
-    "output": {
-     "compute_weights": {
-      "label": "ci_fn/output.compute_weights",
-      "rule": {
-       "C": "tp",
-       "d_model": "fsdp"
-      }
-     },
-     "ns_compute": {
-      "label": "ci_fn/output.ns_compute",
-      "rule": {
-       "stack": "replicate"
-      }
-     },
-     "operands": {
-      "label": "ci_fn/output.operands",
-      "rule": {
-       "C": "tp"
-      }
-     },
-     "optimizer_state": {
-      "label": "ci_fn/output.optimizer_state",
-      "rule": {
-       "C": "tp",
-       "d_model": [
-        "fsdp",
-        "replicate"
-       ]
-      }
-     }
-    },
-    "vectors": {
-     "label": "ci_fn/vectors",
-     "rule": {
-      "C": "tp",
-      "ffn_hidden": "tp"
-     }
-    }
-   },
+   "ci_fn": "zero1",
    "components": {
     "compute_weights": {
      "label": "components/compute_weights",
      "rule": {
-      "C": "tp",
-      "d_in": "fsdp",
-      "d_out": "fsdp"
+      "C": [
+       "tp"
+      ],
+      "d_in": [
+       "fsdp"
+      ],
+      "d_out": [
+       "fsdp"
+      ]
      }
     },
     "faithfulness_deltas": {
@@ -3658,7 +7142,9 @@
        "tp",
        "replicate"
       ],
-      "d_out": "fsdp"
+      "d_out": [
+       "fsdp"
+      ]
      }
     },
     "faithfulness_weights": {
@@ -3668,23 +7154,40 @@
        "tp",
        "replicate"
       ],
-      "d_in": "fsdp",
-      "d_out": "fsdp"
+      "d_in": [
+       "fsdp"
+      ],
+      "d_out": [
+       "fsdp"
+      ]
      }
     },
-    "group_stack_lens": {
-     "64x32x8": 4
+    "group_census": {
+     "64x32x8": {
+      "factorization": {
+       "C": 8,
+       "d_in": 64,
+       "d_out": 32,
+       "kind": "DenseFactorization"
+      },
+      "stack_len": 4,
+      "stack_pad": 0
+     }
     },
     "ns_compute": {
      "label": "components/ns_compute",
      "rule": {
-      "stack": "replicate"
+      "stack": [
+       "replicate"
+      ]
      }
     },
     "operands": {
      "label": "components/operands",
      "rule": {
-      "C": "tp"
+      "C": [
+       "tp"
+      ]
      }
     },
     "optimizer_state": {
@@ -3694,8 +7197,12 @@
        "tp",
        "replicate"
       ],
-      "d_in": "fsdp",
-      "d_out": "fsdp"
+      "d_in": [
+       "fsdp"
+      ],
+      "d_out": [
+       "fsdp"
+      ]
      }
     }
    },
@@ -3710,15 +7217,21 @@
      "operand": {
       "label": "target/column.operand",
       "rule": {
-       "d_out": "tp"
+       "d_out": [
+        "tp"
+       ]
       }
      },
      "output": "target/intermediate",
      "persist": {
       "label": "target/column.persist",
       "rule": {
-       "d_in": "fsdp",
-       "d_out": "tp"
+       "d_in": [
+        "fsdp"
+       ],
+       "d_out": [
+        "tp"
+       ]
       }
      }
     },
@@ -3734,7 +7247,9 @@
      "persist": {
       "label": "target/embedding.persist",
       "rule": {
-       "d_model": "fsdp"
+       "d_model": [
+        "fsdp"
+       ]
       }
      }
     },
@@ -3745,9 +7260,15 @@
        "replicate",
        "fsdp"
       ],
-      "feature": "tp",
-      "kv_head": "tp",
-      "q_head": "tp"
+      "feature": [
+       "tp"
+      ],
+      "kv_head": [
+       "tp"
+      ],
+      "q_head": [
+       "tp"
+      ]
      }
     },
     "normalization": {
@@ -3762,7 +7283,9 @@
      "persist": {
       "label": "target/output.persist",
       "rule": {
-       "d_model": "fsdp"
+       "d_model": [
+        "fsdp"
+       ]
       }
      }
     },
@@ -3775,15 +7298,21 @@
      "operand": {
       "label": "target/row.operand",
       "rule": {
-       "d_in": "tp"
+       "d_in": [
+        "tp"
+       ]
       }
      },
      "output": "activations/external",
      "persist": {
       "label": "target/row.persist",
       "rule": {
-       "d_in": "tp",
-       "d_out": "fsdp"
+       "d_in": [
+        "tp"
+       ],
+       "d_out": [
+        "fsdp"
+       ]
       }
      }
     }
@@ -3796,7 +7325,9 @@
     "component": {
      "label": "activations/component",
      "rule": {
-      "C": "tp",
+      "C": [
+       "tp"
+      ],
       "batch": [
        "replicate",
        "fsdp"
@@ -3813,165 +7344,20 @@
      }
     }
    },
-   "ci_fn": {
-    "activations": {
-     "label": "ci_fn/activations",
-     "rule": {
-      "C": "tp",
-      "batch": [
-       "replicate",
-       "fsdp"
-      ],
-      "ffn_hidden": "tp",
-      "input": "tp",
-      "kv_head": "tp",
-      "q_head": "tp"
-     }
-    },
-    "attention": {
-     "compute_weights": {
-      "label": "ci_fn/attention.compute_weights",
-      "rule": {
-       "d_model": "fsdp",
-       "kv_head": "tp",
-       "q_head": "tp"
-      }
-     },
-     "ns_compute": {
-      "label": "ci_fn/attention.ns_compute",
-      "rule": {
-       "stack": "replicate"
-      }
-     },
-     "operands": {
-      "label": "ci_fn/attention.operands",
-      "rule": {
-       "kv_head": "tp",
-       "q_head": "tp"
-      }
-     },
-     "optimizer_state": {
-      "label": "ci_fn/attention.optimizer_state",
-      "rule": {
-       "d_model": [
-        "fsdp",
-        "replicate"
-       ],
-       "kv_head": "tp",
-       "q_head": "tp"
-      }
-     }
-    },
-    "ffn": {
-     "compute_weights": {
-      "label": "ci_fn/ffn.compute_weights",
-      "rule": {
-       "ffn_hidden": [
-        "tp",
-        "fsdp"
-       ]
-      }
-     },
-     "ns_compute": {
-      "label": "ci_fn/ffn.ns_compute",
-      "rule": {
-       "stack": "replicate"
-      }
-     },
-     "operands": {
-      "label": "ci_fn/ffn.operands",
-      "rule": {
-       "ffn_hidden": "tp"
-      }
-     },
-     "optimizer_state": {
-      "label": "ci_fn/ffn.optimizer_state",
-      "rule": {
-       "ffn_hidden": [
-        "tp",
-        "fsdp",
-        "replicate"
-       ]
-      }
-     }
-    },
-    "input": {
-     "compute_weights": {
-      "label": "ci_fn/input.compute_weights",
-      "rule": {
-       "d_model": "fsdp",
-       "input": "tp"
-      }
-     },
-     "ns_compute": {
-      "label": "ci_fn/input.ns_compute",
-      "rule": {
-       "stack": "replicate"
-      }
-     },
-     "operands": {
-      "label": "ci_fn/input.operands",
-      "rule": {
-       "input": "tp"
-      }
-     },
-     "optimizer_state": {
-      "label": "ci_fn/input.optimizer_state",
-      "rule": {
-       "d_model": [
-        "fsdp",
-        "replicate"
-       ],
-       "input": "tp"
-      }
-     }
-    },
-    "output": {
-     "compute_weights": {
-      "label": "ci_fn/output.compute_weights",
-      "rule": {
-       "C": "tp",
-       "d_model": "fsdp"
-      }
-     },
-     "ns_compute": {
-      "label": "ci_fn/output.ns_compute",
-      "rule": {
-       "stack": "replicate"
-      }
-     },
-     "operands": {
-      "label": "ci_fn/output.operands",
-      "rule": {
-       "C": "tp"
-      }
-     },
-     "optimizer_state": {
-      "label": "ci_fn/output.optimizer_state",
-      "rule": {
-       "C": "tp",
-       "d_model": [
-        "fsdp",
-        "replicate"
-       ]
-      }
-     }
-    },
-    "vectors": {
-     "label": "ci_fn/vectors",
-     "rule": {
-      "C": "tp",
-      "ffn_hidden": "tp"
-     }
-    }
-   },
+   "ci_fn": "zero1",
    "components": {
     "compute_weights": {
      "label": "components/compute_weights",
      "rule": {
-      "C": "tp",
-      "d_in": "fsdp",
-      "d_out": "fsdp"
+      "C": [
+       "tp"
+      ],
+      "d_in": [
+       "fsdp"
+      ],
+      "d_out": [
+       "fsdp"
+      ]
      }
     },
     "faithfulness_deltas": {
@@ -3981,7 +7367,9 @@
        "tp",
        "replicate"
       ],
-      "d_out": "fsdp"
+      "d_out": [
+       "fsdp"
+      ]
      }
     },
     "faithfulness_weights": {
@@ -3991,24 +7379,50 @@
        "tp",
        "replicate"
       ],
-      "d_in": "fsdp",
-      "d_out": "fsdp"
+      "d_in": [
+       "fsdp"
+      ],
+      "d_out": [
+       "fsdp"
+      ]
      }
     },
-    "group_stack_lens": {
-     "128x64x8": 1,
-     "64x32x8": 4
+    "group_census": {
+     "128x64x8": {
+      "factorization": {
+       "C": 8,
+       "d_in": 128,
+       "d_out": 64,
+       "kind": "DenseFactorization"
+      },
+      "stack_len": 1,
+      "stack_pad": 0
+     },
+     "64x32x8": {
+      "factorization": {
+       "C": 8,
+       "d_in": 64,
+       "d_out": 32,
+       "kind": "DenseFactorization"
+      },
+      "stack_len": 4,
+      "stack_pad": 0
+     }
     },
     "ns_compute": {
      "label": "components/ns_compute",
      "rule": {
-      "stack": "replicate"
+      "stack": [
+       "replicate"
+      ]
      }
     },
     "operands": {
      "label": "components/operands",
      "rule": {
-      "C": "tp"
+      "C": [
+       "tp"
+      ]
      }
     },
     "optimizer_state": {
@@ -4018,8 +7432,12 @@
        "tp",
        "replicate"
       ],
-      "d_in": "fsdp",
-      "d_out": "fsdp"
+      "d_in": [
+       "fsdp"
+      ],
+      "d_out": [
+       "fsdp"
+      ]
      }
     }
    },
@@ -4034,15 +7452,21 @@
      "operand": {
       "label": "target/column.operand",
       "rule": {
-       "d_out": "tp"
+       "d_out": [
+        "tp"
+       ]
       }
      },
      "output": "target/intermediate",
      "persist": {
       "label": "target/column.persist",
       "rule": {
-       "d_in": "fsdp",
-       "d_out": "tp"
+       "d_in": [
+        "fsdp"
+       ],
+       "d_out": [
+        "tp"
+       ]
       }
      }
     },
@@ -4058,7 +7482,9 @@
      "persist": {
       "label": "target/embedding.persist",
       "rule": {
-       "d_model": "fsdp"
+       "d_model": [
+        "fsdp"
+       ]
       }
      }
     },
@@ -4069,9 +7495,15 @@
        "replicate",
        "fsdp"
       ],
-      "feature": "tp",
-      "kv_head": "tp",
-      "q_head": "tp"
+      "feature": [
+       "tp"
+      ],
+      "kv_head": [
+       "tp"
+      ],
+      "q_head": [
+       "tp"
+      ]
      }
     },
     "normalization": {
@@ -4086,7 +7518,9 @@
      "persist": {
       "label": "target/output.persist",
       "rule": {
-       "d_model": "fsdp"
+       "d_model": [
+        "fsdp"
+       ]
       }
      }
     },
@@ -4099,15 +7533,21 @@
      "operand": {
       "label": "target/row.operand",
       "rule": {
-       "d_in": "tp"
+       "d_in": [
+        "tp"
+       ]
       }
      },
      "output": "activations/external",
      "persist": {
       "label": "target/row.persist",
       "rule": {
-       "d_in": "tp",
-       "d_out": "fsdp"
+       "d_in": [
+        "tp"
+       ],
+       "d_out": [
+        "fsdp"
+       ]
       }
      }
     }
@@ -4120,7 +7560,9 @@
     "component": {
      "label": "activations/component",
      "rule": {
-      "C": "tp",
+      "C": [
+       "tp"
+      ],
       "batch": [
        "replicate",
        "fsdp"
@@ -4137,165 +7579,20 @@
      }
     }
    },
-   "ci_fn": {
-    "activations": {
-     "label": "ci_fn/activations",
-     "rule": {
-      "C": "tp",
-      "batch": [
-       "replicate",
-       "fsdp"
-      ],
-      "ffn_hidden": "tp",
-      "input": "tp",
-      "kv_head": "tp",
-      "q_head": "tp"
-     }
-    },
-    "attention": {
-     "compute_weights": {
-      "label": "ci_fn/attention.compute_weights",
-      "rule": {
-       "d_model": "fsdp",
-       "kv_head": "tp",
-       "q_head": "tp"
-      }
-     },
-     "ns_compute": {
-      "label": "ci_fn/attention.ns_compute",
-      "rule": {
-       "stack": "replicate"
-      }
-     },
-     "operands": {
-      "label": "ci_fn/attention.operands",
-      "rule": {
-       "kv_head": "tp",
-       "q_head": "tp"
-      }
-     },
-     "optimizer_state": {
-      "label": "ci_fn/attention.optimizer_state",
-      "rule": {
-       "d_model": [
-        "fsdp",
-        "replicate"
-       ],
-       "kv_head": "tp",
-       "q_head": "tp"
-      }
-     }
-    },
-    "ffn": {
-     "compute_weights": {
-      "label": "ci_fn/ffn.compute_weights",
-      "rule": {
-       "ffn_hidden": [
-        "tp",
-        "fsdp"
-       ]
-      }
-     },
-     "ns_compute": {
-      "label": "ci_fn/ffn.ns_compute",
-      "rule": {
-       "stack": "replicate"
-      }
-     },
-     "operands": {
-      "label": "ci_fn/ffn.operands",
-      "rule": {
-       "ffn_hidden": "tp"
-      }
-     },
-     "optimizer_state": {
-      "label": "ci_fn/ffn.optimizer_state",
-      "rule": {
-       "ffn_hidden": [
-        "tp",
-        "fsdp",
-        "replicate"
-       ]
-      }
-     }
-    },
-    "input": {
-     "compute_weights": {
-      "label": "ci_fn/input.compute_weights",
-      "rule": {
-       "d_model": "fsdp",
-       "input": "tp"
-      }
-     },
-     "ns_compute": {
-      "label": "ci_fn/input.ns_compute",
-      "rule": {
-       "stack": "replicate"
-      }
-     },
-     "operands": {
-      "label": "ci_fn/input.operands",
-      "rule": {
-       "input": "tp"
-      }
-     },
-     "optimizer_state": {
-      "label": "ci_fn/input.optimizer_state",
-      "rule": {
-       "d_model": [
-        "fsdp",
-        "replicate"
-       ],
-       "input": "tp"
-      }
-     }
-    },
-    "output": {
-     "compute_weights": {
-      "label": "ci_fn/output.compute_weights",
-      "rule": {
-       "C": "tp",
-       "d_model": "fsdp"
-      }
-     },
-     "ns_compute": {
-      "label": "ci_fn/output.ns_compute",
-      "rule": {
-       "stack": "replicate"
-      }
-     },
-     "operands": {
-      "label": "ci_fn/output.operands",
-      "rule": {
-       "C": "tp"
-      }
-     },
-     "optimizer_state": {
-      "label": "ci_fn/output.optimizer_state",
-      "rule": {
-       "C": "tp",
-       "d_model": [
-        "fsdp",
-        "replicate"
-       ]
-      }
-     }
-    },
-    "vectors": {
-     "label": "ci_fn/vectors",
-     "rule": {
-      "C": "tp",
-      "ffn_hidden": "tp"
-     }
-    }
-   },
+   "ci_fn": "zero1",
    "components": {
     "compute_weights": {
      "label": "components/compute_weights",
      "rule": {
-      "C": "tp",
-      "d_in": "fsdp",
-      "d_out": "fsdp"
+      "C": [
+       "tp"
+      ],
+      "d_in": [
+       "fsdp"
+      ],
+      "d_out": [
+       "fsdp"
+      ]
      }
     },
     "faithfulness_deltas": {
@@ -4305,7 +7602,9 @@
        "tp",
        "replicate"
       ],
-      "d_out": "fsdp"
+      "d_out": [
+       "fsdp"
+      ]
      }
     },
     "faithfulness_weights": {
@@ -4315,23 +7614,40 @@
        "tp",
        "replicate"
       ],
-      "d_in": "fsdp",
-      "d_out": "fsdp"
+      "d_in": [
+       "fsdp"
+      ],
+      "d_out": [
+       "fsdp"
+      ]
      }
     },
-    "group_stack_lens": {
-     "64x32x8": 4
+    "group_census": {
+     "64x32x8": {
+      "factorization": {
+       "C": 8,
+       "d_in": 64,
+       "d_out": 32,
+       "kind": "DenseFactorization"
+      },
+      "stack_len": 4,
+      "stack_pad": 0
+     }
     },
     "ns_compute": {
      "label": "components/ns_compute",
      "rule": {
-      "stack": "replicate"
+      "stack": [
+       "replicate"
+      ]
      }
     },
     "operands": {
      "label": "components/operands",
      "rule": {
-      "C": "tp"
+      "C": [
+       "tp"
+      ]
      }
     },
     "optimizer_state": {
@@ -4341,8 +7657,12 @@
        "tp",
        "replicate"
       ],
-      "d_in": "fsdp",
-      "d_out": "fsdp"
+      "d_in": [
+       "fsdp"
+      ],
+      "d_out": [
+       "fsdp"
+      ]
      }
     }
    },
@@ -4357,15 +7677,21 @@
      "operand": {
       "label": "target/column.operand",
       "rule": {
-       "d_out": "tp"
+       "d_out": [
+        "tp"
+       ]
       }
      },
      "output": "target/intermediate",
      "persist": {
       "label": "target/column.persist",
       "rule": {
-       "d_in": "fsdp",
-       "d_out": "tp"
+       "d_in": [
+        "fsdp"
+       ],
+       "d_out": [
+        "tp"
+       ]
       }
      }
     },
@@ -4381,7 +7707,9 @@
      "persist": {
       "label": "target/embedding.persist",
       "rule": {
-       "d_model": "fsdp"
+       "d_model": [
+        "fsdp"
+       ]
       }
      }
     },
@@ -4392,9 +7720,15 @@
        "replicate",
        "fsdp"
       ],
-      "feature": "tp",
-      "kv_head": "tp",
-      "q_head": "tp"
+      "feature": [
+       "tp"
+      ],
+      "kv_head": [
+       "tp"
+      ],
+      "q_head": [
+       "tp"
+      ]
      }
     },
     "normalization": {
@@ -4409,7 +7743,9 @@
      "persist": {
       "label": "target/output.persist",
       "rule": {
-       "d_model": "fsdp"
+       "d_model": [
+        "fsdp"
+       ]
       }
      }
     },
@@ -4422,15 +7758,21 @@
      "operand": {
       "label": "target/row.operand",
       "rule": {
-       "d_in": "tp"
+       "d_in": [
+        "tp"
+       ]
       }
      },
      "output": "activations/external",
      "persist": {
       "label": "target/row.persist",
       "rule": {
-       "d_in": "tp",
-       "d_out": "fsdp"
+       "d_in": [
+        "tp"
+       ],
+       "d_out": [
+        "fsdp"
+       ]
       }
      }
     }

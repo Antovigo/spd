@@ -17,6 +17,7 @@ arches (`ci_fn.py`) and the resolved flat sites.
 
 import copy
 from collections.abc import Sequence
+from itertools import pairwise
 from pathlib import Path
 from typing import Annotated, Any, ClassVar, Literal, Self
 
@@ -36,6 +37,7 @@ from param_decomp.core.axes import MeshAxis, SemanticAxis
 from param_decomp.core.base_config import BaseConfig, Probability
 from param_decomp.core.nonlinearity import NonlinearityUnitKind
 from param_decomp.core.schedule import ScheduleConfig
+from param_decomp.metric_schema import MetricSchema
 
 # ---------------------------------------------------------------------------
 # Routing
@@ -93,41 +95,34 @@ type LossCoeff = float | ScheduleConfig
 evaluated at the current step (the `gamma` pattern) — so warmups, anneals, and
 0-until-step activation gates are authorable per term. The float arm is not a parse-time
 spelling of the constant schedule: it also carries the values a schedule's positive
-`max_val` cannot (a plain 0.0), so consumers resolve via `losses.coeff_at`."""
+`max_val` cannot (a plain 0.0), so the trainer carries it as a `RuntimeSchedule` with a traced magnitude."""
 
 
-class LossMetricConfig(BaseConfig):
-    """Pydantic config for a metric that can also be used as a training loss.
+class TrainingLossConfig(BaseConfig):
+    """A loss weighted into the training objective by `coeff`.
 
-    `coeff` is required when this metric is listed under `loss_metrics` and must be null
-    when listed under `eval.metrics` — both directions are asserted
-    (`PDConfig.validate_loss_metrics`;
-    `param_decomp.experiments.eval_config.validate_eval_metrics`). It is a `LossCoeff`:
-    a bare float or a step-evaluated `ScheduleConfig`.
+    `name` overrides the serialized `type` as this instance's logged identity, so two
+    instances of one loss type can train side by side. Leave `None` (the default) and the
+    loss's tag is used."""
 
-    `name` overrides the class name as this instance's identity (`Metric.instance_key`),
-    letting the same metric class appear under both `loss_metrics` and `eval.metrics`
-    with different settings — e.g. a 1-step PGD training loss alongside a 20-step PGD
-    eval probe. Leave `None` (the default) and the class name is used.
-    """
-
-    coeff: LossCoeff | None = None
     name: str | None = None
+    coeff: LossCoeff
 
 
 class BatchHiddenActsNormalization(BaseConfig):
-    """One ratio per point over the whole batch: `Σ_{b,t,d}(m−c)² / Σ_{b,t,d}c²` (SPEC S35's
-    original form). Every position's ABSOLUTE squared error is pooled against the batch's total
-    clean energy, so a position holding most of that energy (the BOS massive activation at
-    Llama's first and last MLP outputs) is the whole measurement and the others are silenced."""
+    """One ratio per point over the whole batch: `Σ_{b,t,d}(m−c)² / Σ_{b,t,d}c²` (the
+    original relative-squared-error form). Every position's ABSOLUTE squared error is pooled
+    against the batch's total clean energy, so a position holding most of that energy (the BOS
+    massive activation at Llama's first and last MLP outputs) is the whole measurement and the
+    others are silenced."""
 
     kind: Literal["batch"] = "batch"
 
 
 class PerPositionHiddenActsNormalization(BaseConfig):
     """One ratio per (batch, position) entry, then the mean over entries:
-    `mean_{b,t} ‖m−c‖²_{b,t} / (‖c‖²_{b,t} + floor_fraction · median_{b,t}‖c‖²)` (SPEC S35,
-    amended 2026-09-11). Each position is measured against its own clean scale, so no
+    `mean_{b,t} ‖m−c‖²_{b,t} / (‖c‖²_{b,t} + floor_fraction · median_{b,t}‖c‖²)` (local
+    amendment 2026-09-11). Each position is measured against its own clean scale, so no
     position can silence another, and the mean over entries keeps the per-token weight at
     `1/(B·T)` — the same normalization the KL and importance-minimality terms carry, so the
     recon/sparsity balance stays batch- and stream-invariant. The floor is a fraction of the
@@ -147,72 +142,58 @@ class PerPositionHiddenActsNormalization(BaseConfig):
 HiddenActsNormalization = Annotated[
     BatchHiddenActsNormalization | PerPositionHiddenActsNormalization, Discriminator("kind")
 ]
-"""How a hidden-activation point's relative squared error pools over positions (S35)."""
+"""How a relative-squared-error comparison pools over positions."""
 
 BATCH_HIDDEN_ACTS_NORMALIZATION = BatchHiddenActsNormalization()
-"""The default (original S35) normalization, as a module-level singleton for argument defaults."""
+"""The default (batch-pooled) normalization, as a module-level singleton for argument defaults."""
 
 
-class HiddenActsReconstruction(BaseConfig):
-    """The auxiliary relative-MSE part of one recon loss (SPEC S35): how hard, and measured
-    where. Both are required together — a strength with nowhere to measure, or measurement
-    points nothing pulls on, are equally meaningless, so they are one object rather than two
-    optional fields. Unlike the eval-only hidden-acts metrics, this compares configured activation
-    points by relative error and contributes to the optimization objective."""
+class CaptureReconstruction(BaseConfig):
+    """One target-owned capture and the numerical distance applied to its paired values.
 
-    coeff: PositiveFloat | ScheduleConfig = Field(
-        ...,
-        description=(
-            "Strength RELATIVE to the e2e loss: each forward uses "
-            "`e2e + coeff * mean_points(relative squared error)`. A training term's outer "
-            "`coeff` scales that sum; the eval probe reports it directly (and, having no "
-            "training step to read, takes only the float arm). A `ScheduleConfig` is "
-            "evaluated at the current step like every other loss coefficient."
-        ),
-    )
-    points: tuple[str, ...] = Field(
-        ...,
-        description=(
-            "Activations compared between the masked and clean forwards, named in the TARGET's "
-            "own tap vocabulary — e.g. `resid.19` for the residual stream leaving block 18. "
-            "There is no default: which internal activations matter is a question about the "
-            "experiment, not something the trainer should guess. Each unique selected physical "
-            "value is retained once; the target owns how those values are materialized."
-        ),
-    )
-    normalization: HiddenActsNormalization = Field(
-        default_factory=BatchHiddenActsNormalization,
-        description=(
-            "How each point's relative squared error pools over positions: `batch` (one ratio "
-            "over the whole batch, the original S35 form) or `per_position` (each entry against "
-            "its own clean scale, then the mean). Default `batch`, byte-inert for existing runs."
-        ),
-    )
+    `normalization` refines `relative_squared_error` only: `batch` (the default) is one ratio
+    over the whole batch, `per_position` one ratio per (batch, position) entry, averaged."""
+
+    capture: str = Field(min_length=1)
+    distance: Literal["relative_squared_error", "categorical_kl_from_logits"]
+    normalization: HiddenActsNormalization = Field(default_factory=BatchHiddenActsNormalization)
 
     @model_validator(mode="after")
-    def validate_points(self) -> Self:
-        assert self.points, "hidden_acts_reconstruction.points must name at least one activation"
-        assert len(set(self.points)) == len(self.points), f"duplicate points: {self.points}"
+    def validate_normalization_distance(self) -> Self:
+        assert self.distance == "relative_squared_error" or isinstance(
+            self.normalization, BatchHiddenActsNormalization
+        ), f"{self.capture}: `normalization` refines relative_squared_error only"
         return self
 
 
-class HiddenActsReconstructionMixin(BaseConfig):
-    """Adds an optional auxiliary relative-MSE term to a recon loss (SPEC S35), pulling each
-    masked forward toward the clean forward at named internal activations rather than only at
-    the output. Per-point division by the clean activation's own squared scale keeps points of
-    different magnitude and width comparable; the mean over points keeps the coefficient's
-    meaning stable as the point count changes.
+class AuxiliaryReconstructionConfig(BaseConfig):
+    """Add `coeff * mean(comparisons)` to the same masked output reconstruction."""
 
-    Self-contained on the loss, like every other loss-specific input (routing, `n_samples`, the
-    PPGD optimizer): a recon term carries everything needed to compute it. In a transformer the
-    points are typically residual-stream boundaries after each block, but the loss itself is
-    architecture-neutral. Adversarial recon losses ascend this same combined objective. `None`
-    (default) disables the auxiliary part for this loss."""
+    name: str = Field(min_length=1, pattern=r"^[^/]+$")
+    coeff: NonNegativeFloat | ScheduleConfig
+    comparisons: tuple[CaptureReconstruction, ...] = Field(min_length=1)
 
-    hidden_acts_reconstruction: HiddenActsReconstruction | None = None
+    @model_validator(mode="after")
+    def validate_comparisons(self) -> Self:
+        assert self.name != "e2e", "e2e names the model-output comparison"
+        captures = tuple(comparison.capture for comparison in self.comparisons)
+        assert len(set(captures)) == len(captures), f"duplicate comparison captures: {captures}"
+        return self
 
 
-class FaithfulnessLossConfig(LossMetricConfig):
+class ReconstructionAuxiliariesMixin(BaseConfig):
+    """Named comparison groups sharing their reconstruction term's masks and draws."""
+
+    auxiliaries: tuple[AuxiliaryReconstructionConfig, ...] = ()
+
+    @model_validator(mode="after")
+    def validate_auxiliary_names(self) -> Self:
+        names = tuple(auxiliary.name for auxiliary in self.auxiliaries)
+        assert len(set(names)) == len(names), f"duplicate auxiliary names: {names}"
+        return self
+
+
+class FaithfulnessLossConfig(TrainingLossConfig):
     """Mean per-site squared weight error, relative to each frozen target matrix."""
 
     type: Literal["FaithfulnessLoss"] = "FaithfulnessLoss"
@@ -232,13 +213,13 @@ class FrequencyMinimalityConfig(BaseConfig):
 
     `ema_halflife_steps` (when set) evaluates the penalty at a debiased exponential moving
     average of `f_c` across steps instead of the noisy single-batch estimate, with the
-    gradient kept at the single-batch scale so `coeff` transfers between the two modes
-    (SPEC S8''). Capped at `1e6`: a halflife past the run's length already degenerates
+    gradient kept at the single-batch scale so `coeff` transfers between the two modes. Capped
+    at `1e6`: a halflife past the run's length already degenerates
     to a debiased running mean, and fp32 rounding drift in the recurrence grows with the
     halflife (pinned by `test_ema_long_scan_rounding_bounded`). While frequencies move
     faster than the halflife the smoothed penalty lags the batch diagnostic (logged
     alongside as `FrequencyMinimalityLoss_batch`) — estimator convergence, not
-    instability (S8'').
+    instability.
     """
 
     coeff: NonNegativeFloat | ScheduleConfig
@@ -247,50 +228,49 @@ class FrequencyMinimalityConfig(BaseConfig):
     )
     """`"auto"` resolves `a'` to each pass's OWN `B·T`, so `a' · f_c` is the raw firing
     count — the torch oracle's form, and the only spelling correct on both tPD passes at
-    once: SPEC T6 shares one frequency block across the target and non-target passes, whose
-    `B·T` differ (a 5-token prompt stream vs a 64-token corpus stream), so any literal is
-    right for one and off by their ratio on the other. Prefer it over restating the
-    arithmetic, which also goes stale the moment a batch size changes."""
+    once: the target and non-target passes share one frequency block, whose `B·T` differ (a
+    5-token prompt stream vs a 64-token corpus stream), so any literal is right for one and
+    off by their ratio on the other."""
     ema_halflife_steps: PositiveFloat | None = Field(default=None, allow_inf_nan=False, le=1e6)
 
 
-class ImportanceMinimalityLossConfig(LossMetricConfig):
-    """Geman–McClure smooth-L0 importance-minimality penalty on upper-leaky CI values.
+class ImportanceMinimalityLossConfig(TrainingLossConfig):
+    """Smooth-L0 activity and optional frequency penalties on upper-leaky CI values.
 
-    Per-value penalty `phi_gamma(c) = c^2 / (c^2 + gamma^2)` — a smooth approximation to
-    the active-component count `1[c>0]`, exact only as `gamma -> 0` — summed over the
-    per-component mean activities, with an optional `frequency` penalty over the same
-    values. `phi'(0) = 0` and `|phi'| <= 0.65/gamma` everywhere, so there is no singularity
-    at the origin (no `eps` floor, no aggressive grad clip) — the gradient is localized
-    on the threshold band `c ~ gamma/sqrt(3)` and redescends for clearly-on components.
+    The per-value penalty is `c^2 / (c^2 + gamma^2)` (Geman–McClure), summed over
+    per-component mean activity. It approaches the active-component count as
+    positive `gamma` anneals toward zero. Its derivative is zero at the origin and bounded by
+    `0.65 / gamma`; no epsilon floor or gradient clip is needed. Every gamma
+    schedule knot must have `frac > 0`; zero collapses the threshold band.
 
-    `gamma` is the width's full schedule (SPEC S9); annealing it down (knots with
-    decreasing `frac`) sharpens the count. Its knots must keep `frac > 0` (asserted
-    where the term is built) — a `gamma` touching 0 is never intended.
-    """
+    `normalize_at_one` multiplies by `1 + gamma^2`, so CI 1 contributes exactly 1
+    throughout the schedule. Without it, saturated components contribute more as
+    `gamma` decreases. The optional frequency penalty uses the same activities."""
 
     type: Literal["ImportanceMinimalityLoss"] = "ImportanceMinimalityLoss"
     gamma: ScheduleConfig
     frequency: FrequencyMinimalityConfig | None = None
     normalize_at_one: bool = False
-    """Rescale `phi` so `c = 1` contributes exactly 1 at every gamma (`losses.py`)."""
 
 
-class NonlinearityLocalityLossConfig(LossMetricConfig):
-    """Concentrate each component's write vector on fewer nonlinearity-facing units
-    (SPEC S36).
+class NonlinearityLocalityLossConfig(TrainingLossConfig):
+    """Concentrate each component's write vector on fewer nonlinearity-facing units.
 
     `relative_threshold` is relative to a uniform unit fraction; annealing it down sharpens
-    the soft count. `unit_kind_coefficients` weights each unit kind's component mean and
-    must name every kind the target's partitions declare (asserted at step build); a
-    `None` entry excludes that kind from the objective outright — no reduction is built,
-    which is why weights are strictly positive rather than zero-able.
+    the soft count. With `normalize_at_one`, the count is rescaled by
+    `1 + relative_threshold / unit_count`, so an aligned vector concentrated in one unit contributes
+    exactly one use (or the partition's use multiplicity for shared heads) throughout the schedule.
+    Otherwise its cost grows as the threshold anneals down. `unit_kind_coefficients` weights
+    each unit kind's component mean and must name every kind the target's partitions declare
+    (asserted at step build); a `None` entry excludes that kind from the objective outright —
+    no reduction is built, which is why weights are strictly positive rather than zero-able.
     """
 
     type: Literal["NonlinearityLocalityLoss"] = "NonlinearityLocalityLoss"
-    coeff: NonNegativeFloat | ScheduleConfig | None = None
+    coeff: NonNegativeFloat | ScheduleConfig
     relative_threshold: ScheduleConfig
     unit_kind_coefficients: dict[NonlinearityUnitKind, PositiveFloat | None]
+    normalize_at_one: bool = False
 
     @model_validator(mode="after")
     def validate_relative_threshold(self) -> Self:
@@ -307,91 +287,120 @@ class NonlinearityLocalityLossConfig(LossMetricConfig):
         return self
 
 
-class CIMaskedReconLossConfig(LossMetricConfig, HiddenActsReconstructionMixin):
-    slow: ClassVar[bool] = False
+class CIMaskedReconLossConfig(TrainingLossConfig, ReconstructionAuxiliariesMixin):
     type: Literal["CIMaskedReconLoss"] = "CIMaskedReconLoss"
 
 
-class CIMaskedReconSubsetLossConfig(LossMetricConfig, HiddenActsReconstructionMixin):
+class CIMaskedReconSubsetLossConfig(TrainingLossConfig, ReconstructionAuxiliariesMixin):
     type: Literal["CIMaskedReconSubsetLoss"] = "CIMaskedReconSubsetLoss"
     routing: Annotated[SubsetRoutingType, Field(discriminator="type")] = (
         UniformKSubsetRoutingConfig()
     )
 
 
-class StochasticReconLossConfig(LossMetricConfig, HiddenActsReconstructionMixin):
+class StochasticReconLossConfig(TrainingLossConfig, ReconstructionAuxiliariesMixin):
     type: Literal["StochasticReconLoss"] = "StochasticReconLoss"
-    n_mask_samples: PositiveInt = 1
 
 
-class StochasticReconSubsetLossConfig(LossMetricConfig, HiddenActsReconstructionMixin):
+class StochasticReconSubsetLossConfig(TrainingLossConfig, ReconstructionAuxiliariesMixin):
     type: Literal["StochasticReconSubsetLoss"] = "StochasticReconSubsetLoss"
     routing: Annotated[SubsetRoutingType, Field(discriminator="type")] = (
         UniformKSubsetRoutingConfig()
     )
-    n_mask_samples: PositiveInt = 1
 
 
-class UnmaskedReconLossConfig(LossMetricConfig, HiddenActsReconstructionMixin):
+class UnmaskedReconLossConfig(TrainingLossConfig, ReconstructionAuxiliariesMixin):
     type: Literal["UnmaskedReconLoss"] = "UnmaskedReconLoss"
 
 
 PGDInitStrategy = Literal["random", "ones", "zeroes"]
 
-SourceShape = Literal["c", "bc", "sc", "bsc"]
-"""The stored adversarial-source shape, spelled over the waist axes in tensor order —
-each letter names an axis the source keeps FULL; a missing letter is a size-1 broadcast
-axis (the rank always matches the waist, so the elementwise combine broadcasts):
+BatchSourceShape = Literal["bc", "bsc"]
+"""Training sources keep the full batch axis: each row owns its adversarial state.
 
-  positionless target:  `c (1, C)` · `bc (B, C)`   (`sc`/`bsc` are invalid — they
-                        name a position axis the target lacks)
-  positioned target:    `c (1, 1, C)` · `bc (B, 1, C)` — one source per batch
-                        element shared over positions — · `sc (1, P, C)` ·
-                        `bsc (B, P, C)`
+`bc` shares a row's source across positions; `bsc` keeps every position and requires
+a positioned target. Component sources also keep C; delta sources omit C.
+"""
 
-These are the component-source shapes. Each site also carries a distinct delta source
-with the same leading shape and no C axis.
+SourceShape = Literal["c", "bc", "bsc"]
+"""Fresh PGD also admits batch-shared `c` sources for evaluation.
 
-One vocabulary for BOTH adversaries: persistent PGD implements all four; per-step
-(fresh) PGD implements `c`/`bc`/`bsc` and rejects `sc` at validation."""
+Every source has the waist's rank. Omitted axes are size-1 broadcast axes:
+positionless `c (1, C)` / `bc (B, C)`; positioned `c (1, 1, C)` /
+`bc (B, 1, C)` / `bsc (B, P, C)`.
+"""
 
 
-class PGDConfig(LossMetricConfig, HiddenActsReconstructionMixin):
-    """Shared base for per-step PGD loss configs."""
+class PGDConfig(ReconstructionAuxiliariesMixin):
+    """Reconstruction and ascent settings shared by training losses and eval probes."""
 
-    init: PGDInitStrategy
     step_size: PositiveFloat
+
+
+class TrainingPGDConfig(PGDConfig, TrainingLossConfig):
+    """Fresh training adversaries own independent sources for every batch row."""
+
     n_steps: NonNegativeInt
-    source_shape: SourceShape
-
-    @model_validator(mode="after")
-    def validate_source_shape_implemented(self) -> Self:
-        if self.source_shape == "sc":
-            raise ValueError("per-step PGD does not implement `sc` (persistent PGD does)")
-        return self
+    init: PGDInitStrategy
+    source_shape: BatchSourceShape
 
 
-class PGDReconLossConfig(PGDConfig):
-    """Slow-tier by declaration: each evaluation is `n_steps` full forward+backward
-    ascents per batch, and a targeted dual run fans it out over stream x CI-role — at the
-    fast cadence it dominated eval wall-clock (~10 min per eval on the L18 8B runs)."""
-
-    slow: ClassVar[bool] = True
+class PGDReconLossConfig(TrainingPGDConfig):
     type: Literal["PGDReconLoss"] = "PGDReconLoss"
-    n_batches: PositiveInt | None = None
-    """Cap on how many eval batches the probe consumes (None = all `eval.n_steps`).
-    The reported loss averages over the batches actually run."""
 
 
-class PGDReconSubsetLossConfig(PGDConfig):
+class PGDReconSubsetLossConfig(TrainingPGDConfig):
     type: Literal["PGDReconSubsetLoss"] = "PGDReconSubsetLoss"
     routing: Annotated[SubsetRoutingType, Field(discriminator="type")] = (
         UniformKSubsetRoutingConfig()
     )
 
 
+class EvalPGDConfig(PGDConfig):
+    """Fresh evaluation probes optimize randomly initialized, batch-shared sources. They
+    carry no weight and no name: the read-out after `n` steps logs as `<type>_<n>step`."""
+
+    init: Literal["random"]
+    source_shape: Literal["c"]
+    n_batches: PositiveInt | None = None
+    """Cap on how many eval batches the probe consumes (None = all `eval.n_steps`). The
+    reported loss averages over the batches actually run."""
+
+
+class EvalPGDReconLossConfig(EvalPGDConfig):
+    """A fresh ascent read out once, after `n_steps`."""
+
+    slow: ClassVar[bool] = False
+    type: Literal["PGDReconLoss"] = "PGDReconLoss"
+    n_steps: NonNegativeInt
+
+    @property
+    def read_out_steps(self) -> tuple[int, ...]:
+        return (self.n_steps,)
+
+
+class SlowPGDReconLossConfig(EvalPGDConfig):
+    """A ladder: ONE fresh ascent read out after each of `read_out_steps`."""
+
+    slow: ClassVar[bool] = True
+    type: Literal["SlowPGDReconLoss"] = "SlowPGDReconLoss"
+    read_out_steps: tuple[NonNegativeInt, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_read_out_steps_ascend(self) -> Self:
+        steps = self.read_out_steps
+        assert all(a < b for a, b in pairwise(steps)), (
+            f"SlowPGDReconLoss read_out_steps must strictly ascend, got {steps}"
+        )
+        return self
+
+
+type AnyPGDEvalConfig = EvalPGDReconLossConfig | SlowPGDReconLossConfig
+type AnyPGDEvalType = Literal["PGDReconLoss", "SlowPGDReconLoss"]
+
+
 class AdamPGDConfig(BaseConfig):
-    """Adam-style PGD optimizer config — the only implemented persistent-PGD optimizer."""
+    """Adam source ascent with persistent first and second moments."""
 
     type: Literal["adam"] = "adam"
     beta1: Probability = Field(default=0.9, description="Adam beta1 for masks")
@@ -400,20 +409,55 @@ class AdamPGDConfig(BaseConfig):
     lr_schedule: ScheduleConfig
 
 
-class PersistentPGDLossConfig(LossMetricConfig, HiddenActsReconstructionMixin):
-    """Shared adversary fields for the persistent-PGD loss terms (SPEC §4.4–4.5): the
-    Adam-ascended source bundle's optimizer, stored shape, dtype, and warmup. Sources are
-    clamped to `[0, 1]` after each step — the only implemented parameterization."""
+class SgdPGDConfig(BaseConfig):
+    """Projected SGD source ascent without optimizer buffers.
 
-    optimizer: AdamPGDConfig
-    source_shape: SourceShape
-    source_dtype: Literal["float32", "bfloat16"] = "float32"
-    """Storage dtype for the persistent PPGD source tensors AND their Adam moments
-    (`m`/`v`). `float32` (default) is SPEC N1 (fp32 SRC_STEP moments) and the only
-    oracle-parity path. `bfloat16` halves the resident source+moment footprint (it scales
-    with total source elements — dominant at large site counts) at some numerical risk: the
-    second-moment `v` accumulates squared grads, which can underflow in bf16 for small
-    grads — opt in only as an experiment."""
+    Omitting moment buffers keeps per-datapoint `bsc` sources affordable at large
+    component counts."""
+
+    type: Literal["sgd"] = "sgd"
+    lr_schedule: ScheduleConfig
+
+
+class MomentumSgdPGDConfig(BaseConfig):
+    """Projected momentum-SGD source ascent with one persistent velocity buffer.
+
+    `v = momentum * v + grad; sources += lr * v`, followed by clipping to [0, 1].
+    Velocity uses `adversary.velocity_dtype`: bf16 for either 16-bit source format,
+    fp32 for fp32 sources."""
+
+    type: Literal["momentum_sgd"] = "momentum_sgd"
+    momentum: Probability
+    lr_schedule: ScheduleConfig
+
+
+class PersistentAdversaryLossConfig(TrainingLossConfig, ReconstructionAuxiliariesMixin):
+    """Shared optimizer and lifecycle fields for persistent adversarial sources."""
+
+    optimizer: Annotated[
+        AdamPGDConfig | SgdPGDConfig | MomentumSgdPGDConfig, Field(discriminator="type")
+    ]
+    source_dtype: Literal["float32", "bfloat16", "uint16"] = "float32"
+    """Storage representation for the persistent PPGD source VALUES; adam moments follow
+    it, the momentum velocity takes its float sibling (`adversary.velocity_dtype`).
+    `float32` (default) keeps source optimizer moments in fp32 and is the oracle-parity
+    path. `bfloat16` halves the resident footprint at ~2^-8 resolution near 1.0.
+    `uint16` is the unit-interval FIXED-POINT representation (`value = u/65535`,
+    `adversary.UINT16_UNIT_SCALE`): same bytes as bf16, uniform 1/65535 resolution across
+    [0,1]; ascents update the fp32 view and store back with stochastic rounding
+    (unbiased — round-to-nearest would permanently stall sub-half-step updates). uint16
+    pairs with the float-buffered or stateless source optimizers; adam refuses it (its moments
+    follow the storage dtype, and integer moments are meaningless)."""
+
+    @model_validator(mode="after")
+    def validate_storage_supports_optimizer(self) -> Self:
+        if self.source_dtype == "uint16" and isinstance(self.optimizer, AdamPGDConfig):
+            raise ValueError(
+                "uint16 fixed-point source storage pairs with source optimizer sgd/momentum_sgd; "
+                "adam stores its moments at the source dtype"
+            )
+        return self
+
     n_warmup_steps: NonNegativeInt = Field(
         default=0,
         description=(
@@ -422,9 +466,15 @@ class PersistentPGDLossConfig(LossMetricConfig, HiddenActsReconstructionMixin):
         ),
     )
     adversary_objective: Literal["term", "e2e"] = "e2e"
-    """Objective the persistent sources ascend. `e2e` excludes hidden-activation
-    reconstruction from source ascents while keeping it in the outer components/CI
+    """Objective the persistent sources ascend. `e2e` excludes reconstruction
+    auxiliaries from source ascents while keeping them in the outer components/CI
     objective; `term` makes the sources ascend the complete loss."""
+
+
+class PersistentPGDLossConfig(PersistentAdversaryLossConfig):
+    """A persistent adversary with independent state for every batch row."""
+
+    source_shape: BatchSourceShape
 
 
 class PersistentPGDReconLossConfig(PersistentPGDLossConfig):
@@ -434,18 +484,44 @@ class PersistentPGDReconLossConfig(PersistentPGDLossConfig):
     type: Literal["PersistentPGDReconLoss"] = "PersistentPGDReconLoss"
 
 
+class SourcePoolConfig(BaseConfig):
+    """Each batch element owns this many persistent cross-site particles."""
+
+    size_per_batch_element: PositiveInt
+
+
+class MergedStochasticSubsetPooledPPGDReconLossConfig(PersistentAdversaryLossConfig):
+    """The merged stochastic/PPGD term with persistent cross-site source particles.
+
+    Each batch element samples one particle from its configured pool and broadcasts it over
+    positions. Warmup ascents, the main forward, and the source-gradient retake share
+    the sampled indices. Each site stores ``batch_size * pool.size_per_batch_element``
+    particles, each containing a component vector and a delta scalar.
+    """
+
+    type: Literal["MergedStochasticSubsetPooledPPGDReconLoss"] = (
+        "MergedStochasticSubsetPooledPPGDReconLoss"
+    )
+    pool: SourcePoolConfig
+    adv_fraction: ScheduleConfig
+    routing: SubsetRoutingType = Field(default_factory=UniformKSubsetRoutingConfig)
+
+    @model_validator(mode="after")
+    def validate_adv_fraction_is_probability(self) -> Self:
+        if self.adv_fraction.max_val > 1.0:
+            raise ValueError(f"adv_fraction must stay within [0, 1]: {self.adv_fraction}")
+        return self
+
+
 class MergedStochasticSubsetPPGDReconLossConfig(PersistentPGDLossConfig):
-    """ONE masked forward serving both recon pressures (SPEC S10' variation): each batch
-    element is assigned adversarial with probability `adv_fraction` (mask sources = the
-    persistent-PGD adversary's, every site routed) or stochastic otherwise (fresh
-    `U[0,1]` sources, routed per `routing`) — the whole sequence takes one family, so no
-    sample's loss is scored against a mixed-family attention context. `adv_fraction` is a
-    `ScheduleConfig`, evaluated per step like the imp-min gamma — a constant is the plain
-    merge; a ramp anneals the adversarial share over training. `coeff` is the TOTAL:
-    coeff 1.0 + constant adv_fraction 0.5 replaces the canonical 0.5 stochastic + 0.5
-    persistent-PGD pair in expectation. Carries the persistent-adversary fields; one
-    source bundle feeds this one term (SPEC S23) and the S14' final ascent rides its
-    backward — no extra forward."""
+    """Combine persistent-adversarial and stochastic reconstruction in one forward.
+
+    Each batch element uses persistent sources at every site with probability
+    `adv_fraction`; otherwise it uses fresh uniform sources and the configured
+    routing. The choice is shared across its sequence. `adv_fraction` may be
+    scheduled, and `coeff` weights the combined loss: coefficient 1 with an
+    adversarial fraction of 0.5 matches a 0.5-weighted pair in expectation.
+    The persistent sources receive their final ascent gradient from this forward."""
 
     type: Literal["MergedStochasticSubsetPPGDReconLoss"] = "MergedStochasticSubsetPPGDReconLoss"
     adv_fraction: ScheduleConfig
@@ -472,6 +548,32 @@ class MergedStochasticSubsetPPGDReconLossConfig(PersistentPGDLossConfig):
 # ---------------------------------------------------------------------------
 
 
+class CIMaskedReconEvalConfig(BaseConfig):
+    """The CI-masked (constant-source-0) KL probe, per stream and CI role. In a dual run it
+    is what measures the hidden head's arm; `CEandKLLosses` already emits the output arm
+    under the same `ce_kl/kl_ci_masked` key."""
+
+    slow: ClassVar[bool] = False
+    type: Literal["CIMaskedReconLoss"] = "CIMaskedReconLoss"
+
+
+class UnmaskedNoDeltaReconEvalConfig(BaseConfig):
+    """The unmasked-no-delta KL probe on the optimized stream (the non-target pass's own
+    training term, measured on eval batches)."""
+
+    slow: ClassVar[bool] = False
+    type: Literal["UnmaskedNoDeltaReconLoss"] = "UnmaskedNoDeltaReconLoss"
+
+
+class WeightMagnitudeConfig(BaseConfig):
+    """Per-site `‖V_c‖·‖U_c‖` scatter in descending magnitude order, log y.
+
+    Reads the trained V/U alone — no forward pass and no eval batch."""
+
+    slow: ClassVar[bool] = True
+    type: Literal["WeightMagnitude"] = "WeightMagnitude"
+
+
 class CIHistogramsConfig(BaseConfig):
     """The two value histograms bin exactly, over ONE eval batch — counts from batches binned
     against their own min/max sit on different edges and cannot be summed — so
@@ -495,7 +597,7 @@ class CI_L0Config(BaseConfig):
     slow: ClassVar[bool] = False
     type: Literal["CI_L0"] = "CI_L0"
     groups: dict[str, list[str]] | None
-    ci_alive_threshold: float = 0.0
+    ci_alive_threshold: Probability = 0.0
 
 
 class CIMeanPerComponentConfig(BaseConfig):
@@ -506,16 +608,7 @@ class CIMeanPerComponentConfig(BaseConfig):
 class ComponentActivationDensityConfig(BaseConfig):
     slow: ClassVar[bool] = True
     type: Literal["ComponentActivationDensity"] = "ComponentActivationDensity"
-    ci_alive_threshold: float = 0.0
-
-
-class WeightMagnitudeConfig(BaseConfig):
-    """Per-site `‖V_c‖·‖U_c‖` scatter in descending magnitude order, log y.
-
-    Reads the trained V/U alone — no forward pass and no eval batch."""
-
-    slow: ClassVar[bool] = True
-    type: Literal["WeightMagnitude"] = "WeightMagnitude"
+    ci_alive_threshold: Probability = 0.0
 
 
 class IdentityCITargetSpec(BaseConfig):
@@ -561,22 +654,6 @@ class UVPlotsConfig(_PermutationPlotsBaseConfig):
     type: Literal["UVPlots"] = "UVPlots"
 
 
-class WellTemperednessConfig(BaseConfig):
-    """Whether higher causal importance preactivations mean greater ablation effects.
-
-    `groups` maps names to fnmatch-style site patterns. Every region always schedules
-    `n_locations * n_components_per_region` solo ablations: a sparse region pads its quota
-    with out-of-region components whose damage is computed and discarded.
-    """
-
-    slow: ClassVar[bool] = True
-    type: Literal["WellTemperedness"] = "WellTemperedness"
-    groups: dict[str, list[str]] | None
-    n_locations: PositiveInt
-    n_components_per_region: PositiveInt
-    ablations_per_forward: PositiveInt
-
-
 # ---------------------------------------------------------------------------
 # Top-level PD configs
 # ---------------------------------------------------------------------------
@@ -596,9 +673,11 @@ class AdamWOptimizerConfig(BaseConfig):
 
 
 class MuonOptimizerConfig(BaseConfig):
-    """Muon (`optax.contrib.muon`): Newton-Schulz-orthogonalized momentum for the group's
-    matrix leaves; the rest fall back to Adam(0.9, 0.999) at the same LR. Experimental
-    (non-canonical). Which leaves are matrices is per-group (`run_state.build_optimizers`):
+    """Muon: Newton-Schulz-orthogonalized momentum for the group's matrix leaves; the rest
+    fall back to Adam(0.9, 0.999) at the same LR. Experimental (non-canonical). The
+    semantics are `optax.contrib.muon`'s; the NS runs batched per semantic
+    kind at the placement table's `ns_compute` waypoint (`muon_stacked.py`). Which leaves
+    are matrices is per-group (`run_state.build_optimizers`):
     the V/U components tree is all-2D (fallback never fires); the chunkwise CI fn is
     per-chunk stacks, so its 3D leaves are muon'd over the trailing two axes (chunk axis
     batched) and its 2D bias stacks take the fallback; the MLP CI fns use the plain 2D rule."""
@@ -608,12 +687,14 @@ class MuonOptimizerConfig(BaseConfig):
     beta: Probability = Field(
         default=0.95, description="Momentum decay for the orthogonalized update"
     )
+    # 0.2 approximately matches AdamW's empirical update RMS, following Moonshot Muon
+    # (https://arxiv.org/abs/2502.16982), so matrix learning rates use a comparable scale.
     consistent_rms: PositiveFloat | None = Field(
-        default=None,
+        default=0.2,
         description=(
-            "If set, scale updates by `sqrt(max(fan_in, fan_out)) * consistent_rms` so update"
-            " RMS is shape-independent (0.2 ~ AdamW's empirical RMS, making the AdamW LR"
-            " transferable). If None, optax's width scaling `sqrt(max(1, fan_out / fan_in))`."
+            "If set, scale updates by `sqrt(max(fan_in, fan_out)) * consistent_rms` for"
+            " approximately shape-independent update RMS. If None, use optax's width"
+            " scaling `sqrt(max(1, fan_out / fan_in))`."
         ),
     )
     weight_decay: NonNegativeFloat = Field(default=0.0, description="Weight decay")
@@ -621,26 +702,12 @@ class MuonOptimizerConfig(BaseConfig):
         default=None,
         description="If set, clip the grad norm of this group's parameters to this value",
     )
-    impl: Literal["optax", "stacked"] = Field(
-        default="optax",
-        description=(
-            "NS implementation. `optax` = per-leaf `optax.contrib.muon` (the reference"
-            " semantics, SPEC S20). `stacked` = one batched NS per semantic kind's"
-            " stack, executed at the placement table's `ns_compute` waypoint row —"
-            " device-local orthogonalization, no per-iteration collectives"
-            " (`muon_stacked.py`); same trajectory up to float reassociation (the"
-            " SPEC D4 tolerance class)."
-        ),
-    )
     ns_steps: PositiveInt = Field(
         default=5, description="Newton-Schulz iterations (optax default 5; fewer = cheaper/looser)"
     )
     ns_dtype: Literal["float32", "bfloat16"] = Field(
-        default="float32",
-        description=(
-            "Dtype of the NS orthogonalization only (masters/momentum stay fp32 per N1);"
-            " bfloat16 halves NS compute+comm (the Kimi recipe). `stacked` impl only."
-        ),
+        default="bfloat16",
+        description="Dtype of the NS orthogonalization only; masters and momentum stay float32.",
     )
 
 
@@ -662,6 +729,7 @@ AnyOptimizerConfig = Annotated[
 ReconLossMetricConfigs = (
     CIMaskedReconLossConfig
     | CIMaskedReconSubsetLossConfig
+    | MergedStochasticSubsetPooledPPGDReconLossConfig
     | MergedStochasticSubsetPPGDReconLossConfig
     | PersistentPGDReconLossConfig
     | PGDReconLossConfig
@@ -685,39 +753,33 @@ AnyLossMetricConfig = Annotated[
     | NonlinearityLocalityLossConfig,
     Discriminator("type"),
 ]
-"""The trainable losses. The hidden-acts metrics are EVAL vocabulary
-(`AnyEvalMetricConfig`, SPEC S31) — hidden-acts pressure on TRAINING rides a recon
-term's `hidden_acts_reconstruction` (SPEC S35), never a standalone term."""
+"""Trainable losses; hidden-activation reconstruction is a reconstruction auxiliary,
+not a standalone loss."""
 
 
 TargetedLossMetricConfig = Annotated[
     AnyReconLossMetricConfig | ImportanceMinimalityLossConfig | NonlinearityLocalityLossConfig,
     Discriminator("type"),
 ]
-"""The loss types a tPD TARGET pass admits (SPEC T3/S36): the full recon vocabulary
-(adversaries run in the target pass, T7) + importance-minimality + the optional
-nonlinearity-locality prior — no `FaithfulnessLossConfig` member, so a targeted config
-cannot spell a faithfulness role, and no eval-only hidden-acts type.
+"""Target-pass losses: reconstruction (including adversaries), importance-minimality, and
+the optional nonlinearity-locality prior. Faithfulness is excluded so the delta can carry
+off-target behavior.
 
-The nonlinearity term is admitted here even though it belongs to no PASS: it is a
-weight-space prior on `U` alone (S36 — CI-ungated, data-independent), so it is scored
-once against the components and added once to the step's total, exactly as in plain PD.
-It is authored on the target list because that is the tPD config's one loss list, not
-because the target stream scores it. NOTE (T3 interaction): with no faithfulness role the
-weight delta is unpenalized, so concentration pressure on `U` has an escape valve plain PD
-does not give it — expect a weaker effect per unit coefficient than the plain-PD seats."""
+The nonlinearity term is admitted here even though it belongs to no PASS (local
+amendment): it is a weight-space prior on `U` alone — CI-ungated, data-independent — so it
+is scored once against the components and added once to the step's total, exactly as in
+plain PD. It is authored on the target list because that is the tPD config's one loss
+list, not because the target stream scores it. With no faithfulness role the weight delta
+is unpenalized, so concentration pressure on `U` has an escape valve plain PD does not give
+it — expect a weaker effect per unit coefficient than plain-PD runs."""
 
 
-class UnmaskedNoDeltaReconLossConfig(LossMetricConfig):
-    """The tPD non-target pass's unmasked reconstruction term — T4's one delta-OFF arm:
-    every component mask `1.0` and every weight-delta mask `0.0`, so the FULL component
-    sum alone must reconstruct the frozen output. Prevents components that never activate
-    from interfering with the reconstruction (the tPD paper's CSS-only unmasked recon
-    term, Method details). Fully determined: no routing, sampling, or optional
-    hidden-activation reconstruction fields exist here, and it is non-target-only — the plain and target-pass unions have no
-    member for it."""
+class UnmaskedNoDeltaReconLossConfig(TrainingLossConfig):
+    """Reconstruct non-target outputs using the full component sum without the delta.
 
-    slow: ClassVar[bool] = False
+    Component masks are 1 and there is no weight delta. This constrains even
+    components that never activate, so they cannot interfere with reconstruction."""
+
     type: Literal["UnmaskedNoDeltaReconLoss"] = "UnmaskedNoDeltaReconLoss"
 
 
@@ -728,11 +790,10 @@ NontargetReconLossMetricConfig = (
     | StochasticReconSubsetLossConfig
     | UnmaskedNoDeltaReconLossConfig
 )
-"""The CLOSED non-target recon set (SPEC T5): the stochastic/constant-source ones
-(delta pinned fully ON, T4) plus `UnmaskedNoDeltaReconLoss` — T4's one enumerated
-delta-OFF exception. The non-target HIDDEN pass admits exactly this set; the OUTPUT
-pass's union below additionally admits the persistent adversarial types (T5/T7
-amended 2026-08-19)."""
+"""The CLOSED non-target reconstruction set: stochastic or constant component sources with
+the delta on, or the full component sum with the delta off. The non-target HIDDEN pass
+admits this set plus the merged term; the OUTPUT pass's union below additionally admits
+the persistent adversarial types (local amendments 2026-08-19/20)."""
 
 
 NontargetOutputReconLossMetricConfig = (
@@ -740,44 +801,38 @@ NontargetOutputReconLossMetricConfig = (
     | PersistentPGDReconLossConfig
     | MergedStochasticSubsetPPGDReconLossConfig
 )
-"""The non-target OUTPUT pass's vocabulary (SPEC T5/T7 amended 2026-08-19): the closed
-non-target set plus the two persistent-source-carrying recon types. Their masks compose
-from the bundle's COMPONENT channels with every weight-delta mask pinned to 1.0 (T4 —
-the source's delta channel is ignored), so the probed worst case is a partial ablation
-of components on data they should be inactive on. Each such term gets its own bundle
-(S23), sized off the BROAD stream's geometry."""
+"""The non-target OUTPUT pass's vocabulary: the closed non-target set plus the two
+persistent-source-carrying recon types. Their masks compose from the bundle's COMPONENT
+channels with every weight-delta mask pinned to 1.0 (the source's delta channel is
+ignored), so the probed worst case is a partial ablation of components on data they should
+be inactive on. Each such term gets its own bundle, sized off the BROAD stream's geometry."""
 
 
 NontargetHiddenReconLossMetricConfig = (
     NontargetReconLossMetricConfig | MergedStochasticSubsetPPGDReconLossConfig
 )
-"""The non-target HIDDEN pass's vocabulary (SPEC T5/T12 amended 2026-08-20): the closed
-set plus the MERGED term ONLY — the one adversarial type whose masked forward REPLACES a
-stochastic term's (S34), so admitting it costs zero extra forwards on the broad stream.
-The standalone persistent-PGD type stays refused here: it would add a masked forward per
-step, and hidden-acts robustness off-target is not worth dedicated compute (the
-pgd_nt_plan scope decision — this amendment admits only the free adversary). Delta
-pinned per T4 like every non-target forward; own bundle per term (S23), sized off the
-BROAD stream's geometry like the output pass's."""
+"""The non-target HIDDEN pass's vocabulary: the closed set plus the MERGED term ONLY — the
+one adversarial type whose masked forward REPLACES a stochastic term's, so admitting it
+costs zero extra forwards on the broad stream. The standalone persistent-PGD type stays
+refused here: it would add a masked forward per step. Delta pinned like every non-target
+forward; own bundle per term, sized off the BROAD stream's geometry."""
 
 
 HiddenReconLossMetricConfig = ReconLossMetricConfigs
-"""The recon types the hidden pass admits on the TARGET stream (SPEC T12): the same full
-vocabulary as the output pass, adversaries included — the hidden objective is an ordinary
-reconstruction objective that happens to be measured at internal activations rather than at
-the output, so nothing about the mask-source algebra changes."""
+"""The recon types the hidden pass admits on the TARGET stream: the same full vocabulary as
+the output pass, adversaries included — the hidden objective is an ordinary reconstruction
+objective measured at internal activations rather than at the output."""
 
 
 class HiddenPassConfig(BaseConfig):
-    """The hidden role's surface (SPEC T12): a second reconstruction objective, scored at named
-    internal activations instead of the model output, whose masks come from the CI fn's SECOND
-    readout head (S37).
+    """The hidden role's surface: a second reconstruction objective, scored at named
+    internal activations instead of the model output, whose masks come from the CI fn's
+    SECOND readout head.
 
-    `points` lives HERE rather than on each term — the pass IS "reconstruct these activations",
-    so per-term points would be re-authoring the objective per term. It is also shared with the
-    non-target stream's hidden surface, the same way T6 shares one importance-minimality config
-    across passes: WHAT is being reconstructed is a property of the experiment, not of a stream.
-    Only coefficients differ per pass.
+    `points` lives HERE rather than on each term — the pass IS "reconstruct these
+    activations". It is shared with the non-target stream's hidden surface, the way one
+    importance-minimality config is shared across passes: WHAT is being reconstructed is a
+    property of the experiment, not of a stream. Only coefficients differ per pass.
 
     Requires `decomposition.ci.dual` — without a second head there is no hidden CI to shape."""
 
@@ -785,32 +840,29 @@ class HiddenPassConfig(BaseConfig):
         ...,
         min_length=1,
         description=(
-            "Activations the hidden objective reconstructs, in the TARGET's own tap "
+            "Activations the hidden objective reconstructs, in the TARGET's own capture "
             "vocabulary — e.g. `layers.19.mlp.down_proj.out` for block 19's MLP output. Each "
             "point's error is normalized by its own clean squared scale (see `normalization`) "
-            "and the pass takes the MEAN over points, so points of different magnitude and width "
-            "stay comparable — and so each point's weight is 1/P: adding points dilutes the "
-            "others unless the term coefficients are rescaled. No default: which activations "
-            "matter is the experiment's question."
+            "and the pass takes the MEAN over points, so each point's weight is 1/P: adding "
+            "points dilutes the others unless the term coefficients are rescaled."
         ),
     )
     normalization: HiddenActsNormalization = Field(
         default_factory=BatchHiddenActsNormalization,
         description=(
-            "How each point's relative squared error pools over positions (S35 amended "
-            "2026-09-11). `batch`: one ratio over the whole batch — a position holding most of "
-            "the point's clean energy (Llama's BOS massive activation at layers 0, 1, 31) IS the "
-            "measurement and silences the rest. `per_position`: each (batch, position) entry "
-            "against its own clean scale, then the mean over entries. Shared with the "
-            "non-target hidden pass, like `points`. Default `batch`, byte-inert for existing runs."
+            "How each point's relative squared error pools over positions. `batch`: one ratio "
+            "over the whole batch — a position holding most of the point's clean energy "
+            "(Llama's BOS massive activation at layers 0, 1, 31) IS the measurement. "
+            "`per_position`: each (batch, position) entry against its own clean scale, then "
+            "the mean over entries. Shared with the non-target hidden pass, like `points`."
         ),
     )
     impmin_coeff: NonNegativeFloat | ScheduleConfig = Field(
         ...,
         description=(
             "The hidden head's importance-minimality COEFFICIENT. The penalty's shape and "
-            "anneal are the target pass's, shared by construction (T6's rule extended to the "
-            "hidden role) — only the strength is authored here."
+            "anneal are the target pass's, shared by construction — only the strength is "
+            "authored here."
         ),
     )
     recon: list[Annotated[HiddenReconLossMetricConfig, Discriminator("type")]] = Field(
@@ -819,13 +871,21 @@ class HiddenPassConfig(BaseConfig):
     output_coeff: LossCoeff | None = Field(
         default=None,
         description=(
-            "OPTIONAL end-to-end KL rider on the hidden pass (T12 amended 2026-09-11): each "
-            "hidden term scores `mean_points(hidden error) + output_coeff * kl_per_position` "
-            "on the SAME masked forward, so the hidden head is also asked to keep the "
-            "components the model output needs — the hidden head as a superset of the output "
-            "head, rather than an independent question. `None` (default) is the pure hidden "
-            "pass: no e2e term, `recon_loss_fn` never called on a hidden forward. Its "
-            "adversaries ascend the complete objective including the rider."
+            "OPTIONAL end-to-end KL rider: each hidden term scores "
+            "`mean_points(hidden error) + output_coeff * kl_per_position` on the SAME masked "
+            "forward, so the hidden head is also asked to keep the components the model "
+            "output needs. `None` (default) is the pure hidden pass: no e2e term, "
+            "`recon_loss_fn` never called on a hidden forward. Its adversaries ascend the "
+            "complete objective including the rider."
+        ),
+    )
+    log_alternate_normalization: bool = Field(
+        default=False,
+        description=(
+            "DIAGNOSTIC ONLY: also score every point under the OTHER `normalization` and log "
+            "it beside the real one (`<point>__altnorm`), so the ratio between the two can be "
+            "read off a live run. Merged after the pass total, so the loss is untouched. "
+            "Shared with the non-target hidden pass, like `points`."
         ),
     )
 
@@ -834,25 +894,21 @@ class HiddenPassConfig(BaseConfig):
         seen: set[str] = set()
         assert len(set(self.points)) == len(self.points), f"duplicate points: {self.points}"
         for cfg in self.recon:
-            assert cfg.coeff is not None, f"hidden.recon {cfg.type!r} must set `coeff`"
             name = cfg.name if cfg.name is not None else cfg.type
             assert name not in seen, f"duplicate hidden loss {name!r}"
             seen.add(name)
-            assert cfg.hidden_acts_reconstruction is None, (
-                f"hidden.recon {cfg.type!r}: the S35 rider has no place on a hidden-pass term — "
-                "the pass already scores exactly these activations via `hidden.points`, and a "
-                "rider would add a SECOND hidden-acts term on top of its own"
+            assert not cfg.auxiliaries, (
+                f"hidden.recon {cfg.type!r}: reconstruction auxiliaries have no place on a "
+                "hidden-pass term — the pass already scores exactly `hidden.points`"
             )
         return self
 
 
 class NontargetHiddenConfig(BaseConfig):
-    """The hidden role on the NON-TARGET stream (SPEC T12/T5-amended).
-
-    Structurally the non-target pass's twin: its own coefficients, the closed non-target recon
-    vocabulary plus the zero-extra-forward MERGED adversarial term (T5/T12 amended
-    2026-08-20), and the measurement points of the target-stream `hidden:` block. Delta
-    pinned fully on, as every non-target forward is (T4)."""
+    """The hidden role on the NON-TARGET stream: the non-target pass's twin with its own
+    coefficients, the closed non-target recon vocabulary plus the zero-extra-forward MERGED
+    adversarial term, and the measurement points of the target-stream `hidden:` block.
+    Delta pinned fully on, as every non-target forward is."""
 
     impmin_coeff: NonNegativeFloat | ScheduleConfig
     recon: list[Annotated[NontargetHiddenReconLossMetricConfig, Discriminator("type")]] = Field(
@@ -863,7 +919,7 @@ class NontargetHiddenConfig(BaseConfig):
         description=(
             "OPTIONAL end-to-end KL rider on the non-target hidden pass, as `pd.hidden."
             "output_coeff`. Costs the full-vocabulary logits and their backward on every "
-            "broad-stream hidden forward (seq 64) — the pass that was kept KL-free for memory."
+            "broad-stream hidden forward."
         ),
     )
 
@@ -871,26 +927,25 @@ class NontargetHiddenConfig(BaseConfig):
     def validate_nontarget_hidden_entries(self) -> Self:
         seen: set[str] = set()
         for cfg in self.recon:
-            assert cfg.coeff is not None, f"nontarget.hidden.recon {cfg.type!r} must set `coeff`"
             name = cfg.name if cfg.name is not None else cfg.type
             assert name not in seen, f"duplicate non-target hidden loss {name!r}"
             seen.add(name)
             if not isinstance(cfg, UnmaskedNoDeltaReconLossConfig):
-                assert cfg.hidden_acts_reconstruction is None, (
-                    f"nontarget.hidden.recon {cfg.type!r}: the S35 rider has no place here — "
-                    "the hidden pass already scores `hidden.points`"
+                assert not cfg.auxiliaries, (
+                    f"nontarget.hidden.recon {cfg.type!r}: reconstruction auxiliaries have no "
+                    "place here — the hidden pass already scores `hidden.points`"
                 )
         return self
 
 
 class NontargetConfig(BaseConfig):
-    """The tPD non-target pass, authored directly (SPEC T5) — never derived from the
+    """The tPD non-target pass, authored directly — never derived from the
     target pass's loss list.
 
     `batch_size` is the broad stream's GLOBAL batch; `pd.batch_size` stays the target
-    stream's. A non-target OUTPUT recon term may carry a persistent adversary (T5/T7
-    amended 2026-08-19), whose bundle sizes off THIS pass's geometry — `batch_size` x
-    the broad dataset's own seq len — never `pd.batch_size`. `impmin_coeff` is the non-target
+    stream's. A non-target OUTPUT recon term may carry a persistent adversary, whose
+    bundle sizes off THIS pass's geometry — `batch_size` x the broad dataset's own seq
+    len — never `pd.batch_size`. `impmin_coeff` is the non-target
     pass's own importance-minimality coefficient (a bare float or a step-evaluated
     schedule) — the penalty's shape and anneal are the target pass's, shared by
     construction (`objective.build_targeted_objective`)."""
@@ -903,42 +958,39 @@ class NontargetConfig(BaseConfig):
     hidden: NontargetHiddenConfig | None = Field(
         default=None,
         description=(
-            "The hidden role on this stream (SPEC T12). Requires `pd.hidden`, whose `points` "
-            "it measures at. None (the default) leaves the hidden head shaped by the target "
-            "stream alone."
+            "The hidden role on this stream. Requires `pd.hidden`, whose `points` it measures "
+            "at. None (the default) leaves the hidden head shaped by the target stream alone."
         ),
     )
 
     @model_validator(mode="after")
     def validate_nontarget_entries(self) -> Self:
         """Per-entry facts the shared recon classes can spell but the non-target pass
-        refuses — caught at parse (seat authoring, submit validation), not at objective
+        refuses — caught at parse (config authoring and validation), not at objective
         build on the GPUs."""
         seen: set[str] = set()
         for cfg in self.recon:
-            assert cfg.coeff is not None, f"nontarget.recon {cfg.type!r} must set `coeff`"
             name = cfg.name if cfg.name is not None else cfg.type
             assert name not in seen, f"duplicate non-target loss {name!r}"
             seen.add(name)
-            # `UnmaskedNoDeltaReconLoss` has no `hidden_acts_reconstruction` field
-            # (fully determined; `extra="forbid"` refuses it at parse), so only the
-            # shared classes need the check.
             if not isinstance(cfg, UnmaskedNoDeltaReconLossConfig):
-                assert cfg.hidden_acts_reconstruction is None, (
-                    f"nontarget.recon {cfg.type!r}: hidden_acts_reconstruction has no place on "
-                    "the non-target pass (SPEC T5) — with the delta pinned on, "
-                    "internal-activation matching would constrain exactly the behavior tPD "
-                    "deliberately declines to decompose"
+                assert not cfg.auxiliaries, (
+                    f"nontarget.recon {cfg.type!r}: auxiliary reconstruction is target-pass-only "
+                    "— with the delta pinned on, internal-activation matching would "
+                    "constrain the behavior tPD declines to decompose"
                 )
         return self
 
 
 RuleConfig = dict[SemanticAxis, MeshAxis | list[MeshAxis] | None]
 """One placement row as configured: semantic axis name -> mesh axis, ordered mesh axes,
-or null (replicate). Both name vocabularies are the closed `axes.py` Literals, so an
-axis name outside them is refused at parse; rules construction additionally fails
-closed on any in-vocabulary key no tensor consumes at that row (a typo'd axis would
-silently replicate) and on mesh axes the run's bound mesh does not declare."""
+or null (replicate). The three value spellings are authoring sugar for ONE in-code value
+(`axes.MeshAssignment`, an ordered tuple; `null` = `()`), folded at the placement parse
+boundary. A `null` entry is a LISTED axis — unlike an omitted one it still meets the
+row-key check. Both name vocabularies are the closed `axes.py` Literals, so an axis
+name outside them is refused at parse; rules construction additionally fails closed on
+any in-vocabulary key no tensor consumes at that row (a typo'd axis would silently
+replicate) and on a mesh whose axes are not the table's vocabulary."""
 
 
 class ComponentsPlacementConfig(BaseConfig):
@@ -952,27 +1004,6 @@ class ComponentsPlacementConfig(BaseConfig):
     faithfulness_deltas: RuleConfig
     operands: RuleConfig
     ns_compute: RuleConfig
-
-
-class CIWeightPlacementConfig(BaseConfig):
-    """The lifecycle rows for one CI weight family. `ns_compute` is the muon NS staging
-    waypoint (`stack` only; matrices whole per device — `placement.ns_staging_sharding`)."""
-
-    optimizer_state: RuleConfig
-    compute_weights: RuleConfig
-    operands: RuleConfig
-    ns_compute: RuleConfig
-
-
-class CIFnPlacementConfig(BaseConfig):
-    """Chunkwise CI-transformer weight and activation roles."""
-
-    attention: CIWeightPlacementConfig
-    ffn: CIWeightPlacementConfig
-    input: CIWeightPlacementConfig
-    output: CIWeightPlacementConfig
-    vectors: RuleConfig
-    activations: RuleConfig
 
 
 class ActivationsPlacementConfig(BaseConfig):
@@ -1021,22 +1052,92 @@ class TargetPlacementConfig(BaseConfig):
     component: TargetComponentLinearPlacementConfig
 
 
+PlacementPresetName = Literal[
+    "owner",
+    "zero1",
+    "zero1-replicated-resident",
+    "owner-replicated-resident",
+    "zero1-replicated-resident-moe",
+    "owner-replicated-resident-moe",
+    "zero1-replicated-resident-moe-replicated-ns",
+    "ddp",
+]
+"""The built-in placement tables by name (`placement.PRESETS` holds the tables and asserts
+it enumerates exactly these names). Each CI architecture maps these same names to its own
+rows."""
+
+
 class PlacementTableConfig(BaseConfig):
     """An explicit placement table (`runtime.sharding`), mirroring the typed
     `placement.PlacementRules`. The row vocabulary is CLOSED (extra keys are a parse
     error); rule values are free-form axis-name -> mesh-axes mappings, where YAML list
-    order is semantics (nested-axis linearization — PLACEMENT_DESIGN.md invariant 5)."""
+    order is semantics (nested-axis linearization — PLACEMENT_DESIGN.md invariant 5).
+    CI rows are the CI architecture's own: `ci_fn` names the preset it takes them from."""
 
     components: ComponentsPlacementConfig
-    ci_fn: CIFnPlacementConfig
+    ci_fn: PlacementPresetName
     activations: ActivationsPlacementConfig
     target: TargetPlacementConfig
 
 
+PlacementSpec = PlacementPresetName | PlacementTableConfig
+"""What a run or consumer writes down as its placement: a preset name or an explicit table."""
+
+
+SequenceSharding = Literal["replicate", "sequence_parallel"]
+"""How masked forwards place the between-blocks residual over tp. `replicate` keeps the
+position axis replicated (the standing spelling). `sequence_parallel` shards the position
+axis over tp between the blocks of masked forwards; block interiors run at full width,
+so each block boundary's tp-axis activation reduction becomes a reduce-scatter +
+all-gather pair at 1/tp resident width. Clean forwards, CI-fn taps and the output edge
+keep the replicated residual. Sequence length must tile tp, and only targets implementing
+it accept it (currently qwen36_moe; others refuse at their masked forward)."""
+
+
+class HsdpMeshShape(BaseConfig):
+    """The three-axis `(replicate, fsdp, tp)` logical mesh every non-resident placement
+    runs on — the `runtime.mesh:` value of those runs."""
+
+    replicate: PositiveInt = Field(
+        description="Logical model-replication and cross-replica ownership axis.",
+    )
+    fsdp: PositiveInt = Field(
+        description="Logical parameter-sharding axis; also shards the data batch.",
+    )
+    tp: PositiveInt = Field(
+        description="Logical Megatron tensor-parallel axis; batch activations replicate over it.",
+    )
+
+    @property
+    def world_size(self) -> int:
+        return self.replicate * self.fsdp * self.tp
+
+
+class ResidentMeshShape(BaseConfig):
+    """The two-axis `(data, tp)` logical mesh of the `*-replicated-resident` placements —
+    the whole ÷tp working copy is resident, so no fsdp axis exists to spell."""
+
+    data: PositiveInt = Field(
+        description="Logical data-parallel axis: shards the batch and the ÷N optimizer masters.",
+    )
+    tp: PositiveInt = Field(
+        description="Logical Megatron tensor-parallel axis; batch activations replicate over it.",
+    )
+
+    @property
+    def world_size(self) -> int:
+        return self.data * self.tp
+
+
+MeshShape = HsdpMeshShape | ResidentMeshShape
+"""Structurally discriminated: the two shapes' required keys are disjoint and extra keys
+refuse (`extra="forbid"`), so a `runtime.mesh:` mapping parses to exactly one arm."""
+
+
 class NamedNeuronRanks(BaseConfig):
     """A neuron-ranking artifact in the store: `<data_root>/neuron_ranks/<name>` — what the
-    LM `initialization: neuron_aligned_targeted` starts from (SPEC T13). Names are
-    immutable versions — a re-harvest is a new name."""
+    LM `initialization: neuron_aligned_targeted` starts from. Names are immutable versions —
+    a re-harvest is a new name."""
 
     kind: Literal["name"] = "name"
     name: str
@@ -1071,9 +1172,9 @@ class PDConfigBase(BaseConfig):
     Domain-agnostic — the target-coupled apparatus (which sites to decompose + the CI-fn
     arch) lives in the per-domain `decomposition` section, not here. Flipping any field here
     changes what algorithm runs. The concrete shapes are `PDConfig` (plain VPD: the full
-    loss vocabulary + the faithfulness warmup) and `TargetedPDConfig` (tPD, SPEC §11: the
+    loss vocabulary + the faithfulness warmup) and `TargetedPDConfig` (tPD, the
     faithfulness-free loss vocabulary, no warmup fields at all — a targeted config cannot
-    SPELL a faithfulness role, T3). Pair with `Cadence` (when to emit) when running the
+    SPELL a faithfulness role). Pair with `Cadence` (when to emit) when running the
     trainer (`param_decomp.core.run`); the compute substrate reaches the engine unpacked
     into primitives, never as a config object.
     """
@@ -1093,7 +1194,7 @@ class PDConfigBase(BaseConfig):
         ...,
         description=(
             "Global batch size (may be divided across multiple devices). For a targeted "
-            "run this is the TARGET stream's batch (T2); the broad stream's lives on "
+            "run this is the TARGET stream's batch; the broad stream's lives on "
             "`nontarget.batch_size`."
         ),
     )
@@ -1137,19 +1238,19 @@ class PDConfig(PDConfigBase):
 
 
 type WeightDecayStreams = Literal["target", "nontarget", "all"]
-"""Which streams' CI the T11 decay reads (`TargetedPDConfig.ci_scaled_weight_decay_stream`)."""
+"""Which streams' CI the CI-scaled decay reads (`TargetedPDConfig.ci_scaled_weight_decay_stream`)."""
 
 type WeightDecayRoles = Literal["output", "hidden", "all"]
-"""Which CI READOUT HEAD the T11 decay reads (`TargetedPDConfig.ci_scaled_weight_decay_role`):
-`output` the end-to-end head every run carries, `hidden` the internal-activations head (S36's
-second role, present only when the run carries a hidden pass)."""
+"""Which CI READOUT HEAD the CI-scaled decay reads (`TargetedPDConfig.ci_scaled_weight_decay_role`):
+`output` the end-to-end head every run carries, `hidden` the internal-activations head
+(present only when the run carries a hidden pass)."""
 
 
 class TargetedPDConfig(PDConfigBase):
-    """The tPD algorithm shape (SPEC §11): the faithfulness-free loss vocabulary, and no
-    faithfulness-warmup fields at all — warmup drives the weight delta to zero, and tPD
-    needs the delta free to carry off-target behavior (T3), so the knobs do not exist
-    here rather than being validated to zero. `batch_size` is the TARGET stream's (T2)."""
+    """Targeted-PD losses and updates, without faithfulness or faithfulness warmup.
+
+    The weight delta must remain free to carry off-target behavior; these fields
+    are absent rather than accepted at zero. `batch_size` sizes the target stream."""
 
     loss_metrics: list[TargetedLossMetricConfig] = Field(
         ...,
@@ -1163,9 +1264,9 @@ class TargetedPDConfig(PDConfigBase):
     hidden: HiddenPassConfig | None = Field(
         default=None,
         description=(
-            "The hidden role's TARGET-stream surface (SPEC T12): a second reconstruction "
-            "objective scored at internal activations, whose masks come from the CI fn's "
-            "second readout head. Requires `decomposition.ci.dual`. None (the default) is an "
+            "The hidden role's TARGET-stream surface: a second reconstruction objective "
+            "scored at internal activations, whose masks come from the CI fn's second "
+            "readout head. Requires `decomposition.ci.dual`. None (the default) is an "
             "ordinary single-objective tPD run, byte-inert."
         ),
     )
@@ -1173,7 +1274,7 @@ class TargetedPDConfig(PDConfigBase):
     ci_scaled_weight_decay: PositiveFloat | None = Field(
         default=None,
         description=(
-            "CI-scaled weight decay on the subcomponent V/U vectors (SPEC T11): after each "
+            "CI-scaled weight decay on the subcomponent V/U vectors: after each "
             "optimizer step every subcomponent's V column and U row scale by "
             "`1 - lr*wd*(1 - max CI)`, the max taken over every pass's batch by default — "
             "both streams and both CI heads — so dead components, never important anywhere, "
@@ -1185,20 +1286,20 @@ class TargetedPDConfig(PDConfigBase):
     ci_scaled_weight_decay_stream: WeightDecayStreams = Field(
         default="all",
         description=(
-            "Which streams' CI counts as evidence a component is alive (SPEC T11 amended): "
-            "`all` (the default, the original rule), `target` (the narrow stream only — a "
-            "component load-bearing ONLY on the broad stream is then decayed away), or "
-            "`nontarget`. Only meaningful with `ci_scaled_weight_decay` set."
+            "Which streams' CI counts as evidence a component is alive: `all` (the default, "
+            "the original rule), `target` (the narrow stream only — a component load-bearing "
+            "ONLY on the broad stream is then decayed away), or `nontarget`. Only meaningful "
+            "with `ci_scaled_weight_decay` set."
         ),
     )
     ci_scaled_weight_decay_role: WeightDecayRoles = Field(
         default="all",
         description=(
-            "Which CI READOUT HEAD the decay reads (SPEC T11 amended): `all` (the default, "
-            "the original rule), `output` (the end-to-end reconstruction head only — "
-            "components that only ever matter to the hidden-activations objective are then "
-            "decayed away), or `hidden` (the internal-activations head only, which requires "
-            "a hidden pass). Only meaningful with `ci_scaled_weight_decay` set."
+            "Which CI READOUT HEAD the decay reads: `all` (the default, the original rule), "
+            "`output` (the end-to-end reconstruction head only — components that only ever "
+            "matter to the hidden-activations objective are then decayed away), or `hidden` "
+            "(the internal-activations head only, which requires a hidden pass). Only "
+            "meaningful with `ci_scaled_weight_decay` set."
         ),
     )
     ci_scaled_weight_decay_quantile: float = Field(
@@ -1206,14 +1307,19 @@ class TargetedPDConfig(PDConfigBase):
         gt=0.0,
         le=1.0,
         description=(
-            "The per-component batch statistic the decay reads (SPEC T11 amended): 1.0 (the "
-            "default) is the MAX — the original rule, byte-inert and gather-free — and a "
-            "smaller value takes that quantile over the pooled batch and position axes "
-            "instead, so a component alive on only a few points no longer fully escapes the "
-            "decay. Applied per selected pass; the passes still combine by max. Only "
-            "meaningful with `ci_scaled_weight_decay` set."
+            "The per-component batch statistic the decay reads: 1.0 (the default) is the MAX "
+            "— the original rule, byte-inert and gather-free — and a smaller value takes that "
+            "quantile over the pooled batch and position axes instead, so a component alive "
+            "on only a few points no longer fully escapes the decay. Applied per selected "
+            "pass; the passes still combine by max. Only meaningful with "
+            "`ci_scaled_weight_decay` set."
         ),
     )
+
+    @model_validator(mode="after")
+    def validate_loss_metrics(self) -> Self:
+        _validate_training_losses(self.loss_metrics)
+        return self
 
     @model_validator(mode="after")
     def validate_ci_scaled_weight_decay(self) -> Self:
@@ -1231,26 +1337,11 @@ class TargetedPDConfig(PDConfigBase):
         return self
 
     @model_validator(mode="after")
-    def validate_loss_metrics(self) -> Self:
-        _validate_training_losses(self.loss_metrics)
-        for metric in self.loss_metrics:
-            match metric:
-                case ImportanceMinimalityLossConfig(frequency=frequency) if frequency is not None:
-                    assert frequency.ema_halflife_steps is None, (
-                        "frequency.ema_halflife_steps is not implemented for the targeted "
-                        "(tPD) objective: the EMA carries one frequency stream per site, and "
-                        "the two-pass step takes the penalty on two independent streams "
-                        "(SPEC S8'' — plain PD only)"
-                    )
-                case _:
-                    pass
-        return self
-
-    @model_validator(mode="after")
     def validate_hidden_pass(self) -> Self:
-        """Identities are unique ACROSS passes: every term's log key is `loss/<name>`, so a
-        hidden term sharing a target term's default name (its type literal) would silently
-        overwrite it in the metrics. Refuse at parse rather than lose a curve."""
+        """Identities are unique ACROSS passes: every term's log key is `loss/<name>`, and
+        persistent terms key their adversary state by name, so a hidden term sharing a target
+        term's default name (its type literal) would silently overwrite its curve and collide
+        in the adversary table. Refuse at parse rather than lose a curve."""
         if self.hidden is None:
             return self
         target_names = {cfg.name if cfg.name is not None else cfg.type for cfg in self.loss_metrics}
@@ -1270,13 +1361,19 @@ off a shape-blind `pd` take this union; base-field-only consumers take `PDConfig
 
 def _validate_training_losses(loss_metrics: Sequence[AnyLossMetricConfig]) -> None:
     """The role/identity facts every training-loss list must satisfy, refused at parse:
-    coefficients set, identities unique (`name or type` — the logged instance key),
+    identities unique (`name or type` — the logged instance key),
     exactly one importance-minimality term, at least one recon term, and at most one
-    nonlinearity term. Faithfulness multiplicity is the plain shape's own claim (the
-    targeted union has no member)."""
+    nonlinearity term. Faithfulness multiplicity is the plain shape's own claim
+    (the targeted union has no member)."""
     seen: set[str] = set()
     for cfg in loss_metrics:
-        assert cfg.coeff is not None, f"loss_metrics.{cfg.type!r} must set `coeff`"
+        if isinstance(cfg, ReconstructionAuxiliariesMixin):
+            for auxiliary in cfg.auxiliaries:
+                if isinstance(auxiliary.coeff, float):
+                    assert auxiliary.coeff > 0.0, (
+                        f"loss_metrics.{cfg.type!r}.auxiliaries.{auxiliary.name}.coeff must be positive; "
+                        "zero is reserved for eval-only measurement"
+                    )
         name = cfg.name if cfg.name is not None else cfg.type
         assert name not in seen, f"duplicate loss instance_key {name!r}"
         seen.add(name)
@@ -1334,7 +1431,7 @@ what has already been written; writing nothing at all is `NoCheckpointing` — a
 
 class PeriodicCheckpointing(BaseConfig):
     """Checkpoint on `save_every`, on SIGTERM, and at the final step — the resumable run
-    shape (SPEC S22). Under `keep_last` retention the retained window always contains the
+    shape. Under `keep_last` retention the retained window always contains the
     newest checkpoint, so the final-step one is never pruned."""
 
     kind: Literal["periodic"] = "periodic"
@@ -1364,7 +1461,7 @@ class Cadence(BaseConfig):
     alongside the runtime objects it depends on.
     """
 
-    train_log_every: PositiveInt
+    train_log_every: PositiveInt = 20
     checkpointing: Checkpointing
     dense_log_phase: DenseLogPhase | None = None
     """Optional denser logging for early training; `None` means a flat `train_log_every`."""
@@ -1384,6 +1481,8 @@ class WandbConfig(BaseConfig):
     """Wandb logging settings. Presence on `ExperimentConfig` opts in; omit to skip wandb."""
 
     project: str
+    metric_schema: MetricSchema = "legacy"
+    """W&B key layout, fixed for the lifetime of a run. Local JSONL keys stay unchanged."""
     entity: str | None = None
     group: str | None = None
     """Wandb UI group; None = ungrouped."""
@@ -1396,10 +1495,10 @@ class ResumeProvenance(BaseConfig):
     `ExperimentConfig`.
 
     A fine-tune run gets its own `run_id` / `launch_config.yaml` / `ckpts/`; this records the
-    parent it forked from. The JAX trainer (SPEC S33) loads the parent checkpoint's
+    parent it forked from. The JAX trainer loads the parent checkpoint's
     V/U + ci_fn onto a fresh reference state and trains a clean schedule from step 0
     (fresh optimizer / sources) under the new config — only when the run's own `ckpts/`
-    is empty (a subsequent SLURM requeue resumes from the run's own dir, ignoring
+    is empty (a subsequent restart resumes from the run's own dir, ignoring
     provenance). The structure (sites / C / ci-fn arch) must match the parent; only
     LR / coeffs / gamma / seq / batch / steps may change. Provenance flows into
     `launch_config.yaml` and `wandb.config` so the lineage is visible in the wandb UI. A run with
@@ -1419,28 +1518,28 @@ class ResumeProvenance(BaseConfig):
 
 IMP_MIN_METRIC_NAMES: dict[str, str] = {
     "imp": "ImportanceMinimalityLoss",
-    "imp_smooth_l0": "SmoothL0ImportanceMinimalityLoss",
     "freq": "FrequencyMinimalityLoss",
     "freq_batch": "FrequencyMinimalityLoss_batch",
 }
 """Step-record short key -> logged loss name, for the terms whose record key is not
-already the term's class name. Shared so the target stream (expanded by `run._METRIC_KEYS`)
-and the non-target stream (keyed in `train.make_targeted_train_step`) cannot drift apart:
-both streams must spell the same quantity the same way."""
+already the term's class name. Shared so the target stream (expanded by the run loop) and
+the other passes (keyed in `train.make_targeted_train_step`) cannot drift apart: every
+pass must spell the same quantity the same way."""
 
 
 METRIC_SHORT_NAMES: dict[str, str] = {
     "CIMaskedReconLoss": "CIMaskRecon",
     "CIMaskedReconSubsetLoss": "CIMaskReconSub",
     "FaithfulnessLoss": "Faith",
-    "NonlinearityLocalityLoss": "Nonlinearity",
     "ImportanceMinimalityLoss": "ImpMin",
+    "NonlinearityLocalityLoss": "Nonlinearity",
     "PersistentPGDReconLoss": "PersistPGDRecon",
     "PGDReconLoss": "PGDRecon",
     "PGDReconSubsetLoss": "PGDReconSub",
     "StochasticReconLoss": "StochRecon",
     "StochasticReconSubsetLoss": "StochReconSub",
     "UnmaskedReconLoss": "UnmaskedRecon",
+    "ArithmeticCIGrid": "ArithCIGrid",
     "ABGridDataset": "ABGrids",
     "CEandKLLosses": "CEandKL",
     "CIHistograms": "CIHist",
