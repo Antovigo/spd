@@ -252,6 +252,9 @@ def load_block(src: Path, layer: int) -> tuple[Weights, np.ndarray, dict[str, np
     comps = np.load(src / "alive_only" / f"L{layer}" / "comps.npz")
     kind = comps["kind"]
     cols = {k: np.flatnonzero(kind == k) for k in ("gate", "up", "down")}
+    cols.update(
+        {f"ids_{k}": comps["index"][cols[k]].astype(np.int64) for k in ("gate", "up", "down")}
+    )
     W = Weights(
         Ug=jnp.asarray(comps["U_gate"]),
         Uu=jnp.asarray(comps["U_up"]),
@@ -446,8 +449,9 @@ def run_position(
     res["check1_rel"] = np.sqrt(s2["c1_diff2"] / np.maximum(s2["c1_abs2"], 1e-300))
     res["check1_rel_t"] = np.sqrt(s2["c1_diff2"] / np.maximum(s2["c1_ref2"], 1e-300))
     res["ident4_max"] = s2["check"]
+    ids = {k: cols[k] for k in ("ids_gate", "ids_up", "ids_down")}  # AB-grid ids (ids.py)
     tmp2 = out / f"variance_pos{tau}.tmp.npz"
-    np.savez(tmp2, **res,
+    np.savez(tmp2, **res, **ids,
              tbar_g=np.asarray(refs.tbar_g), hbar_g=np.asarray(refs.hbar_g),
              r=np.asarray(refs.r), R=np.asarray(refs.R), tref=np.asarray(refs.tref))  # fmt: skip
     share_sum = np.nansum(res["phi_Mu"], 1) + np.nansum(res["phi_Mg"], 1)
@@ -475,7 +479,7 @@ def run_position(
     info.update(ident5_max=float(s3["check"]),
                 share5_err_max=float(np.nanmax(np.abs(gap))) if np.isfinite(gap).any() else 0.0)  # fmt: skip
     tmp3 = out / f"J_pos{tau}.tmp.npz"
-    np.savez(tmp3, sub=sub,
+    np.savez(tmp3, sub=sub, **ids,
              **{k: (v.astype(np.float32) if v.ndim == 3 else v) for k, v in res3.items()})  # fmt: skip
     finite = bool(np.isfinite(res["phi_Mu"][ok]).all() and np.isfinite(res["phi_Mg"][ok]).all()
                   and np.isfinite(res3["phi_J"][~res3["excluded"]]).all())  # fmt: skip

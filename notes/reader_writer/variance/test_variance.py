@@ -137,6 +137,7 @@ def test_driver_matches_in_memory(tmp_path) -> None:  # noqa: ANN001
     inner = np.zeros((n, 4, 4 + 5 + 5), np.float32)
     inner[:, 3] = np.concatenate([tg, tu, t_d], 1)
     cols = {"gate": np.arange(4), "up": np.arange(4, 9), "down": np.arange(9, 14)}
+    cols |= {f"ids_{k}": 100 + v for k, v in list(cols.items())}
     sub = np.arange(0, n, 3)
     W32 = jax.tree.map(lambda a: a.astype(jnp.float32), W)  # the production dtype
     info = run_position(0, 3, W32, inner, cols, tmp_path, n, sub, B=8, jB=4, wc=3, K=5)
@@ -148,6 +149,7 @@ def test_driver_matches_in_memory(tmp_path) -> None:  # noqa: ANN001
     for k in ("phi_Mu", "phi_Mu0", "phi_Mg", "var_t"):
         np.testing.assert_allclose(got[k], full[k], rtol=1e-4, atol=1e-5)
     np.testing.assert_allclose(gotJ["phi_J"], part["phi_J"], rtol=1e-4, atol=1e-5)
+    assert got["ids_down"].tolist() == list(range(109, 114))
 
 
 if __name__ == "__main__":

@@ -557,4 +557,10 @@ The pilot (on a 6,000-prompt extraction) changed four things before the full run
   and 13.5 hours for the routing tensor on 20,000 prompts. The routing subsample is therefore
   **8,000 prompts** (5.4 hours); passes 1 and 2 keep the whole pool. The extraction takes about
   17 minutes there.
+* **Component labels.** Result arrays are indexed by position in the block's alive list of that
+  kind (`alive_only/L<l>/comps.npz`). The component id is `comps.npz["index"]`, its index within
+  its site, which is the id the AB-grid applet shows (site `layers.<l>.mlp.<kind>_proj`);
+  `variance/ids.py` maps one to the other, and outputs written after this run also store the ids
+  (`ids_gate`, `ids_up`, `ids_down`). Check: at block 0, writer columns 4 and 47 are
+  `down_proj` components 5 and 67, the two components the filter's `add_pos4` AB grid saves there.
 

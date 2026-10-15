@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -J rwv-test
 #SBATCH -c 4
-#SBATCH --mem=8G
+#SBATCH --mem=2G
 #SBATCH -t 00:20:00
 #SBATCH -o /mnt/nw/home/a.vigouroux/out/pod-backup/p-ba8b0c08/analysis/reader_writer/variance/logs/%x-%j.out
 # sbatch test.sbatch — synthetic checks of variance.py on CPU (node-local copy of the scripts).
