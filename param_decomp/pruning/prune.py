@@ -78,6 +78,9 @@ class PruneState:
     """`(A,)` round of the last re-addition (-1 never)."""
     removed: np.ndarray
     """`(A,)` round of the last removal (-1 never)."""
+    next_round: int = 0
+    """Rounds already run (a resumed run continues the numbering; `max_rounds` caps the total)."""
+    fresh_screens: int = 0
 
 
 def run_rounds(
@@ -95,13 +98,12 @@ def run_rounds(
     targets = target_on_sample(ctx)
     (out_dir / "sets").mkdir(parents=True, exist_ok=True)
     log = (out_dir / "rounds.jsonl").open("a")
-    fresh_screens = 0
 
     def mean_ce(on: np.ndarray) -> float:
         return float(np.mean(score_set(ctx, slots.mask(on, n_layer), check, full, False)[CE]))
 
     ce_now = mean_ce(state.on)
-    for j in range(config.max_rounds):
+    for j in range(state.next_round, config.max_rounds):
         t0 = time.time()
         record: dict[str, object] = {"round": j, "size_before": int(state.on.sum())}
         # 1-2. removal batch and its exact check on Q
@@ -158,21 +160,24 @@ def run_rounds(
             ce_check=ce_now,
             seconds=time.time() - t0,
         )
+        del caches  # rebuilt on the next round's set; two would not fit beside the model
         stalled = not accepted and readded.size == 0
         if stalled:
-            if fresh_screens >= config.max_fresh_screens:
+            if state.fresh_screens >= config.max_fresh_screens:
                 record["stop"] = "fresh-screen cap"
                 _write(log, record, out_dir, j, state, g)
                 break
-            fresh_screens += 1
+            state.fresh_screens += 1
             mask = slots.mask(state.on, n_layer)
+            caches = sample_caches(ctx, mask, targets)
             everything = np.arange(slots.n)
             state.est, state.se = lean_screen(ctx, mask, state.on, everything, caches)
             back = np.nonzero(~state.on & (state.est - z * state.se > theta))[0]
             state.on[back] = True
             state.readded[back] = j
+            del caches
             removable = state.on & (state.est + z * state.se <= eps)
-            record.update(fresh_screen=fresh_screens, fresh_readded=int(back.size),
+            record.update(fresh_screen=state.fresh_screens, fresh_readded=int(back.size),
                           fresh_removable=int(removable.sum()))  # fmt: skip
             if back.size:
                 ce_now = mean_ce(state.on)
@@ -188,10 +193,18 @@ def run_rounds(
 def _write(
     log: TextIO, record: dict[str, object], out_dir: Path, j: int, state: PruneState, g: np.ndarray
 ) -> None:
+    state.next_round = j + 1
     logger.info(f"round {j}: {record}")
     log.write(json.dumps(record) + "\n")
     log.flush()
     np.savez(
         out_dir / "sets" / f"S_{j + 1:02d}.npz",
-        on=state.on, est=state.est, se=state.se, readded=state.readded, removed=state.removed, grad=g,
-    )  # fmt: skip
+        on=state.on,
+        est=state.est,
+        se=state.se,
+        readded=state.readded,
+        removed=state.removed,
+        grad=g,
+        next_round=np.asarray(state.next_round),
+        fresh_screens=np.asarray(state.fresh_screens),
+    )

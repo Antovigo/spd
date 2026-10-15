@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Run on the POD. Launch the pruning stages detached (closing the shell does not stop them).
 #     source /workspace/spd/notes/dual_objective/addsub-all-layers/env.sh
-#     ./run.sh [--stages select,validate,...]      # default: every stage up to `prune`
+#     ./run.sh [--stages screen,combine,estimator_check]   # default: select,validate,references
 # Follow: tail -f $DATA_ROOT/logs/pruning.latest.log
 set -euo pipefail
 : "${REPO:?source env.sh first}" "${DATA_ROOT:?source env.sh first}" "${VENV_PY:?source env.sh first}"
 NAME="${NAME:-addsub-08-prune}"
-STAGES="select,validate,references,screen,combine,estimator_check"
+STAGES="select,validate,references"
 [ "${1:-}" = --stages ] && STAGES="$2"
 LOG="$DATA_ROOT/logs/pruning.$(date +%Y%m%d-%H%M%S).log"
 mkdir -p "$DATA_ROOT/logs"

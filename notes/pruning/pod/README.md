@@ -15,11 +15,12 @@ filter `addsub-08-last-pos`). Outputs land in
    source /workspace/spd/notes/dual_objective/addsub-all-layers/env.sh
    cd /workspace/spd && uv python install 3.12 && uv sync --frozen --no-dev --extra cuda
    ```
-4. **Stages 1** (pod): `cd /workspace/spd/notes/pruning/pod && ./run.sh` runs select, validate,
-   references, screen, combine and the estimator check. Read `validation.json` (precision noise
-   floor: switch `site_precision`/`head_precision` to `tf32` only if its `frac_below_0.1_se` is ≥
-   0.99) and the `se_ce` column of `components.tsv`, then set `epsilon` in
-   `/workspace/data/pruning/config.yaml`.
-5. **Stage 2** (pod): `./run.sh --stages prune,report`. `prune` resumes from the newest
-   `sets/S_<j>.npz`.
-6. **Pull** (cluster): `./pull.sh`.
+4. **Stage set 1** (pod): `cd /workspace/spd/notes/pruning/pod && ./run.sh` runs select, validate
+   and references. Read `validation.json`: switch `site_precision` / `head_precision` to `tf32` in
+   `/workspace/data/pruning/config.yaml` only if `noise_tf32_vs_fp32.frac_below_0.1_se` ≥ 0.99
+   (the precisions freeze once `screen/` exists).
+5. **Stage set 2**: `./run.sh --stages screen,combine,estimator_check`. Read the `se_ce` column of
+   `components.tsv` and `estimator_check.json`, then set `epsilon` in the config.
+6. **Stage set 3**: `./run.sh --stages prune,report`. `prune` resumes from the newest
+   `sets/S_<j>.npz`, continuing the round numbering.
+7. **Pull** (cluster): `./pull.sh`.

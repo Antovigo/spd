@@ -2,6 +2,7 @@
 decomposition's own masked forward, the dense reference against the clean forward, partial
 forwards from every block, flips, the mask gradient, and the estimator math."""
 
+import json
 from pathlib import Path
 
 import jax
@@ -393,3 +394,25 @@ def test_rich_screen_combine_and_rounds(setup: Setup, tmp_path: Path) -> None:
         )
     )
     assert ce_final - ce_s0 <= config.global_budget + 1e-6
+    # A resumed run continues the numbering instead of overwriting the first rounds.
+    n_sets = len(list((tmp_path / "sets").glob("S_*.npz")))
+    assert final.next_round == n_sets == len(rounds)
+    resumed = run_rounds(
+        config.model_copy(update={"max_rounds": final.next_round + 1}),
+        ctx,
+        final,
+        check,
+        ce_s0,
+        tmp_path,
+    )
+    assert resumed.next_round <= final.next_round + 1
+    records = [json.loads(line) for line in (tmp_path / "rounds.jsonl").read_text().splitlines()]
+    assert [r["round"] for r in records] == list(range(len(records)))
+
+
+def test_engine_runs_under_the_consumer_mesh(setup: Setup) -> None:
+    """`run.py` drives every pass inside `jax.set_mesh` (the restored run's explicit mesh)."""
+    mesh = setup[0]
+    with jax.set_mesh(mesh):
+        test_lean_screen_is_exact_when_the_sample_is_everything(setup)
+        test_mask_gradient_is_the_derivative(setup)

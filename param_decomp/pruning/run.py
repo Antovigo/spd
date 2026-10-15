@@ -74,6 +74,18 @@ STAGES = (
     "report",
 )
 PERIODS = (2, 5, 10, 20, 50, 100)
+ROUND_KNOBS = (
+    "z",
+    "epsilon",
+    "theta",
+    "round_tolerance",
+    "global_budget",
+    "max_batch_fraction",
+    "disagreement_sigma",
+    "max_disagreements",
+    "max_rounds",
+    "max_fresh_screens",
+)
 R_BIN = 100
 
 
@@ -95,9 +107,16 @@ def run(config: PruneConfig, data_root: Path, name: str, stages: tuple[str, ...]
     dumped = yaml.safe_dump(config.model_dump(mode="json"), sort_keys=False)
     if pinned.exists():
         old = PruneConfig.model_validate(yaml.safe_load(pinned.read_text()))
-        frozen = {"run", "step", "filter_id", "pool", "seed", "sample_size", "top_ci", "check_size"}
-        for key in frozen:
-            assert getattr(old, key) == getattr(config, key), f"{key} differs from {pinned}"
+        # Every field shapes some persisted output, except the round knobs (read only by
+        # `prune`, which resumes) and the batch sizes; the screen precisions may still change
+        # until the screen has started (the validation measures every precision path).
+        mutable = set(ROUND_KNOBS) | {"batch_size", "hc_components_per_batch", "select_batch_size",
+                                      "grad_batch_size", "compilation_cache_dir"}  # fmt: skip
+        if not (out / "screen").exists():
+            mutable.update({"site_precision", "head_precision"})
+        for key in PruneConfig.model_fields:
+            if key not in mutable:
+                assert getattr(old, key) == getattr(config, key), f"{key} differs from {pinned}"
     pinned.write_text(dumped)
 
     restored = restore_jax_run(run_dir, config.step, data_root=data_root)
@@ -289,8 +308,15 @@ def _resume(out: Path, n: int) -> PruneState:
     if sets:
         d = np.load(sets[-1])
         logger.info(f"resuming from {sets[-1].name}: |S| = {int(d['on'].sum())}")
-        return PruneState(on=d["on"].copy(), est=d["est"].copy(), se=d["se"].copy(),
-                          readded=d["readded"].copy(), removed=d["removed"].copy())  # fmt: skip
+        return PruneState(
+            on=d["on"].copy(),
+            est=d["est"].copy(),
+            se=d["se"].copy(),
+            readded=d["readded"].copy(),
+            removed=d["removed"].copy(),
+            next_round=int(d["next_round"]),
+            fresh_screens=int(d["fresh_screens"]),
+        )
     table = np.genfromtxt(
         out / "components.tsv", delimiter="\t", names=True, dtype=None, encoding=None
     )
