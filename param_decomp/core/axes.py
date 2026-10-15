@@ -21,11 +21,18 @@ MeshAxis = Literal["replicate", "fsdp", "tp", "data"]
 two-axis `(data, tp)` mesh."""
 
 SemanticAxis = Literal[
-    # component V/U stacks and their faithfulness deltas
+    # Axes of the component V/U stacks and their faithfulness deltas. A dense stack
+    # uses `stack`, `d_in`, `d_out`, and `C`. A block-factored stack
+    # (`components.BlockedFactorization`) adds `expert` — the placement rows' spelling
+    # of the block/table axis — and `C_block` for the components within one block, and
+    # its `d_in`/`d_out` name the dimensions of one block. `C` stays the flat per-site
+    # component axis the mask/CI boundary sees (block-major, of size `n_blocks * C_block`).
     "stack",
     "d_in",
     "d_out",
     "C",
+    "expert",
+    "C_block",
     # the CI transformer's weights; attention keeps DISTINCT query and K/V head axes
     # (GQA: q/o carry n_head, k/v carry n_kv_head — one generic "head" would let a mesh
     # tile one count and silently not the other)
@@ -34,6 +41,13 @@ SemanticAxis = Literal[
     "kv_head",
     "ffn_hidden",
     "input",
+    # independent matrix axes besides `stack`
+    "depth",
+    "site",
+    # the selected CI emission's token-major pick axis (k·c_per_block wide). NOT `C`:
+    # its picks are in selection order, carry no block co-location, and replicate at
+    # the activation waist rather than sharding over tp.
+    "selected_c",
     # activation waists (`components.activation_axes`) and the attention head-split view
     "batch",
     "position",
@@ -47,6 +61,8 @@ SemanticAxis = Literal[
 
 Axes = tuple[SemanticAxis, ...]
 
-# A semantic dim name -> the mesh axes it shards over (one, an ordered tuple, or None =
-# replicated).
-MeshAssignment = MeshAxis | tuple[MeshAxis, ...] | None
+MeshAssignment = tuple[MeshAxis, ...]
+"""The ordered mesh axes one semantic dim shards over; `()` = replicated. The ONE in-code
+spelling of a rule value: the config schema's `str` / `list` / `null` forms are authoring
+sugar that the placement parse boundary folds into this tuple, so no consumer ever
+branches on a value's shape."""

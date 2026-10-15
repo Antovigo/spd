@@ -20,7 +20,7 @@ def main(
     batch_size: int = 128,
 ) -> None:
     runtime = RuntimeConfig.model_validate(yaml.safe_load(Path(config).read_text())["runtime"])
-    os.environ.update(runtime.launch_env.as_env())
+    os.environ.update(runtime.launch_env.as_env(os.environ.get("XLA_FLAGS")))
     from param_decomp.experiments.lm.neuron_ranks_harvest import harvest
 
     harvest(

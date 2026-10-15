@@ -29,12 +29,21 @@ from jaxtyping import Array, Float, Int
 
 from param_decomp.ci_filter.objective import answer_logprob_rows, restrict, row_scores
 from param_decomp.ci_filter.pool import ArithmeticPool, Tokenizer
-from param_decomp.ci_filter.step import CIConstraints, Prepared, gather_rows, output_ci
-from param_decomp.core.ci_fn import PlacedCIFn
-from param_decomp.core.model import MaterializedMasking, PlacedModel
+from param_decomp.ci_filter.step import (
+    CIConstraints,
+    FilterCIFn,
+    Prepared,
+    gather_batch,
+    last_logits,
+    masked_output,
+    output_ci,
+)
+from param_decomp.core.model import MaterializedMasking
 from param_decomp.core.precision import COMPUTE_DT
+from param_decomp.experiments.lm.load_run import PlacedTransformer
+from param_decomp.lm.batch import LMBatchWithDocuments
 
-VALUE_OF = {"add": lambda a, b: a + b, "sub": lambda a, b: a - b}
+VALUE_OF = {"add": lambda a, b: a + b, "sub": lambda a, b: a - b, "mul": lambda a, b: a * b}
 
 
 @dataclass(frozen=True)
@@ -91,9 +100,9 @@ class AttributionRows(eqx.Module):
 
 type AttributionBatch = Callable[
     [
-        PlacedModel,
+        PlacedTransformer,
         Prepared,
-        PlacedCIFn,
+        FilterCIFn,
         CIConstraints,
         Int[Array, "N T"],
         Int[Array, " B"],
@@ -109,36 +118,48 @@ def make_attribution_batch(remat: bool) -> AttributionBatch:
 
     @eqx.filter_jit
     def attribution_batch(
-        placed: PlacedModel,
+        placed: PlacedTransformer,
         prepared: Prepared,
-        ci_fn: PlacedCIFn,
+        ci_fn: FilterCIFn,
         constraints: CIConstraints,
         tokens_all: Int[Array, "N T"],
         idx: Int[Array, " B"],
         answer_ids: Int[Array, " K"],
         target_all: Int[Array, " N"],
     ) -> AttributionRows:
-        tokens = gather_rows(tokens_all, idx)
         target_idx = target_all[idx]
-        clean = placed.clean_forward(tokens, capture_keys=ci_fn.capture_keys)
-        masks = output_ci(placed, ci_fn, constraints, clean.captures, remat=False).lower
+        clean = placed.clean_forward(gather_batch(tokens_all, idx), ci_fn.capture_keys)
+        clean_last = last_logits(clean.output)
+        masks = output_ci(placed, prepared, ci_fn, constraints, clean, remat=False).lower
 
         def score_of(masks: dict[str, Array]) -> Float[Array, " B"]:
-            logits = placed.masked_forward(
-                prepared, tokens, masking=MaterializedMasking(component_masks=masks), remat=remat
-            ).output[:, -1, :]
+            logits = last_logits(
+                masked_output(
+                    placed,
+                    prepared,
+                    clean.conditioning,
+                    MaterializedMasking(component_masks=masks),
+                    remat=remat,
+                )
+            )
             return answer_logprob_rows(logits, answer_ids, target_idx)
 
         score, pullback = jax.vjp(score_of, masks)
         (grads,) = pullback(jnp.ones_like(score))
-        logits = placed.masked_forward(
-            prepared, tokens, masking=MaterializedMasking(component_masks=masks), remat=False
-        ).output[:, -1, :]
+        logits = last_logits(
+            masked_output(
+                placed,
+                prepared,
+                clean.conditioning,
+                MaterializedMasking(component_masks=masks),
+                remat=False,
+            )
+        )
         restricted = restrict(logits, answer_ids)
-        clean_restricted = restrict(clean.output[:, -1, :], answer_ids)
+        clean_restricted = restrict(clean_last, answer_ids)
         rows = {
             "score": score,
-            "clean_score": answer_logprob_rows(clean.output[:, -1, :], answer_ids, target_idx),
+            "clean_score": answer_logprob_rows(clean_last, answer_ids, target_idx),
             "correct": (jnp.argmax(restricted, axis=-1) == target_idx).astype(jnp.float32),
             "clean_correct": (jnp.argmax(clean_restricted, axis=-1) == target_idx).astype(
                 jnp.float32
@@ -162,11 +183,12 @@ def make_attribution_batch(remat: bool) -> AttributionBatch:
 
 
 class AblationState(eqx.Module):
-    """What a prompt batch contributes to EVERY component's ablation: the tokens, the CI masks
-    and the clean logits. Computing it once keeps the clean forward and the CI transformer out
-    of the per-component loop (the sweep's inner cost is then one masked forward)."""
+    """What a prompt batch contributes to EVERY component's ablation: the clean forward's
+    conditioning, the CI masks and the clean logits. Computing it once keeps the clean forward
+    and the CI transformer out of the per-component loop (the sweep's inner cost is then one
+    masked forward)."""
 
-    tokens: Int[Array, "B T"]
+    conditioning: LMBatchWithDocuments
     masks: dict[str, Float[Array, "B T C"]]
     clean_logits: Float[Array, "B vocab"]
     target_idx: Int[Array, " B"]
@@ -175,19 +197,19 @@ class AblationState(eqx.Module):
 def make_ablation_state() -> Callable[..., AblationState]:
     @eqx.filter_jit
     def ablation_state(
-        placed: PlacedModel,
-        ci_fn: PlacedCIFn,
+        placed: PlacedTransformer,
+        prepared: Prepared,
+        ci_fn: FilterCIFn,
         constraints: CIConstraints,
         tokens_all: Int[Array, "N T"],
         idx: Int[Array, " B"],
         target_all: Int[Array, " N"],
     ) -> AblationState:
-        tokens = gather_rows(tokens_all, idx)
-        clean = placed.clean_forward(tokens, capture_keys=ci_fn.capture_keys)
+        clean = placed.clean_forward(gather_batch(tokens_all, idx), ci_fn.capture_keys)
         return AblationState(
-            tokens=tokens,
-            masks=output_ci(placed, ci_fn, constraints, clean.captures, remat=False).lower,
-            clean_logits=clean.output[:, -1, :],
+            conditioning=clean.conditioning,
+            masks=output_ci(placed, prepared, ci_fn, constraints, clean, remat=False).lower,
+            clean_logits=last_logits(clean.output),
             target_idx=target_all[idx],
         )
 
@@ -202,19 +224,22 @@ def make_ablation_metrics() -> Callable[..., dict[str, Array]]:
 
     @eqx.filter_jit
     def ablation_metrics(
-        placed: PlacedModel,
+        placed: PlacedTransformer,
         prepared: Prepared,
         state: AblationState,
         answer_ids: Int[Array, " K"],
         keep: dict[str, Array],
     ) -> dict[str, Array]:
         masked = {site: v * keep[site].astype(COMPUTE_DT) for site, v in state.masks.items()}
-        logits = placed.masked_forward(
-            prepared,
-            state.tokens,
-            masking=MaterializedMasking(component_masks=masked),
-            remat=False,
-        ).output[:, -1, :]
+        logits = last_logits(
+            masked_output(
+                placed,
+                prepared,
+                state.conditioning,
+                MaterializedMasking(component_masks=masked),
+                remat=False,
+            )
+        )
         scores = row_scores(logits, state.clean_logits, answer_ids, state.target_idx)
         means = {
             "kl": jnp.mean(scores.kl),
@@ -229,9 +254,9 @@ def make_ablation_metrics() -> Callable[..., dict[str, Array]]:
 
 type AblationScores = Callable[
     [
-        PlacedModel,
+        PlacedTransformer,
         Prepared,
-        PlacedCIFn,
+        FilterCIFn,
         CIConstraints,
         Int[Array, "N T"],
         Int[Array, " B"],
@@ -250,9 +275,9 @@ def make_ablation_scores() -> AblationScores:
 
     @eqx.filter_jit
     def ablation_scores(
-        placed: PlacedModel,
+        placed: PlacedTransformer,
         prepared: Prepared,
-        ci_fn: PlacedCIFn,
+        ci_fn: FilterCIFn,
         constraints: CIConstraints,
         tokens_all: Int[Array, "N T"],
         idx: Int[Array, " B"],
@@ -260,14 +285,19 @@ def make_ablation_scores() -> AblationScores:
         target_all: Int[Array, " N"],
         keep: dict[str, Array],
     ) -> tuple[Float[Array, " B"], Float[Array, " B"]]:
-        tokens = gather_rows(tokens_all, idx)
         target_idx = target_all[idx]
-        clean = placed.clean_forward(tokens, capture_keys=ci_fn.capture_keys)
-        masks = output_ci(placed, ci_fn, constraints, clean.captures, remat=False).lower
+        clean = placed.clean_forward(gather_batch(tokens_all, idx), ci_fn.capture_keys)
+        masks = output_ci(placed, prepared, ci_fn, constraints, clean, remat=False).lower
         masked = {site: v * keep[site].astype(COMPUTE_DT) for site, v in masks.items()}
-        logits = placed.masked_forward(
-            prepared, tokens, masking=MaterializedMasking(component_masks=masked), remat=False
-        ).output[:, -1, :]
+        logits = last_logits(
+            masked_output(
+                placed,
+                prepared,
+                clean.conditioning,
+                MaterializedMasking(component_masks=masked),
+                remat=False,
+            )
+        )
         score = answer_logprob_rows(logits, answer_ids, target_idx)
         correct = (jnp.argmax(restrict(logits, answer_ids), axis=-1) == target_idx).astype(
             jnp.float32

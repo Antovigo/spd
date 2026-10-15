@@ -2,7 +2,9 @@
 grid collection and CI-fn checkpoint on a tiny placed GLU over a one-device mesh (the
 explicit-sharding path the 8B run takes)."""
 
+from dataclasses import replace
 from pathlib import Path
+from typing import Literal
 
 import equinox as eqx
 import jax
@@ -49,6 +51,7 @@ from param_decomp.ci_filter.ppgd import PPGDStep, init_adversary
 from param_decomp.ci_filter.step import (
     UNCONSTRAINED,
     CIConstraints,
+    FilterCIFn,
     _capped,
     batch_gradients,
     ci_masked_micro_call,
@@ -64,28 +67,25 @@ from param_decomp.ci_filter.step import (
     sample_batch,
     trainable,
 )
-from param_decomp.core.ci_fn import (
-    Chunk,
-    ChunkwiseTransformerCIArch,
-    ChunkwiseTransformerCIFn,
-    MHACIAttention,
-    PlacedCIFn,
-    build_ci_fn,
-    resolve_ci_placement,
-)
-from param_decomp.core.components import SiteC
+from param_decomp.core.ci_fn.interface import is_dual
+from param_decomp.core.components import SiteC, SiteSpec
 from param_decomp.core.configs import AdamPGDConfig
 from param_decomp.core.init_placed import (
     init_model_component_stacks_placed,
     random_component_initializer,
 )
-from param_decomp.core.model import PlacedModel, prepare_compute_weights
-from param_decomp.core.placement import from_config
+from param_decomp.core.placement import PlacementRules, from_config
 from param_decomp.core.precision import COMPUTE_DT, cast_floating
 from param_decomp.core.schedule import ScheduleConfig
 from param_decomp.core.sharding import hsdp_mesh, place_target, single_device_mesh
-from param_decomp.targets.glu_transformer import KIND_ORDER, glu_site_specs, site_name
-from param_decomp.targets.testing import tiny_glu_cfg, tiny_glu_decomposed_lm
+from param_decomp.experiments.lm.load_run import PlacedTransformer
+from param_decomp.targets.testing import (
+    tiny_glu_cfg,
+    tiny_glu_chunkwise_ci_fn_arch,
+    tiny_glu_decomposed_lm,
+)
+from param_decomp.targets.transformer import KIND_ORDER, glu_site_specs, site_name
+from param_decomp.tests.placed_ci_fn import placed_ci_fn
 
 CONFIGS = Path(__file__).parents[2] / "ci_filter" / "configs"
 
@@ -233,28 +233,21 @@ def _config(micro: int) -> CIFilterConfig:
 C = 8
 
 
-def _setup(mesh: Mesh, sharding: str):
+def _setup(
+    mesh: Mesh, sharding: Literal["ddp", "zero1"]
+) -> tuple[PlacementRules, PlacedTransformer, tuple[SiteSpec, ...], FilterCIFn]:
+    """A dual CI fn (the decomposition's shape) reading the residual entering block 1."""
     cfg = tiny_glu_cfg()
     sites = glu_site_specs(
         cfg, tuple(SiteC(site_name(layer, kind), C) for layer in (1, 2) for kind in KIND_ORDER)
     )
     model = tiny_glu_decomposed_lm(cfg, sites, jax.random.PRNGKey(0))
     rules = from_config(sharding, mesh, sites)
-    placed: PlacedModel = place_target(model, rules)
-    arch = ChunkwiseTransformerCIArch(
-        chunks=(Chunk(input_taps=("resid.1",), output_sites=model.site_names),),
-        input_dim=cfg.n_embd,
-        d_model=16,
-        n_blocks=1,
-        attention=MHACIAttention(n_heads=2),
-        ffn_hidden=32,
-        ffn_kind="gelu",
-        learned_norm_scale=False,
-        dual=True,
-    )
-    fn = build_ci_fn(arch, model.sites, jax.random.PRNGKey(3))
-    assert isinstance(fn, ChunkwiseTransformerCIFn)
-    ci_fn = PlacedCIFn(fn=fn, placement=resolve_ci_placement(arch, rules))
+    placed: PlacedTransformer = place_target(model, rules)
+    arch = replace(tiny_glu_chunkwise_ci_fn_arch(model, n_blocks=1), dual=True)
+    with jax.set_mesh(mesh):
+        ci_fn = placed_ci_fn(arch, sites, jax.random.PRNGKey(3), mesh, rules)
+    assert is_dual(ci_fn)
     return rules, placed, sites, ci_fn
 
 
@@ -268,10 +261,10 @@ def test_nontarget_probe_isolates_one_component() -> None:
         components = init_model_component_stacks_placed(
             placed, jax.random.PRNGKey(1), rules, random_component_initializer
         )
-        prepared = prepare_compute_weights(placed, components)
+        prepared = placed.prepare_compute_weights(components)
         ones = {s.name: jnp.ones(s.C, jnp.float32) for s in sites}
-        selection = ((placed.site_names[0], 0), (placed.site_names[1], 1))
-        ci = make_probe_ci(selection)(placed, ci_fn, tokens)
+        selection = ((placed.model.site_names[0], 0), (placed.model.site_names[1], 1))
+        ci = make_probe_ci(selection)(placed, prepared, ci_fn, tokens)
         assert np.asarray(ci).shape == (*tokens.shape, len(selection))
         assert np.all((np.asarray(ci) >= 0.0) & (np.asarray(ci) <= 1.0))
         baseline = make_probe_baseline()(placed, prepared, tokens, ones)
@@ -281,7 +274,7 @@ def test_nontarget_probe_isolates_one_component() -> None:
         same = probe(placed, prepared, tokens, baseline, ones)
         np.testing.assert_allclose(np.asarray(same["kl"]), 0.0, atol=1e-4)
         np.testing.assert_array_equal(np.asarray(same["top1"]), np.asarray(baseline.top1))
-        site = placed.site_names[0]
+        site = placed.model.site_names[0]
         keep = dict(ones)
         keep[site] = ones[site].at[0].set(0.0)
         ablated = probe(placed, prepared, tokens, baseline, keep)
@@ -300,20 +293,22 @@ def test_ablation_sweep_metrics_match_a_single_ablation() -> None:
         components = init_model_component_stacks_placed(
             placed, jax.random.PRNGKey(1), rules, random_component_initializer
         )
-        prepared = prepare_compute_weights(placed, components)
+        prepared = placed.prepare_compute_weights(components)
         tokens_all = jax.sharding.reshard(jnp.asarray(pool.tokens), P())
         answer_ids = jax.sharding.reshard(jnp.asarray(answers), P())
         target_all = jax.sharding.reshard(jnp.asarray(targets.indices), P())
         idx = jnp.asarray(np.arange(4, dtype=np.int32))
 
-        state = make_ablation_state()(placed, ci_fn, UNCONSTRAINED, tokens_all, idx, target_all)
+        state = make_ablation_state()(
+            placed, prepared, ci_fn, UNCONSTRAINED, tokens_all, idx, target_all
+        )
         metrics = make_ablation_metrics()
         ones = {s.name: jnp.ones(s.C, jnp.float32) for s in sites}
         base = metrics(placed, prepared, state, answer_ids, ones)
         assert set(base) == {"kl", "integer_kl", "answer_ce", "accuracy"}
         assert float(base["kl"]) >= -1e-6
 
-        site = placed.site_names[0]
+        site = placed.model.site_names[0]
         keep = dict(ones)
         keep[site] = ones[site].at[3].set(0.0)
         ablated = metrics(placed, prepared, state, answer_ids, keep)
@@ -335,7 +330,7 @@ def test_train_eval_grid_and_checkpoint_run_on_a_zero1_fsdp_mesh(tmp_path: Path)
     _exercise_placed(tmp_path, hsdp_mesh(1, jax.device_count(), 1), "zero1")
 
 
-def _exercise_placed(tmp_path: Path, mesh: Mesh, sharding: str) -> None:
+def _exercise_placed(tmp_path: Path, mesh: Mesh, sharding: Literal["ddp", "zero1"]) -> None:
     rules, placed, sites, ci_fn = _setup(mesh, sharding)
     pool = build_pool(ArithmeticPoolConfig(a_range=(1, 3), b_range=(1, 3)), FakeTokenizer())
     answers = answer_token_ids(FakeTokenizer(), include_minus=True)
@@ -351,7 +346,7 @@ def _exercise_placed(tmp_path: Path, mesh: Mesh, sharding: str) -> None:
             placed, jax.random.PRNGKey(1), rules, random_component_initializer
         )
         components = remove_components(full_components, kept)
-        for site in placed.site_names:
+        for site in placed.model.site_names:
             V, U = (np.asarray(x) for x in (components.site(site).V, components.site(site).U))
             full_V, full_U = (
                 np.asarray(x) for x in (full_components.site(site).V, full_components.site(site).U)
@@ -361,10 +356,10 @@ def _exercise_placed(tmp_path: Path, mesh: Mesh, sharding: str) -> None:
             np.testing.assert_array_equal(V[:, ::2], full_V[:, ::2])
             np.testing.assert_array_equal(U[::2], full_U[::2])
         del full_components
-        prepared = prepare_compute_weights(placed, components)
+        prepared = placed.prepare_compute_weights(components)
         v_norms = {
             site: jax.sharding.reshard(jnp.linalg.norm(components.site(site).V, axis=0), P())
-            for site in placed.site_names
+            for site in placed.model.site_names
         }
         tokens_all = jax.sharding.reshard(jnp.asarray(pool.tokens), P())
         answer_ids = jax.sharding.reshard(jnp.asarray(answers), P())
@@ -492,7 +487,7 @@ def _exercise_placed(tmp_path: Path, mesh: Mesh, sharding: str) -> None:
             np.testing.assert_array_equal(np.asarray(site_max[site])[1::2], 0.0)
         assert set(rows) == {"ci", "rounded"}
         assert np.asarray(rows["ci"]["kl"]).shape == (micro,)
-        assert set(site_max) == set(placed.site_names)
+        assert set(site_max) == set(placed.model.site_names)
         assert np.asarray(l0["l0_per_token"]).shape == (micro,)
         pgd_config = config.model_copy(
             update={"pgd_eval": PGDEvalConfig(n_steps=2, n_batches=2, batch_size=micro)}
@@ -536,8 +531,8 @@ def _exercise_placed(tmp_path: Path, mesh: Mesh, sharding: str) -> None:
         assert np.all(np.asarray(rows.score) <= 1e-6) and np.all(
             np.isfinite(np.asarray(rows.score))
         )
-        assert set(rows.effect) == set(placed.site_names)
-        for site in placed.site_names:
+        assert set(rows.effect) == set(placed.model.site_names)
+        for site in placed.model.site_names:
             np.testing.assert_array_equal(np.asarray(rows.effect[site])[:, 1::2], 0.0)
 
         ablation = make_ablation_scores()
@@ -547,7 +542,7 @@ def _exercise_placed(tmp_path: Path, mesh: Mesh, sharding: str) -> None:
         )
         np.testing.assert_allclose(np.asarray(base), np.asarray(rows.score), rtol=1e-4, atol=1e-5)
         assert np.all(np.isin(np.asarray(base_correct), (0.0, 1.0)))
-        site0 = placed.site_names[0]
+        site0 = placed.model.site_names[0]
         eps = 0.01
         scaled = dict(ones)
         scaled[site0] = ones[site0].at[0].set(1.0 - eps)
@@ -582,7 +577,7 @@ def _exercise_placed(tmp_path: Path, mesh: Mesh, sharding: str) -> None:
             0.0,
         )
         assert len(slices.snapshots) == pool.seq_len
-        site = placed.site_names[0]
+        site = placed.model.site_names[0]
         for snapshot in slices.snapshots:
             assert snapshot.saved[site].tolist() == list(range(C))
             assert snapshot.ci_columns["output"][site].shape == (9, 1, C)

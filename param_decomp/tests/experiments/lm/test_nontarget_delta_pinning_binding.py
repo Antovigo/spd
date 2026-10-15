@@ -8,21 +8,35 @@ operation pinned and every target-stream one unpinned, and that a plain run pins
 This has been wrong before: an unpinned non-target probe measures the delta->0 attack no
 component-side training can defend, which reads as a decomposition failure that is
 really a measurement bug. The truth table is one function, so pin the function and pin
-that all three recon families actually call it.
+that the evaluation plan threads it into all three recon families.
 """
 
 from collections.abc import Callable
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
+import jax
+import jax.numpy as jnp
 import pytest
 
-from param_decomp.core.configs import PGDReconLossConfig
-from param_decomp.core.eval_schedule import Every
-from param_decomp.experiments.lm import scalar_eval_operations as ops
+from param_decomp.core.configs import CIMaskedReconEvalConfig, EvalPGDReconLossConfig
+from param_decomp.core.run import MetricsSink, SharedForwardOperationPlan
+from param_decomp.experiments.eval_config import AnyEvalMetricConfig, EvalConfig
+from param_decomp.experiments.lm import eval_operations
 from param_decomp.experiments.lm.eval_config import CEandKLLossesConfig
-from param_decomp.experiments.lm.eval_context import Stream, nontarget_delta_pinned
+from param_decomp.experiments.lm.eval_context import (
+    Stream,
+    nontarget_delta_pinned,
+    stream_log_prefix,
+)
+from param_decomp.lm.batch import LMBatchWithDocuments
 
-RECON_FAMILIES = ("ce_kl", "masked_kl", "fresh_pgd")
+RECON_FAMILIES: dict[str, AnyEvalMetricConfig] = {
+    "ce_kl": CEandKLLossesConfig(rounding_threshold=0.0),
+    "masked_kl": CIMaskedReconEvalConfig(),
+    "fresh_pgd": EvalPGDReconLossConfig(init="random", source_shape="c", n_steps=2, step_size=0.1),
+}
 
 
 def test_only_a_targeted_runs_nontarget_stream_pins_the_delta():
@@ -32,56 +46,47 @@ def test_only_a_targeted_runs_nontarget_stream_pins_the_delta():
     assert not nontarget_delta_pinned(targeted=False, stream="nontarget")
 
 
-def _record_pinning(monkeypatch: pytest.MonkeyPatch) -> dict[str, bool]:
-    """Bind each recon family's operation and capture the `delta_pinned` it asked for."""
-    seen: dict[str, bool] = {}
+def _record_pinning(monkeypatch: pytest.MonkeyPatch) -> dict[str, dict[str, bool]]:
+    """Stub each recon family's operation builder; capture, per log prefix (one per
+    stream), the `delta_pinned` the evaluation plan asked it for."""
+    seen: dict[str, dict[str, bool]] = {}
 
-    def scorer(name: str) -> Callable[..., Any]:
-        def make(*_args: Any, delta_pinned: bool = False, **_kwargs: Any) -> Any:
-            seen[name] = delta_pinned
-            return lambda *_a, **_k: {}
+    def operation(name: str) -> Callable[..., Any]:
+        def make(
+            *_args: Any, log_prefix: str, delta_pinned: bool = False, **_kwargs: Any
+        ) -> SharedForwardOperationPlan[Any, Any]:
+            seen.setdefault(name, {})[log_prefix] = delta_pinned
+            return SharedForwardOperationPlan(lambda *_a: cast(Any, None))
 
         return make
 
-    monkeypatch.setattr(ops, "make_ce_kl_scorer", scorer("ce_kl"))
-    monkeypatch.setattr(ops, "make_masked_kl_scorer", scorer("masked_kl"))
-    monkeypatch.setattr(ops, "make_fresh_pgd_scorer", scorer("fresh_pgd"))
+    monkeypatch.setattr(eval_operations, "make_ce_kl_operation", operation("ce_kl"))
+    monkeypatch.setattr(eval_operations, "make_masked_kl_operation", operation("masked_kl"))
+    monkeypatch.setattr(eval_operations, "make_fresh_pgd_operation", operation("fresh_pgd"))
     return seen
 
 
-def _bind(stream: Stream, *, targeted: bool) -> None:
-    """Bind one operation of each recon family; only the (stream, run kind) pair varies.
-    Every other argument is inert here — the scorers are stubbed."""
-    unused = cast(Any, None)
-    ops.make_ce_kl_operation(
-        CEandKLLossesConfig(rounding_threshold=0.0),
-        Every(1),
-        stream,
-        unused,
-        unused,
-        0,
-        1,
-        unused,
-        {},
-        "output",
-        targeted=targeted,
+def _bind(metric: AnyEvalMetricConfig, *, targeted: bool) -> None:
+    """Build the LM evaluation plan for one recon metric; only the run kind varies. Every
+    other argument is inert here — the operation builders are stubbed and nothing runs."""
+    batch = LMBatchWithDocuments.from_unsegmented_sequences(jnp.arange(4)[None])
+    built = SimpleNamespace(
+        pd=SimpleNamespace(steps=10, seed=0),
+        data=SimpleNamespace(eval_dir=Path("unused")),
+        ci_fn=SimpleNamespace(capture_keys=frozenset()),
+        target=None,
     )
-    ops.make_masked_kl_operation(
-        "ci_masked", Every(1), stream, unused, unused, 0, 1, unused, {}, "output",
-        targeted=targeted,
-    )  # fmt: skip
-    ops.make_fresh_pgd_operation(
-        PGDReconLossConfig(init="random", source_shape="c", n_steps=2, step_size=0.1),
-        Every(1),
-        stream,
-        unused,
-        unused,
-        0,
-        1,
-        unused,
-        {},
-        "output",
-        targeted=targeted,
+    eval_operations.make_lm_evaluation(
+        cast(Any, built),
+        EvalConfig(batch_size=1, n_steps=1, every=1, slow_every=1, metrics=[metric]),
+        cast(Any, SimpleNamespace(model=SimpleNamespace(site_names=("site",), sites=()))),
+        jax.random.PRNGKey(0),
+        cast(Any, None),
+        n_proc=1,
+        sink=MetricsSink.silent(),
+        compiler_options={},
+        sample_batch=lambda _step: batch,
+        sample_target_batch=(lambda _step: batch) if targeted else None,
     )
 
 
@@ -93,6 +98,10 @@ def test_every_recon_family_threads_the_rule(
     monkeypatch: pytest.MonkeyPatch, targeted: bool, stream: Stream, expected: bool
 ) -> None:
     seen = _record_pinning(monkeypatch)
-    _bind(stream, targeted=targeted)
+    for metric in RECON_FAMILIES.values():
+        _bind(metric, targeted=targeted)
     assert set(seen) == set(RECON_FAMILIES), sorted(seen)
-    assert seen == dict.fromkeys(RECON_FAMILIES, expected), seen
+    prefix = stream_log_prefix(stream, targeted)
+    assert {name: by_prefix[prefix] for name, by_prefix in seen.items()} == dict.fromkeys(
+        RECON_FAMILIES, expected
+    ), seen

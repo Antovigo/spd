@@ -41,8 +41,7 @@ from param_decomp.ci_filter.paths import CIFilterOutputs, ablations_dir
 from param_decomp.ci_filter.pool import answer_token_ids, build_pool, load_tokenizer
 from param_decomp.ci_filter.step import Prepared, gather_rows, prepare_components
 from param_decomp.core.log import logger, setup_console_logger
-from param_decomp.core.model import PlacedModel
-from param_decomp.experiments.lm.load_run import restore_jax_run
+from param_decomp.experiments.lm.load_run import PlacedTransformer, restore_jax_run
 from param_decomp.experiments.lm.resolved import TargetConfig
 from param_decomp.experiments.lm.training import enable_persistent_compilation_cache
 
@@ -52,7 +51,7 @@ type LastLogits = Float[Array, "B V"]
 def make_last_logits() -> Callable[..., LastLogits]:
     @eqx.filter_jit
     def last_logits(
-        placed: PlacedModel,
+        placed: PlacedTransformer,
         prepared: Prepared,
         tokens_all: Int[Array, "N T"],
         idx: Int[Array, " B"],
@@ -156,7 +155,7 @@ def token_effects(
         answer_ids = jax.sharding.reshard(jnp.asarray(answers), P())
         ones = {
             site.name: jax.sharding.reshard(jnp.ones(site.C, jnp.float32), P())
-            for site in placed.sites
+            for site in placed.model.sites
         }
         rng = np.random.default_rng(np.random.SeedSequence((config.seed, 19)))
         subset = np.sort(

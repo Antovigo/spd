@@ -2,46 +2,34 @@
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import jax
-import numpy as np
-from jax.sharding import Mesh, NamedSharding
-from jax.sharding import PartitionSpec as P
 
 from param_decomp.core.built_run import TargetSites
-from param_decomp.core.ci_fn import CIRole, PlacedCIFn
+from param_decomp.core.ci_fn.interface import CIFn, CIRole
+from param_decomp.core.components import ComponentStacks
 from param_decomp.core.eval_schedule import EvalSchedule
 from param_decomp.core.metrics import LogRecord
 from param_decomp.core.model import CaptureKeys, PlacedModel
-from param_decomp.core.run import PassOperation
-from param_decomp.core.train import TrainState
+from param_decomp.core.run import StandaloneOperation, StandaloneOperationPlan
 from param_decomp.experiments.lm.ab_grid_dataset import (
     ABGridStep,
     ab_grid_payload,
+    ab_grid_split_payload,
     collect_ab_grid_snapshot,
     make_ab_grid_step,
+    thumbnail_factor,
     write_ab_grid_snapshot,
 )
-from param_decomp.experiments.lm.arithmetic_probe import ArithmeticGrid, build_arithmetic_probe
+from param_decomp.experiments.lm.arithmetic_eval import ArithmeticGrid
+from param_decomp.experiments.lm.arithmetic_eval_operation import global_arithmetic_probe
+from param_decomp.experiments.lm.arithmetic_probe import build_arithmetic_probe
 from param_decomp.experiments.lm.eval_config import ABGridDatasetConfig
 from param_decomp.experiments.lm.eval_context import LMEvalPass
 from param_decomp.experiments.lm.resolved import TargetConfig
-from param_decomp.targets.glu_transformer import hf_snapshot_dir
-
-
-def global_arithmetic_probe(tokens: np.ndarray, mesh: Mesh, n_proc: int) -> jax.Array:
-    n, t = tokens.shape
-    n_dev = mesh.devices.size
-    pad = (-n) % n_dev
-    if pad:
-        tokens = np.concatenate([tokens, np.zeros((pad, t), tokens.dtype)], axis=0)
-    n_pad = tokens.shape[0]
-    per_process = n_pad // n_proc
-    assert per_process % jax.local_device_count() == 0, (per_process, jax.local_device_count())
-    proc = jax.process_index()
-    local = tokens[proc * per_process : (proc + 1) * per_process]
-    sharding = NamedSharding(mesh, P(("replicate", "fsdp")))
-    return jax.make_array_from_process_local_data(sharding, local, (n_pad, t))
+from param_decomp.lm.batch import LMBatchWithDocuments
+from param_decomp.targets.transformer import hf_snapshot_dir
 
 
 def resolve_positions(authored: list[int] | None, seq_len: int) -> tuple[int, ...]:
@@ -61,8 +49,8 @@ def resolve_positions(authored: list[int] | None, seq_len: int) -> tuple[int, ..
 @dataclass(frozen=True)
 class ABGridOperation:
     step: ABGridStep
-    model: PlacedModel
-    chunks: tuple[tuple[jax.Array, int], ...]
+    model: PlacedModel[Any, Any, Any, Any, Any]
+    chunks: tuple[tuple[LMBatchWithDocuments, int], ...]
     grid: ArithmeticGrid
     n_prompts: int
     positions: tuple[int, ...]
@@ -73,29 +61,23 @@ class ABGridOperation:
     """Process 0 writes the snapshot; every rank joins the collective pass and reports the
     same scalars."""
 
-    def run(self, state: TrainState, now_step: int, placed_ci_fn: PlacedCIFn) -> LogRecord:
+    def run(self, components: ComponentStacks, ci_fn: CIFn[Any], now_step: int) -> LogRecord:
         snapshot = collect_ab_grid_snapshot(
             self.step,
             self.model,
-            state.decomposition.components,
-            placed_ci_fn,
+            components,
+            ci_fn,
             self.chunks,
             self.n_prompts,
             self.mean_ci_floor,
         )
         if self.writes_snapshots:
-            write_ab_grid_snapshot(
-                self.run_dir,
-                now_step,
-                ab_grid_payload(
-                    snapshot,
-                    self.grid,
-                    self.positions,
-                    self.seq_len,
-                    now_step,
-                    self.mean_ci_floor,
-                ),
-            )
+            args = (snapshot, self.grid, self.positions, self.seq_len, now_step, self.mean_ci_floor)
+            if thumbnail_factor(self.grid) > 1:
+                index, modules = ab_grid_split_payload(*args)
+                write_ab_grid_snapshot(self.run_dir, now_step, index, modules)
+            else:
+                write_ab_grid_snapshot(self.run_dir, now_step, ab_grid_payload(*args))
         record: LogRecord = {
             f"eval/ab_grids/saved_components/{site}": float(idx.size)
             for site, idx in snapshot.saved.items()
@@ -110,13 +92,13 @@ def make_ab_grid_operation(
     config: ABGridDatasetConfig,
     schedule: EvalSchedule,
     target: TargetSites,
-    model: PlacedModel,
+    model: PlacedModel[Any, Any, Any, Any, Any],
     ci_capture_keys: CaptureKeys,
-    mesh: Mesh,
+    mesh: Any,
     n_proc: int,
     run_dir: Path,
     roles: tuple[CIRole, ...] = ("output",),
-) -> PassOperation[LMEvalPass]:
+) -> StandaloneOperationPlan[LMEvalPass[Any, Any]]:
     assert isinstance(target, TargetConfig), (
         f"the ab grid needs an HF tokenizer; {type(target).__name__} has no model_name"
     )
@@ -147,12 +129,13 @@ def make_ab_grid_operation(
         writes_snapshots=jax.process_index() == 0,
     )
 
-    def run(eval_pass: LMEvalPass) -> LogRecord:
-        # `placed_ci_fn`, never `state.decomposition.ci_fn`: post-#1000 the CI compute
-        # lifecycle (`materialize_ci_compute_weights`) needs the resolved placement to
-        # reconstruct chunk weights, and `EvalInvocation` is what carries it. Reaching past
-        # it to the raw fn is what killed run 10631 at step 4000 —
-        # `'ChunkwiseTransformerCIFn' object has no attribute 'fn'`.
-        return operation.run(eval_pass.state, eval_pass.now_step, eval_pass.placed_ci_fn)
+    def prepare(
+        _example_pass: LMEvalPass[Any, Any],
+    ) -> StandaloneOperation[LMEvalPass[Any, Any]]:
+        def run(eval_pass: LMEvalPass[Any, Any]) -> LogRecord:
+            decomposition = eval_pass.decomposition
+            return operation.run(decomposition.components, decomposition.ci_fn, eval_pass.now_step)
 
-    return PassOperation(schedule=schedule, run=run)
+        return StandaloneOperation(schedule, run)
+
+    return StandaloneOperationPlan(prepare)

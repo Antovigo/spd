@@ -45,7 +45,7 @@ class InitFromRun(BaseConfig):
 
 class InitFromCIFilter(BaseConfig):
     """Start from the trained CI fn of an earlier CI filter of the SAME run and step
-    (`<run_dir>/analysis/ci_filter/step_<step>/<id>/`)."""
+    (`<run_dir>/<id>-<step>/`)."""
 
     kind: Literal["ci_filter"] = "ci_filter"
     id: str
@@ -57,7 +57,7 @@ CIInit = Annotated[InitFromRun | InitFromCIFilter, Discriminator("kind")]
 # ----------------------------------- objective -----------------------------------
 
 
-Operation = Literal["add", "sub"]
+Operation = Literal["add", "sub", "mul"]
 
 
 class ArithmeticPoolConfig(BaseConfig):

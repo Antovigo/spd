@@ -5,8 +5,9 @@
 #     POD_HOST=<ip> POD_PORT=<port> KEY=~/.ssh/<key> ./push_run_data.sh
 set -euo pipefail
 : "${POD_HOST:?}" "${POD_PORT:?}" "${KEY:?}"
-SRC="${SRC:-$HOME/out/pod-backup/p-ba5a0c05}"
-DST="root@$POD_HOST:/workspace/data/runs/p-ba5a0c05"
+RUN_ID="${RUN_ID:-p-ba5a0c05}"
+SRC="${SRC:-$HOME/out/pod-backup/$RUN_ID}"
+DST="root@$POD_HOST:/workspace/data/runs/$RUN_ID"
 SSH="ssh -p $POD_PORT -i $KEY -o StrictHostKeyChecking=accept-new"
 rsync -av --mkpath -e "$SSH" "$SRC/launch_config.yaml" "$DST/"
 rsync -av --mkpath -e "$SSH" "$SRC/ckpts/40000/_CHECKPOINT_METADATA" "$SRC/ckpts/40000/decomposition" "$DST/ckpts/40000/"

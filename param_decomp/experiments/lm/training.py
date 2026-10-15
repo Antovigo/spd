@@ -1,32 +1,33 @@
 """Run ordinary language-model parameter-decomposition training from one config.
 
-    python -m param_decomp.experiments.lm.run <config.yaml>   # normally invoked by a
-        # submitter that pins the config as runs/<id>/launch_config.yaml and passes
-        # --run-id; re-running resumes in place
+    python -m param_decomp.experiments.lm.run <config.yaml> \
+        --data-root <root> --local-device-count <n>
 
 This is the LM I/O layer over the generic core engine
 (`param_decomp.core.run.run_decomposition_training`): read the run YAML, build the target, feed
 the per-step parquet token batch (`sample_batch`; the model embeds it), bind the CEandKL /
 CI-L0 / PGD / attn-patterns / slow eval operations, then
 call the engine. Process setup (`initialize_topology`, the SIGTERM flag, the persistent XLA
-compilation cache, HF http hardening), config pinning, and SLURM-requeue shutdown all live
-here. The toy domains mirror this file under `experiments/{tms,resid_mlp}/run.py`.
+compilation cache), config pinning, and requeue-safe shutdown all live here. The toy domains mirror this file under `experiments/{tms,resid_mlp}/run.py`.
 
-The config declares the logical `replicate×fsdp×tp` mesh. The launch boundary separately
-supplies the process-local device count used for JAX distributed bring-up.
+The config declares its logical `runtime.mesh`. The process entry separately supplies
+the process-local device count used for JAX distributed bring-up.
 """
 
 import os
 from pathlib import Path
 
 import jax
-from jax import random
 from jax.sharding import Mesh
 
-from param_decomp.core.built_run import LAUNCH_CONFIG_FILENAME
+from param_decomp.core.ci_fn.architecture import CIFnArchitecture
 from param_decomp.core.configs import ResumeProvenance
+from param_decomp.core.hardware_utilization import (
+    checked_device_kind,
+    peak_bf16_dense_flops_per_second,
+)
 from param_decomp.core.log import setup_logger
-from param_decomp.core.model import PlacedModel, Positioned
+from param_decomp.core.model import ComponentActivations, PlacedModel, Positioned
 from param_decomp.core.run import (
     JaxProfilerTrace,
     MetricsSink,
@@ -35,17 +36,31 @@ from param_decomp.core.run import (
     install_sigterm_flag,
     run_decomposition_training,
 )
+from param_decomp.core.run_files import LAUNCH_CONFIG_FILENAME
 from param_decomp.core.sharding import (
     data_parallel_size,
-    hsdp_mesh,
     initialize_topology,
-    local_data_parallel_size,
+    mesh_for_shape,
 )
+from param_decomp.core.training_performance import MfuAccounting
 from param_decomp.experiments.eval_config import EvalConfig
+from param_decomp.experiments.lm.ci_fn_init import LMCIFnInitInputs, lm_ci_fn_initializer
 from param_decomp.experiments.lm.config import load_config
-from param_decomp.experiments.lm.eval_operations import global_token_batch, make_lm_evaluation
-from param_decomp.experiments.lm.load_run import build_target, component_initializer_for
-from param_decomp.experiments.lm.resolved import LMRun
+from param_decomp.experiments.lm.eval_operations import make_lm_evaluation
+from param_decomp.experiments.lm.input_format import (
+    InputFormat,
+    TokenInput,
+    input_sampler,
+    transformer_input_format,
+)
+from param_decomp.experiments.lm.load_run import (
+    PlacedLM,
+    build_target,
+    component_initializer_for,
+    target_vocab_size,
+)
+from param_decomp.experiments.lm.model_flops import prepare_lm_step_flops
+from param_decomp.experiments.lm.resolved import LMRun, require_unrouted_ci_fn_arch
 from param_decomp.experiments.lm.runtime import (
     AdHocProfiling,
     NsightSystemsProfiling,
@@ -53,9 +68,14 @@ from param_decomp.experiments.lm.runtime import (
     ProfilingDisabled,
     RuntimeConfig,
 )
-from param_decomp.infra.dataset_store import read_dataset_meta
+from param_decomp.infra.dataset_store import read_dataset_identity
 from param_decomp.infra.run_files import generate_run_id
-from param_decomp.pretrain.batch_data import BatchSchedule, ShardServer, scan_shards
+from param_decomp.lm.batch import LMBatch, LMBatchWithDocuments
+from param_decomp.targets.lm_output import LMOutput
+from param_decomp.targets.qwen36_moe import Qwen36MoeDecomposedModel
+from param_decomp.targets.transformer import (
+    TransformerDecomposedModel,
+)
 
 
 def enable_persistent_compilation_cache(authored_dir: Path) -> Path:
@@ -79,8 +99,8 @@ def enable_persistent_compilation_cache(authored_dir: Path) -> Path:
 def engine_profiling(config: ProfilingConfig) -> ProfilingMode | None:
     """Lower the authored `runtime.profiling` arm to the engine's typed profiling data —
     the engine reads no environment; profiling arrives as an argument like everything
-    else. The nsight arm's `version` stays launcher-side (it names the `nsys` executable,
-    not engine behavior)."""
+    else. The nsight arm's `version` stays outside the engine (it names the `nsys`
+    executable, not engine behavior)."""
     match config:
         case ProfilingDisabled():
             return None
@@ -95,8 +115,8 @@ def enable_hlo_dump(run_dir: Path) -> None:
 
     Must run BEFORE `initialize_topology` — XLA reads `XLA_FLAGS` when the backend initializes,
     so a later mutation is ignored. Rank-gated via the generic `PD_RANK`
-    hint (read pre-jax-init only to pick the writer, never to decide topology); the launcher
-    exports it per rank, absent = single
+    hint (read pre-jax-init only to pick the writer, never to decide topology); whoever
+    starts the ranks exports it per rank, absent = single
     process) so a single rank writes; `xla_dump_hlo_module_re` filters to the big `*step*` modules to keep
     the dump to ~100s of MB. The buffer-assignment dump survives an exec-time OOM (compile
     completes first), so this is how we name the buffer that blows the allocator."""
@@ -137,8 +157,52 @@ def train(
     built: LMRun,
     runtime: RuntimeConfig,
     eval_config: EvalConfig | None,
-    model: PlacedModel,
+    model: PlacedLM,
     mesh: Mesh,
+    data_root: Path,
+) -> None:
+    match model.model:
+        case TransformerDecomposedModel() as target:
+            _train(
+                built,
+                runtime,
+                eval_config,
+                PlacedModel(model=target, placement=model.placement),
+                mesh,
+                data_root,
+                transformer_input_format(target),
+                require_unrouted_ci_fn_arch(built.ci_fn),
+            )
+        case Qwen36MoeDecomposedModel() as target:
+            _train(
+                built,
+                runtime,
+                eval_config,
+                PlacedModel(model=target, placement=model.placement),
+                mesh,
+                data_root,
+                TokenInput(),
+                built.ci_fn,
+            )
+
+        case other:
+            raise AssertionError(f"unsupported LM target: {type(other).__name__}")
+
+
+def _train[
+    TargetIn: LMBatch | LMBatchWithDocuments,
+    PreparedT: ComponentActivations,
+    Conditioning,
+    PreparedMaskingT,
+](
+    built: LMRun,
+    runtime: RuntimeConfig,
+    eval_config: EvalConfig | None,
+    model: PlacedModel[TargetIn, LMOutput, PreparedT, Conditioning, PreparedMaskingT],
+    mesh: Mesh,
+    data_root: Path,
+    input_format: InputFormat[TargetIn],
+    ci_fn_arch: CIFnArchitecture[Conditioning],
 ) -> None:
     """The LM composition over the generic engine: a parquet `sample_batch` (the per-step
     token batch the model embeds) and domain-bound CEandKL / CI-L0 / PGD / attention operations.
@@ -146,14 +210,14 @@ def train(
     `runtime` rides alongside the bundle rather than inside it: it is the LM's substrate,
     and core reads none of it — this root turns it into the engine's primitives."""
     data = built.data
-    train_meta = read_dataset_meta(data.dir)
-    eval_meta = read_dataset_meta(data.eval_dir)
-    assert train_meta == eval_meta, (
-        f"train and eval datasets disagree — {data.dir} is {train_meta}, {data.eval_dir} "
-        f"is {eval_meta}. A holdout tokenized differently or at another seq_len makes "
+    train_identity = read_dataset_identity(data.dir)
+    eval_identity = read_dataset_identity(data.eval_dir)
+    assert train_identity == eval_identity, (
+        f"train and eval datasets disagree — {data.dir} is {train_identity}, {data.eval_dir} "
+        f"is {eval_identity}. A holdout tokenized differently or at another seq_len makes "
         "every eval number incomparable to the training loss it is read against."
     )
-    seq_len = train_meta.seq_len
+    seq_len = train_identity.seq_len
     n_proc = jax.process_count()
     n_data = data_parallel_size(mesh)
     global_batch = built.pd.batch_size
@@ -163,29 +227,22 @@ def train(
     )
     is_main = jax.process_index() == 0
 
-    key = random.PRNGKey(built.pd.seed)
-    _, _, run_key = random.split(key, 3)
-
-    schedule = BatchSchedule(scan_shards(data.dir), global_batch, built.pd.seed)
-    server = ShardServer(schedule, seq_len, jax.process_index(), n_proc)
-    # Each process (node) owns all its local devices; its per-process batch splits across them.
-    local_data = local_data_parallel_size(mesh)
-    assert server.per_process % local_data == 0, (
-        server.per_process,
-        local_data,
+    vocab_size = target_vocab_size(model)
+    sample_batch = input_sampler(
+        input_format, data.dir, global_batch, built.pd.seed, mesh, vocab_size
     )
 
-    def sample_batch(step: int) -> jax.Array:
-        return global_token_batch(server.local_batch(step), mesh, global_batch)
+    rules = model.placement
+    assert rules is not None, "LM training runs placed"
+    ci_fn_initializer = lm_ci_fn_initializer(
+        ci_fn_arch, model.model.sites, rules, LMCIFnInitInputs(model, sample_batch(0))
+    )
 
     sink = MetricsSink.for_run(built.run, is_main)
-    evaluation = None
-    if eval_config is not None:
-        assert eval_config.every % built.cadence.train_log_every == 0, (
-            "eval must land on a train-log step: the tok/s window resets after eval, so a "
-            "mid-window eval would corrupt the next step-time estimate"
-        )
-        evaluation = make_lm_evaluation(
+    build_evaluation = (
+        None
+        if eval_config is None
+        else lambda run_key: make_lm_evaluation(
             built,
             eval_config,
             model,
@@ -194,24 +251,44 @@ def train(
             n_proc,
             sink,
             runtime.resolved_compiler_options,
-            target_pool_batches_for=None,  # a plain run has no target stream
+            sample_batch=input_sampler(
+                input_format,
+                data.eval_dir,
+                eval_config.batch_size,
+                built.pd.seed + 1,
+                mesh,
+                vocab_size,
+            ),
         )
+    )
 
     run_decomposition_training(
         pd=built.pd,
+        mfu_accounting=MfuAccounting(
+            step_flops=prepare_lm_step_flops(
+                built.pd,
+                built.target,
+                model.model.sites,
+                ci_fn_arch,
+                seq_len,
+                data_root,
+            ),
+            peak_flops_per_second=jax.device_count()
+            * peak_bf16_dense_flops_per_second(checked_device_kind(jax.devices())),
+        ),
         cadence=built.cadence,
         run=built.run,
         model=model,
-        ci_fn=built.ci_fn,
+        ci_fn_initializer=ci_fn_initializer,
         positions=Positioned(n_positions=seq_len),
         remat_recon_forwards=runtime.remat_recon_forwards,
         remat_ci_fn=runtime.remat_ci_fn,
         compiler_options=runtime.resolved_compiler_options,
         sample_batch=sample_batch,
-        evaluation=evaluation,
+        build_evaluation=build_evaluation,
         sink=sink,
         profiling=engine_profiling(runtime.profiling),
-        component_initializer=component_initializer_for(built.target),
+        component_initializer=component_initializer_for(built.target, model),
     )
 
 
@@ -237,7 +314,7 @@ def main(
     if run_id is None:
         # Ad-hoc run-here invocation (`python -m param_decomp.experiments.lm.run <config>`):
         # mint a fresh identity; `pin_config_copy` below stages the config into the run
-        # dir exactly as a launcher would (resume an existing run by passing --run-id).
+        # dir. Resume an existing run by passing --run-id.
         run_id = generate_run_id("param_decomp")
     built, authored = load_config(config, run_id, data_root)
     runtime = authored.runtime
@@ -245,7 +322,8 @@ def main(
     install_sigterm_flag()
     enable_hlo_dump(built.run.run_dir)
     initialize_topology(runtime.world_size, local_device_count)
-    mesh = hsdp_mesh(runtime.replicate, runtime.fsdp, runtime.tp)
+    assert jax.default_backend() == "gpu", "LM training requires a GPU backend"
+    mesh = mesh_for_shape(runtime.mesh)
 
     if built.run.resume_provenance is not None:
         assert_finetune_structural_compat(built, built.run.resume_provenance, data_root)
@@ -266,16 +344,16 @@ def main(
         site_summary = ", ".join(f"{k}×{n}" for k, n in sorted(site_kind_counts.items()))
         print(
             f"run {built.run.run_name} | {mesh.devices.size} GPU / {jax.process_count()} proc | "
-            f"B={built.pd.batch_size} seq={read_dataset_meta(built.data.dir).seq_len} "
+            f"B={built.pd.batch_size} seq={read_dataset_identity(built.data.dir).seq_len} "
             f"sites={len(built.target.sites)} [{site_summary}] steps={built.pd.steps}",
             flush=True,
         )
 
     # The bundle's `.model` (an eqx model) IS the frozen target — it carries the frozen
     # weights as fields, so the function-table era's separate `frozen` object is gone.
-    model = build_target(built.target, mesh, data_root, runtime.sharding)
+    model = build_target(built.target, mesh, data_root, runtime.sharding, runtime.sequence_sharding)
 
-    train(built, runtime, authored.eval, model, mesh)
+    train(built, runtime, authored.eval, model, mesh, data_root)
 
     if jax.process_count() > 1:
         import jax.experimental.multihost_utils as mhu

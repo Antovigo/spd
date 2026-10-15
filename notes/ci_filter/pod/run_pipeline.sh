@@ -25,12 +25,12 @@ while [ $# -gt 0 ]; do
   esac; shift
 done
 
-RUN_ID=p-ba5a0c05
-OBJ1_ID="${OBJ1_ID:-addsub-05-filter-last-pos}"
-OBJ2_ID="${OBJ2_ID:-addsub-05-filter-integers}"
-OBJ3_ID="${OBJ3_ID:-addsub-05-filter-answer-ce}"
+RUN_ID="${RUN_ID:-p-ba5a0c05}"; export RUN_ID
+OBJ1_ID="${OBJ1_ID:-addsub-05-last-pos}"
+OBJ2_ID="${OBJ2_ID:-addsub-05-integers}"
+OBJ3_ID="${OBJ3_ID:-addsub-05-answer-ce}"
 STEP=40000
-OUT_ROOT="$DATA_ROOT/runs/$RUN_ID/analysis/ci_filter/step_$STEP"
+OUT_ROOT="$DATA_ROOT/runs/$RUN_ID"   # each filter writes $OUT_ROOT/<id>-$STEP/
 CONFIGS="$DATA_ROOT/ci_filter/configs"
 mkdir -p "$CONFIGS"
 
@@ -56,16 +56,21 @@ echo "code: $(git -C "$REPO" log -1 --oneline)"
 run_stage() {  # <stage> <filter id> [--init-id id]
   local stage="$1" id="$2"; shift 2
   "$VENV_PY" "$HERE/make_config.py" "$stage" "$CONFIGS/$stage-$id.yaml" "$@"
+  local log="$DATA_ROOT/logs/$stage-$id.log" rc=0
   echo "=== $stage $id start $(date -Is)"
   (cd "$REPO" && "$VENV_PY" -m param_decomp.ci_filter.scripts.run_ci_filter \
-    --config "$CONFIGS/$stage-$id.yaml" --data_root "$DATA_ROOT" --filter_id "$id")
+    --config "$CONFIGS/$stage-$id.yaml" --data_root "$DATA_ROOT" --filter_id "$id") 2>&1 \
+    | tee "$log" || rc=$?
+  # The stage's own log goes with its outputs (the filter dir creates `logs/`).
+  [ -d "$OUT_ROOT/$id-$STEP/logs" ] && cp "$log" "$OUT_ROOT/$id-$STEP/logs/"
+  [ "$rc" = 0 ] || exit "$rc"
   echo "=== $stage $id done $(date -Is)"
 }
 
 if [ "$SMOKE" = 1 ] && [ "$ONLY" != obj2 ] && [ "$ONLY" != obj3 ]; then
-  rm -rf "$OUT_ROOT/cf-smoke"
+  rm -rf "$OUT_ROOT/cf-smoke-$STEP"
   run_stage smoke cf-smoke
-  rm -rf "$OUT_ROOT/cf-smoke"
+  rm -rf "$OUT_ROOT/cf-smoke-$STEP"
 fi
 if [ -z "$ONLY" ] || [ "$ONLY" = obj1 ]; then
   echo "$OBJ1_ID" > "$DATA_ROOT/ci_filter/obj1.id"

@@ -35,7 +35,7 @@ import json
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, get_args
+from typing import Any, Literal, get_args
 
 import equinox as eqx
 import jax
@@ -55,14 +55,14 @@ from param_decomp.core.components import (
 from param_decomp.core.configs import NamedNeuronRanks, NeuronRanksDir, NeuronRanksRef
 from param_decomp.core.init_placed import ComponentInitializer
 from param_decomp.core.model import DecomposedModel, PlacedModel
-from param_decomp.targets.glu_transformer import (
+from param_decomp.lm.batch import LMBatchWithDocuments
+from param_decomp.targets.transformer import (
     Anatomy,
     GatedMLP,
-    GLUDecomposedModel,
     PlainMLP,
+    TransformerDecomposedModel,
     _frozen_site_weight,
-    neuron_aligned_component_count,
-    selected_unit_factors,
+    _gather_unit_rows,
 )
 from param_decomp.targets.transformer_taps import (
     attention_output_tap_key,
@@ -84,6 +84,36 @@ ranked coordinate of the site's kind), for EVERY decomposed site."""
 
 
 # ----------------------------- sites ↔ rankings -----------------------------
+
+
+def neuron_aligned_component_count(anatomy: Anatomy, spec: SiteSpec) -> int:
+    """Number of neuron/head-channel coordinates touching this matrix: its `d_in` for the
+    row kinds (o, down), whose units sit on the input, else its `d_out`."""
+    kind = anatomy.family.parse(spec.name)[1]
+    return spec.d_in if kind in anatomy.row_kinds else spec.d_out
+
+
+def selected_unit_factors(
+    weight: Array, spec: SiteSpec, units_on_input: bool, units: Array
+) -> tuple[Array, Array]:
+    """`C` chosen architectural coordinates copied whole — one-hot `E [C, n]` on the unit
+    side, each coordinate's weight vector on the other:
+
+        units on d_out (q/k/v, gate/up):  V = W[S, :]ᵀ  [d_in, C],   U = E        [C, d_out]
+        units on d_in  (o, down):         V = Eᵀ        [d_in, C],   U = W[:, S]ᵀ [C, d_out]
+
+    so `(V@U)ᵀ` is `W` restricted to the selected rows / columns and the delta carries the
+    other `n − C` coordinates exactly. Per subcomponent `‖v_i‖·‖u_i‖` is the coordinate's own
+    weight norm; one-hot is the gauge in which each subcomponent IS one coordinate, and both
+    factors have a dense nonzero gradient from step 0. `units` is `int32[C]`, distinct."""
+    assert weight.shape == (spec.d_out, spec.d_in), (weight.shape, spec)
+    assert units.shape == (spec.C,), (units.shape, spec.C)
+    unit_count = spec.d_in if units_on_input else spec.d_out
+    weight = weight.astype(jnp.float32)
+    one_hot = jax.nn.one_hot(units, unit_count, dtype=jnp.float32)
+    if units_on_input:
+        return one_hot.T, _gather_unit_rows(weight.T, units)
+    return _gather_unit_rows(weight, units).T, one_hot
 
 
 def unit_kind_of(anatomy: Anatomy, kind: str) -> UnitKind:
@@ -117,7 +147,7 @@ def ranked_blocks(sites: tuple[SiteSpec, ...], anatomy: Anatomy) -> tuple[int, .
     return tuple(sorted({block for block, _ in site_unit_kinds(sites, anatomy).values()}))
 
 
-def frozen_mlp_down_weight(model: GLUDecomposedModel, block: int) -> Float[Array, "d n"]:
+def frozen_mlp_down_weight(model: TransformerDecomposedModel, block: int) -> Float[Array, "d n"]:
     """The block's frozen down projection `[d_model, n_neurons]`, decomposed or not — the
     target-owned read the score needs for every ranked block."""
     match model.frozen_block(block).mlp:
@@ -133,7 +163,7 @@ def _column_sq_norms(weight: Array) -> np.ndarray:
     return np.asarray(jnp.sum(w * w, axis=0), dtype=np.float32)
 
 
-def unit_counts(model: GLUDecomposedModel) -> dict[UnitKind, int]:
+def unit_counts(model: TransformerDecomposedModel) -> dict[UnitKind, int]:
     """Coordinates per ranking family — the same for every block of one architecture."""
     attn = model.frozen_block(0).attn
     return {
@@ -191,21 +221,27 @@ def block_tap_keys(anatomy: Anatomy, block: int) -> dict[str, str]:
     }
 
 
-def make_moments_step(model: PlacedModel, blocks: tuple[int, ...]) -> MomentsStep:
+def make_moments_step(
+    model: PlacedModel[Any, Any, Any, Any, Any], blocks: tuple[int, ...]
+) -> MomentsStep:
     """One jitted `(tokens [B, T], row_mask [B]) -> {block: moments}` over the frozen
     forward with the blocks' taps captured, every position counted. The outputs are
     declared FULLY REPLICATED, so the batch reduction's collective happens inside the
     graph and every device (and process) holds the complete vectors."""
     assert len(set(blocks)) == len(blocks) and blocks, blocks
     glu = model.model
-    assert isinstance(glu, GLUDecomposedModel), type(glu)
+    assert isinstance(glu, TransformerDecomposedModel), type(glu)
     keys_by_block = {block: block_tap_keys(glu.anatomy, block) for block in blocks}
     keys = frozenset(key for taps in keys_by_block.values() for key in taps.values())
     model_arrays, model_static = eqx.partition(model, eqx.is_array)
 
-    def step(arrays: PlacedModel, tokens: Array, row_mask: Array) -> dict[int, BlockMoments]:
-        placed: PlacedModel = eqx.combine(arrays, model_static)
-        captures = placed.clean_forward(tokens, keys).captures
+    def step(
+        arrays: PlacedModel[Any, Any, Any, Any, Any], tokens: Array, row_mask: Array
+    ) -> dict[int, BlockMoments]:
+        placed: PlacedModel[Any, Any, Any, Any, Any] = eqx.combine(arrays, model_static)
+        captures = placed.clean_forward(
+            LMBatchWithDocuments.from_unsegmented_sequences(tokens), keys
+        ).captures
         weight = jnp.broadcast_to(row_mask[:, None], tokens.shape).astype(jnp.float32)
         moments: dict[int, BlockMoments] = {}
         for block in blocks:
@@ -276,7 +312,7 @@ def capture_groups(
 
 
 def block_scores(
-    model: GLUDecomposedModel, block: int, moments: HostMoments
+    model: TransformerDecomposedModel, block: int, moments: HostMoments
 ) -> dict[UnitKind, np.ndarray]:
     """Every ranking family's per-coordinate score for one block, float64 (module docstring)."""
     assert moments.n_tokens > 0, "the sweep counted no tokens"
@@ -480,12 +516,12 @@ def validate_neuron_alignment(
 
 
 def _aligned_site_arrays(
-    model: DecomposedModel, alignment: NeuronAlignment
+    model: DecomposedModel[Any, Any, Any, Any, Any], alignment: NeuronAlignment
 ) -> dict[str, tuple[Array, Array]]:
     """Every site's aligned `(V, U)` from the frozen weights, read inside the init graph.
     Shared by the two aligned inits so they cannot drift apart in which coordinates they
     select — they differ only in what they then do with `U`."""
-    assert isinstance(model, GLUDecomposedModel), (
+    assert isinstance(model, TransformerDecomposedModel), (
         f"the neuron-aligned inits need a transformer target, got {type(model)}"
     )
     validate_neuron_alignment(model.sites, model.anatomy, alignment)
@@ -504,12 +540,14 @@ def _aligned_site_arrays(
 
 def neuron_aligned_targeted_component_initializer(
     alignment: NeuronAlignment,
-) -> ComponentInitializer:
+) -> ComponentInitializer[Any, Any, Any, Any, Any]:
     """The `neuron_aligned_targeted` init (SPEC T13) as a `ComponentInitializer`: every
     site's subcomponents ARE its aligned coordinates (`selected_unit_factors`), read from
     the frozen weights inside the init graph. Consumes no randomness."""
 
-    def initialize(model: DecomposedModel, key: PRNGKeyArray) -> ComponentStacks:
+    def initialize(
+        model: DecomposedModel[Any, Any, Any, Any, Any], key: PRNGKeyArray
+    ) -> ComponentStacks:
         del key
         return component_stacks_from_site_arrays(
             model.sites, _aligned_site_arrays(model, alignment)
@@ -520,7 +558,7 @@ def neuron_aligned_targeted_component_initializer(
 
 def neuron_aligned_zero_u_component_initializer(
     alignment: NeuronAlignment,
-) -> ComponentInitializer:
+) -> ComponentInitializer[Any, Any, Any, Any, Any]:
     """`neuron_aligned_targeted`'s `V` with `U` zeroed — the targeted coordinates under
     `zero_u`'s discipline. Consumes no randomness.
 
@@ -536,7 +574,9 @@ def neuron_aligned_zero_u_component_initializer(
     selecting the aligned input coordinates but carrying none of their weights. Both halves
     are "V is neuron-aligned"; only the first also retains the coordinate's magnitude."""
 
-    def initialize(model: DecomposedModel, key: PRNGKeyArray) -> ComponentStacks:
+    def initialize(
+        model: DecomposedModel[Any, Any, Any, Any, Any], key: PRNGKeyArray
+    ) -> ComponentStacks:
         del key
         aligned = _aligned_site_arrays(model, alignment)
         return component_stacks_from_site_arrays(

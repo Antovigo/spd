@@ -1,186 +1,274 @@
 """Target-generic reconstruction evaluation kernels."""
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from itertools import pairwise
+from operator import itemgetter
 
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
-from jaxtyping import Array, Float, PRNGKeyArray
+from jaxtyping import Array, Int32, PRNGKeyArray
 
 from param_decomp.core.adversary import Sources, init_fresh_pgd_sources
-from param_decomp.core.ci_fn import CIRole, PlacedCIFn, evaluate_ci_role
-from param_decomp.core.components import ComponentStacks, SiteSpec
+from param_decomp.core.ci_fn.interface import CIFn, CIRole
+from param_decomp.core.ci_fn.runtime import evaluate_ci_role_from_captures
+from param_decomp.core.components import ComponentStacks, SiteCI, SiteSpec
+from param_decomp.core.configs import AnyPGDEvalConfig, AnyPGDEvalType
 from param_decomp.core.decomposed_linear import constrain_component_activation
-from param_decomp.core.jit_util import filter_jit
 from param_decomp.core.losses import reconstruction_loss
-from param_decomp.core.masking import masks_from_sources, persistent_delta_pinned_masks
+from param_decomp.core.masking import (
+    materialize_masking,
+    persistent_delta_pinned_masking,
+    source_masking,
+)
 from param_decomp.core.model import (
     CaptureKeys,
+    ComponentActivations,
     MaterializedMasking,
     PlacedModel,
-    prepare_compute_weights,
     select_captures,
 )
 from param_decomp.core.recon import (
-    OutputOnlyReconstruction,
-    ReconstructionSpec,
-    hidden_acts_capture_keys,
+    AuxiliaryReconstructionSpec,
+    auxiliary_capture_keys,
     reconstruction_observations,
+    resolve_auxiliary_reconstruction,
 )
 from param_decomp.core.sharding import batch_shard_leading
 
-type FreshPGDStep = Callable[
-    [PlacedModel, ComponentStacks, PlacedCIFn, Any, PRNGKeyArray], Float[Array, ""]
+type FreshPGDStep[
+    TargetIn,
+    Out,
+    PreparedT: ComponentActivations,
+    Conditioning,
+    PreparedMaskingT,
+] = Callable[
+    [
+        PlacedModel[TargetIn, Out, PreparedT, Conditioning, PreparedMaskingT],
+        ComponentStacks,
+        CIFn[Conditioning],
+        TargetIn,
+        PRNGKeyArray,
+    ],
+    dict[str, Array],
 ]
-"""One batch's fresh-PGD reconstruction scalar. `inputs` is the target's own opaque batch
-(token ids, a feature matrix, a dict of tensors) — exactly what `masked_forward` takes."""
+"""One batch's fresh-PGD reconstruction scalar per read-out, keyed `loss/<read-out name>`
+(`FreshPGDReconEval.read_out_names`).
+`inputs` is the target's own opaque batch (token ids, a feature matrix, a dict of tensors) —
+exactly what `masked_forward` takes."""
+
+
+@dataclass(frozen=True)
+class FreshPGDAttack:
+    """Sign-PGD from one fresh random draw shared across the batch, `step_size` per step,
+    read out after each of `read_out_steps`. The step has no schedule, so a shallower
+    read-out is exactly a prefix of a deeper one and one ascent serves them all."""
+
+    step_size: float
+    read_out_steps: tuple[int, ...]
+
+    def __post_init__(self) -> None:
+        steps = self.read_out_steps
+        assert steps and steps[0] >= 0, steps
+        assert all(a < b for a, b in pairwise(steps)), f"read-out steps must ascend: {steps}"
 
 
 @dataclass(frozen=True)
 class FreshPGDReconEval:
-    """Resolved fresh sign-PGD reconstruction probe."""
+    """A resolved fresh-PGD reconstruction probe: the attack, the reconstruction objective
+    it ascends and reports, and the metric type its read-outs log under."""
 
-    n_steps: int
-    step_size: float
-    reconstruction: ReconstructionSpec = OutputOnlyReconstruction()
-    name: str = "PGDReconLoss"
-    """Output-key suffix; overridden only when the authored metric sets ``name``."""
+    attack: FreshPGDAttack
+    reconstruction: AuxiliaryReconstructionSpec
+    metric_type: AnyPGDEvalType
 
     @property
-    def hidden_acts_capture_keys(self) -> CaptureKeys:
-        return hidden_acts_capture_keys(self.reconstruction)
+    def read_out_names(self) -> tuple[str, ...]:
+        """Each read-out's logged name, `<metric_type>_<n>step`, in `attack.read_out_steps`
+        order."""
+        return tuple(f"{self.metric_type}_{n}step" for n in self.attack.read_out_steps)
+
+    @property
+    def reconstruction_capture_keys(self) -> CaptureKeys:
+        return auxiliary_capture_keys(self.reconstruction)
 
 
-def fresh_pgd_recon_sources(
-    sites: tuple[SiteSpec, ...],
-    ci_lower: dict[str, Array],
-    leading: tuple[int, ...],
-    key: PRNGKeyArray,
-    fresh_pgd: FreshPGDReconEval,
-    loss_at_masks: Callable[[dict[str, Array], dict[str, Array]], Array],
+def fresh_pgd_probe(metric: AnyPGDEvalConfig) -> FreshPGDReconEval:
+    return FreshPGDReconEval(
+        attack=FreshPGDAttack(step_size=metric.step_size, read_out_steps=metric.read_out_steps),
+        reconstruction=resolve_auxiliary_reconstruction(metric.auxiliaries),
+        metric_type=metric.type,
+    )
+
+
+def _masking_at(
+    ci_lower: Mapping[str, SiteCI], sources: Sources, *, delta_pinned: bool = False
+) -> MaterializedMasking:
+    """The masking a source draw composes. `delta_pinned` composes every weight-delta mask
+    as 1.0 and ignores the sources' delta channel — a targeted run's NON-TARGET stream probe:
+    the delta is the off-target escape valve every non-target training forward pins shut, so
+    the probe must not attack it either. Default False: the plain and target-stream probes
+    attack the delta channel as always."""
+    masking = (
+        persistent_delta_pinned_masking(ci_lower, sources)
+        if delta_pinned
+        else source_masking(ci_lower, sources)
+    )
+    return materialize_masking(masking)
+
+
+def _sign_ascent_step(
+    ci_lower: Mapping[str, SiteCI],
+    step_size: float,
+    loss_at_masking: Callable[[MaterializedMasking], Array],
+    *,
     delta_pinned: bool = False,
-) -> Sources:
-    """Ascend fresh sources against a caller-owned recon objective.
+) -> Callable[[Sources], Sources]:
+    """One projected sign step up `loss_at_masking`'s source gradient."""
 
-    `delta_pinned` composes every weight-delta mask as 1.0 and ignores the sources'
-    delta channel — a targeted run's NON-TARGET stream probe (SPEC T4: the delta is the
-    off-target escape valve, deliberately untouchable in every non-target forward, so
-    the probe must not attack it either; amended 2026-08-20). Default False: the plain
-    and target-stream probes attack the delta channel as always."""
-    initial_sources = init_fresh_pgd_sources(sites, "random", "c", leading, key)
-
-    def loss_at_sources(sources: Sources) -> Array:
-        masks, delta_masks = (
-            persistent_delta_pinned_masks(ci_lower, sources)
-            if delta_pinned
-            else masks_from_sources(ci_lower, sources)
-        )
-        return loss_at_masks(masks, delta_masks)
-
-    def ascend(sources: Sources, _: None) -> tuple[Sources, None]:
-        gradients = jax.grad(loss_at_sources)(sources)
+    def step(sources: Sources) -> Sources:
+        gradients = jax.grad(
+            lambda s: loss_at_masking(_masking_at(ci_lower, s, delta_pinned=delta_pinned))
+        )(sources)
         return jax.tree.map(
-            lambda source, gradient: jnp.clip(
-                source + fresh_pgd.step_size * jnp.sign(gradient), 0.0, 1.0
-            ),
+            lambda source, gradient: jnp.clip(source + step_size * jnp.sign(gradient), 0.0, 1.0),
             sources,
             gradients,
-        ), None
+        )
 
-    final_sources, _ = jax.lax.scan(ascend, initial_sources, None, length=fresh_pgd.n_steps)
-    return final_sources
+    return step
 
 
-def fresh_pgd_recon_loss(
+def fresh_pgd_masking(
     sites: tuple[SiteSpec, ...],
-    ci_lower: dict[str, Array],
+    ci_lower: Mapping[str, SiteCI],
     leading: tuple[int, ...],
     key: PRNGKeyArray,
-    fresh_pgd: FreshPGDReconEval,
-    loss_at_masks: Callable[[dict[str, Array], dict[str, Array]], Array],
+    step_size: float,
+    n_steps: int,
+    loss_at_masking: Callable[[MaterializedMasking], Array],
+    *,
     delta_pinned: bool = False,
-) -> Array:
-    """Fresh sign-PGD over generic model masks, scored by a caller-owned recon metric."""
-    sources = fresh_pgd_recon_sources(
-        sites, ci_lower, leading, key, fresh_pgd, loss_at_masks, delta_pinned
+) -> MaterializedMasking:
+    """The masking after `n_steps` of fresh sign-PGD against a caller-owned objective."""
+    step = _sign_ascent_step(ci_lower, step_size, loss_at_masking, delta_pinned=delta_pinned)
+    sources, _ = jax.lax.scan(
+        lambda s, _: (step(s), None),
+        init_fresh_pgd_sources(sites, "random", "c", leading, key),
+        None,
+        length=n_steps,
     )
-    masks, delta_masks = (
-        persistent_delta_pinned_masks(ci_lower, sources)
-        if delta_pinned
-        else masks_from_sources(ci_lower, sources)
-    )
-    return loss_at_masks(masks, delta_masks)
+    return _masking_at(ci_lower, sources, delta_pinned=delta_pinned)
 
 
-def make_fresh_pgd_eval_step(
-    model_static: PlacedModel,
+def fresh_pgd_read_outs[T](
+    sites: tuple[SiteSpec, ...],
+    ci_lower: Mapping[str, SiteCI],
+    leading: tuple[int, ...],
+    key: PRNGKeyArray,
+    attack: FreshPGDAttack,
+    loss_at_masking: Callable[[MaterializedMasking], Array],
+    read_out: Callable[[MaterializedMasking], T],
+    *,
+    delta_pinned: bool = False,
+) -> tuple[T, ...]:
+    """`read_out` of the masking after each of `attack.read_out_steps` along ONE ascent of
+    `loss_at_masking`, in that order. An outer scan over the read-out-to-read-out segments
+    runs each segment's steps as a dynamic-length loop, so the ascent step and `read_out`
+    each compile once however many read-outs there are."""
+    step = _sign_ascent_step(ci_lower, attack.step_size, loss_at_masking, delta_pinned=delta_pinned)
+
+    def segment(sources: Sources, bounds: Int32[Array, "2"]) -> tuple[Sources, T]:
+        sources = jax.lax.fori_loop(bounds[0], bounds[1], lambda _, s: step(s), sources)
+        return sources, read_out(_masking_at(ci_lower, sources, delta_pinned=delta_pinned))
+
+    _, stacked = jax.lax.scan(
+        segment,
+        init_fresh_pgd_sources(sites, "random", "c", leading, key),
+        jnp.asarray(tuple(pairwise((0, *attack.read_out_steps))), jnp.int32),
+    )
+    return tuple(jax.tree.map(itemgetter(i), stacked) for i in range(len(attack.read_out_steps)))
+
+
+def make_fresh_pgd_eval_step[
+    TargetIn,
+    Out,
+    PreparedT: ComponentActivations,
+    Conditioning,
+    PreparedMaskingT,
+](
+    model_static: PlacedModel[TargetIn, Out, PreparedT, Conditioning, PreparedMaskingT],
     fresh_pgd: FreshPGDReconEval,
     ci_capture_keys: CaptureKeys,
     mesh: Mesh | None = None,
-    compiler_options: dict[str, bool | int | str] | None = None,
     role: CIRole = "output",
-) -> FreshPGDStep:
-    """Build fresh-PGD reconstruction eval for any target.
+    delta_pinned: bool = False,
+) -> FreshPGDStep[TargetIn, Out, PreparedT, Conditioning, PreparedMaskingT]:
+    """Build fresh-PGD reconstruction eval for any target. Only static topology and the
+    target's array-free output operations close over the factory; `model` is the jit ARG.
 
-    `role` picks which CI head scores this metric. In a dual (shared-trunk) run the two
-    heads answer different questions, so the eval surface reports the metric once per
-    role rather than silently choosing one; a single-role run has only `"output"`.
-    """
-    sites = model_static.sites
+    `role` picks which CI head the probe attacks (a dual run reports it once per role);
+    `delta_pinned` pins every weight-delta mask on (a targeted run's non-target stream)."""
+    sites = model_static.model.sites
     recon_loss_fn = model_static.recon_loss_fn
+    pin_output_batch = model_static.pin_output_batch
     placement = model_static.placement
-    leading_rank = 2 if model_static.has_position_axis else 1
-    reconstruction_capture_keys = fresh_pgd.hidden_acts_capture_keys
-    model_static.assert_hidden_acts_reconstruction_points(
-        tuple(sorted(reconstruction_capture_keys))
-    )
+    leading_rank = 2 if model_static.model.has_position_axis else 1
+    reconstruction_capture_keys = fresh_pgd.reconstruction_capture_keys
     clean_capture_keys = ci_capture_keys | reconstruction_capture_keys
 
     def shard_batch_tree[T](tree: T) -> T:
         return jax.tree.map(lambda x: batch_shard_leading(x, mesh), tree)
 
     def eval_step(
-        model: PlacedModel,
+        model: PlacedModel[TargetIn, Out, PreparedT, Conditioning, PreparedMaskingT],
         components: ComponentStacks,
-        placed_ci_fn: PlacedCIFn,
-        inputs: Any,
+        ci_fn: CIFn[Conditioning],
+        inputs: TargetIn,
         key: PRNGKeyArray,
-    ) -> Array:
+    ) -> dict[str, Array]:
         sharded_inputs = shard_batch_tree(inputs)
         clean_forward_result = model.clean_forward(sharded_inputs, clean_capture_keys)
         ci_input_activations = select_captures(clean_forward_result.captures, ci_capture_keys)
         clean = reconstruction_observations(
             clean_forward_result,
-            hidden_acts_capture_keys=reconstruction_capture_keys,
+            pin_output_batch,
+            capture_keys=reconstruction_capture_keys,
             mesh=mesh,
         )
-        leading = next(iter(ci_input_activations.values())).shape[:-1]
-        assert len(leading) == leading_rank, (leading, model_static.has_position_axis)
+        leading = clean_forward_result.leading_shape
+        assert len(leading) == leading_rank, (leading, model_static.model.has_position_axis)
 
-        prepared_weights = prepare_compute_weights(model, components)
+        prepared_weights = model.prepare_compute_weights(components)
         ci_lower = {
-            site: constrain_component_activation(value, placement)
-            for site, value in evaluate_ci_role(
-                placed_ci_fn, ci_input_activations, remat=False, role=role
+            site: constrain_component_activation(
+                value, None if placement is None else placement.activations.component
+            )
+            for site, value in evaluate_ci_role_from_captures(
+                ci_fn.prepare(),
+                ci_input_activations,
+                clean_forward_result.conditioning,
+                prepared_weights,
+                sequence=clean_forward_result.sequence,
+                remat=False,
+                role=role,
             ).lower.items()
         }
 
-        def loss_at_masks(masks: dict[str, Array], delta_masks: dict[str, Array]) -> Array:
+        def loss_at_masking(masking: MaterializedMasking) -> Array:
             masked_forward_result = model.masked_forward(
                 prepared_weights,
-                sharded_inputs,
-                masking=MaterializedMasking(
-                    component_masks=masks,
-                    weight_delta_masks=delta_masks,
-                ),
+                clean_forward_result.conditioning,
+                masking=model.model.prepare_masking(masking),
+                routes=None,
                 capture_keys=reconstruction_capture_keys,
                 remat=False,
             )
             masked = reconstruction_observations(
                 masked_forward_result,
-                hidden_acts_capture_keys=reconstruction_capture_keys,
+                pin_output_batch,
+                capture_keys=reconstruction_capture_keys,
                 mesh=mesh,
             )
             return reconstruction_loss(
@@ -190,6 +278,19 @@ def make_fresh_pgd_eval_step(
                 reconstruction=fresh_pgd.reconstruction,
             ).total
 
-        return fresh_pgd_recon_loss(sites, ci_lower, leading, key, fresh_pgd, loss_at_masks)
+        totals = fresh_pgd_read_outs(
+            sites,
+            ci_lower,
+            leading,
+            key,
+            fresh_pgd.attack,
+            loss_at_masking,
+            loss_at_masking,
+            delta_pinned=delta_pinned,
+        )
+        return {
+            f"loss/{name}": total
+            for name, total in zip(fresh_pgd.read_out_names, totals, strict=True)
+        }
 
-    return filter_jit(eval_step, compiler_options=compiler_options)
+    return eval_step

@@ -15,32 +15,98 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 from jax.sharding import PartitionSpec as P
-from jaxtyping import Array, Float, Int, PRNGKeyArray
+from jaxtyping import Array, ArrayLike, Float, Int, PRNGKeyArray
 
 from param_decomp.ci_filter.config import CIFilterConfig, CIMaskedRecon
 from param_decomp.ci_filter.objective import objective_rows, row_scores
-from param_decomp.core.ci_fn import CI, PlacedCIFn, ci_for_role, evaluate_ci
-from param_decomp.core.components import ComponentStacks, SiteSlots
+from param_decomp.core.ci_fn.interface import CIFn
+from param_decomp.core.ci_fn.runtime import evaluate_ci_role_from_captures
+from param_decomp.core.components import ComponentStacks, require_full_emission
 from param_decomp.core.decomposed_linear import constrain_component_activation
-from param_decomp.core.losses import importance_minimality_terms, scheduled_value_at
-from param_decomp.core.model import (
-    BATCH_AXES,
-    MaterializedMasking,
-    PlacedModel,
-    prepare_compute_weights,
-)
+from param_decomp.core.losses import importance_minimality_terms
+from param_decomp.core.model import ForwardResult, MaterializedMasking, SiteRoutes, select_captures
+from param_decomp.core.placement import batch_axes
 from param_decomp.core.precision import COMPUTE_DT
-from param_decomp.core.recon_eval import FreshPGDReconEval, fresh_pgd_recon_loss
-from param_decomp.core.run_state import clip_by_global_norm_with_eps, optax_schedule
+from param_decomp.core.recon_eval import fresh_pgd_masking
+from param_decomp.core.run_state import clip_by_global_norm_with_eps
+from param_decomp.core.runtime_schedule import scheduled_value_at, scheduled_value_traced
+from param_decomp.experiments.lm.load_run import PlacedTransformer
+from param_decomp.lm.batch import LMBatchWithDocuments
+from param_decomp.targets.lm_output import LMOutput, StreamedLinearOutput
+from param_decomp.targets.transformer import TransformerPreparedWeights
 
-type Prepared = dict[str, dict[str, Array]]
+type Prepared = TransformerPreparedWeights
+type FilterCIFn = CIFn[LMBatchWithDocuments]
+"""The decomposition's CI fn — fp32 masters for the trained one, compute precision for a
+ceiling (`CIConstraints`). Every read prepares it (`output_ci`)."""
+type CleanForward = ForwardResult[LMOutput, LMBatchWithDocuments]
 type Trainable = optax.Params
 """The CI fn's floating arrays with `None` elsewhere: the optimized leaves and their grads."""
 
 
 def gather_rows(tokens_all: Int[Array, "N T"], idx: Int[Array, " B"]) -> Int[Array, "B T"]:
     """A batch of the replicated pool, sharded over the batch axes. In-jit only."""
-    return tokens_all.at[idx].get(out_sharding=P(BATCH_AXES, None))
+    axes = batch_axes(jax.sharding.get_abstract_mesh())
+    return tokens_all.at[idx].get(out_sharding=P(axes, None))
+
+
+def lm_batch(tokens: Int[Array, "B T"]) -> LMBatchWithDocuments:
+    """Prompts as the transformer's input: one document per row, no internal boundaries."""
+    return LMBatchWithDocuments.from_unsegmented_sequences(tokens)
+
+
+def gather_batch(tokens_all: Int[Array, "N T"], idx: Int[Array, " B"]) -> LMBatchWithDocuments:
+    return lm_batch(gather_rows(tokens_all, idx))
+
+
+def all_logits(output: LMOutput) -> Float[Array, "B T vocab"]:
+    """Every position's logits: the materialized edge's own array, or a streamed output's
+    head applied with fp32 accumulation."""
+    match output:
+        case StreamedLinearOutput(activations=activations, head=head):
+            return jnp.dot(activations, head.T, preferred_element_type=jnp.float32)
+        case jax.Array():
+            return output
+
+
+def last_logits(output: LMOutput) -> Float[Array, "B vocab"]:
+    """`all_logits` at the last position only."""
+    match output:
+        case StreamedLinearOutput(activations=activations, head=head):
+            return jnp.dot(activations[:, -1, :], head.T, preferred_element_type=jnp.float32)
+        case jax.Array():
+            return output[:, -1, :]
+
+
+def masked_output(
+    placed: PlacedTransformer,
+    prepared: Prepared,
+    conditioning: LMBatchWithDocuments,
+    masking: MaterializedMasking,
+    *,
+    remat: bool,
+    routes: SiteRoutes | None = None,
+) -> LMOutput:
+    """The masked forward's output under concrete masks, reproducing the clean forward that
+    returned `conditioning` (or running the whole model from a plain batch)."""
+    return placed.masked_forward(
+        prepared,
+        conditioning,
+        masking=placed.model.prepare_masking(masking),
+        routes=routes,
+        remat=remat,
+    ).output
+
+
+@jax.tree_util.register_dataclass
+@dataclass(frozen=True)
+class DenseCI:
+    """One CI head's bundle over full-emission sites, keyed by output site: the
+    preactivations and both squashings (`core.ci_fn.interface.CI`, narrowed to arrays)."""
+
+    preactivations: dict[str, Array]
+    lower: dict[str, Array]
+    upper: dict[str, Array]
 
 
 @jax.tree_util.register_dataclass
@@ -48,7 +114,7 @@ def gather_rows(tokens_all: Int[Array, "N T"], idx: Int[Array, " B"]) -> Int[Arr
 class CIConstraints:
     """What bounds the trained CI fn's output CI, applied at every CI read (`output_ci`)."""
 
-    ceilings: tuple[PlacedCIFn, ...]
+    ceilings: tuple[FilterCIFn, ...]
     """Frozen compute-precision CI fns whose output CI caps the trained one's entrywise
     (a filter's ceilings, `CIFilterConfig`); `()` leaves the CI uncapped."""
     kept: dict[str, Array] | None
@@ -80,23 +146,41 @@ def _capped_bwd(res: tuple[Array, Array], g: Array) -> tuple[Array, Array]:
 _capped.defvjp(_capped_fwd, _capped_bwd)
 
 
+def _head_ci(prepared: Prepared, ci_fn: FilterCIFn, forward: CleanForward, remat: bool) -> DenseCI:
+    """`ci_fn`'s output head on the CI taps of `forward` (a clean forward, or a masked one
+    carrying the taps among other captures), in compute precision."""
+    ci = evaluate_ci_role_from_captures(
+        ci_fn.prepare(),
+        select_captures(forward.captures, ci_fn.capture_keys),
+        forward.conditioning,
+        prepared,
+        sequence=forward.sequence,
+        remat=remat,
+        role="output",
+    )
+    return DenseCI(
+        preactivations={k: require_full_emission(v) for k, v in ci.preactivations.items()},
+        lower={k: require_full_emission(v) for k, v in ci.lower.items()},
+        upper={k: require_full_emission(v) for k, v in ci.upper.items()},
+    )
+
+
 def output_ci(
-    placed: PlacedModel,
-    ci_fn: PlacedCIFn,
+    placed: PlacedTransformer,
+    prepared: Prepared,
+    ci_fn: FilterCIFn,
     constraints: CIConstraints,
-    captures: dict[str, Array],
+    forward: CleanForward,
     remat: bool,
-) -> CI:
+) -> DenseCI:
     """The output head's CI bundle, capped entrywise by every ceiling's output CI (the
     squashings are monotone, so capping the preactivation, lower and upper CI alike is capping
     the preactivation), zero on removed components, pinned to the placement's
     component-activation layout."""
-    ci = ci_for_role(evaluate_ci(ci_fn, captures, remat=remat), "output")
+    ci = _head_ci(prepared, ci_fn, forward, remat)
     for ceiling in constraints.ceilings:
-        cap = jax.lax.stop_gradient(
-            ci_for_role(evaluate_ci(ceiling, captures, remat=False), "output")
-        )
-        ci = CI(
+        cap = jax.lax.stop_gradient(_head_ci(prepared, ceiling, forward, remat=False))
+        ci = DenseCI(
             preactivations={
                 k: _capped(v, cap.preactivations[k]) for k, v in ci.preactivations.items()
             },
@@ -105,7 +189,7 @@ def output_ci(
         )
     if constraints.kept is not None:
         kept = constraints.kept
-        ci = CI(
+        ci = DenseCI(
             preactivations={
                 k: jnp.where(kept[k] > 0, v, jnp.minimum(v, 0.0))
                 for k, v in ci.preactivations.items()
@@ -113,10 +197,15 @@ def output_ci(
             lower={k: v * kept[k].astype(v.dtype) for k, v in ci.lower.items()},
             upper={k: v * kept[k].astype(v.dtype) for k, v in ci.upper.items()},
         )
-    return CI(
+    rule = None if placed.placement is None else placed.placement.activations.component
+
+    def pin(v: Array) -> Array:
+        return require_full_emission(constrain_component_activation(v, rule))
+
+    return DenseCI(
         preactivations=ci.preactivations,
-        lower={k: constrain_component_activation(v, placed.placement) for k, v in ci.lower.items()},
-        upper={k: constrain_component_activation(v, placed.placement) for k, v in ci.upper.items()},
+        lower={k: pin(v) for k, v in ci.lower.items()},
+        upper={k: pin(v) for k, v in ci.upper.items()},
     )
 
 
@@ -124,20 +213,27 @@ def output_ci(
 def remove_components(components: ComponentStacks, kept: dict[str, Array]) -> ComponentStacks:
     """Zero every removed component's V column and U row (`CIConstraints.kept`): it then
     contributes nothing under any mask, and with the weight delta on its weight lies in the
-    delta `W - UV`, exactly as if the component had been deleted."""
+    delta `W - UV`, exactly as if the component had been deleted. A stack's persist pads are
+    all-zero already and stay so."""
     stacks = dict(components.stacks)
     for group, (Vs, Us) in components.stacks.items():
-        slots = _group_slots(components.site_slots, group)
-        assert len(slots) == Vs.shape[0], (group, slots)
+        slots = _group_slots(components, group)
+        pad = components.pad_of(group)
+        assert len(slots) + pad == Vs.shape[0], (group, slots, pad, Vs.shape)
         keep = jnp.stack([kept[name] for name in slots]).astype(Vs.dtype)
+        keep = jnp.pad(keep, ((0, pad), (0, 0)))
         stacks[group] = (Vs * keep[:, None, :], Us * keep[:, :, None])
-    return ComponentStacks(stacks=stacks, site_slots=components.site_slots)
+    return ComponentStacks(
+        stacks=stacks,
+        site_stack_indices=components.site_stack_indices,
+        stack_pads=components.stack_pads,
+    )
 
 
-def _group_slots(site_slots: SiteSlots, group: str) -> list[str]:
-    """The group's site names in slot order."""
-    by_slot = {slot: name for name, g, slot in site_slots if g == group}
-    return [by_slot[i] for i in range(len(by_slot))]
+def _group_slots(components: ComponentStacks, group: str) -> list[str]:
+    """The group's site names in stack-index order."""
+    by_index = {index: name for name, g, index in components.site_stack_indices if g == group}
+    return [by_index[i] for i in range(len(by_index))]
 
 
 def count_above(ci_lower: dict[str, Array], threshold: float | Array) -> Array:
@@ -150,7 +246,7 @@ def count_above(ci_lower: dict[str, Array], threshold: float | Array) -> Array:
 
 @eqx.filter_jit
 def prepare_components(
-    placed: PlacedModel, components: ComponentStacks
+    placed: PlacedTransformer, components: ComponentStacks
 ) -> tuple[Prepared, dict[str, Array]]:
     """The components in compute form and each component's `||V_c||` (for the grid's
     normalized inner activations), replicated."""
@@ -158,18 +254,29 @@ def prepare_components(
         site: jax.sharding.reshard(
             jnp.linalg.norm(components.site(site).V.astype(jnp.float32), axis=0), P()
         )
-        for site in placed.site_names
+        for site in placed.model.site_names
     }
-    return prepare_compute_weights(placed, components), v_norms
+    return placed.prepare_compute_weights(components), v_norms
 
 
-def trainable(ci_fn: PlacedCIFn) -> Trainable:
+def trainable(ci_fn: FilterCIFn) -> Trainable:
     return cast(Trainable, eqx.filter(ci_fn, eqx.is_inexact_array))
+
+
+def lr_schedule(config: CIFilterConfig) -> Callable[[ArrayLike], Array]:
+    """The CI fn's learning rate at an update count, held at its final value past the run."""
+
+    def schedule(count: ArrayLike) -> Array:
+        return scheduled_value_traced(
+            jnp.asarray(count, jnp.float32), config.steps, config.lr_schedule
+        )
+
+    return schedule
 
 
 def make_optimizer(config: CIFilterConfig) -> optax.GradientTransformation:
     adam = optax.adamw(
-        optax_schedule(config.lr_schedule, config.steps),
+        lr_schedule(config),
         b1=config.betas[0],
         b2=config.betas[1],
         eps=1e-8,
@@ -182,9 +289,9 @@ def make_optimizer(config: CIFilterConfig) -> optax.GradientTransformation:
 
 type MicroGrads = Callable[
     [
-        PlacedModel,
+        PlacedTransformer,
         Prepared,
-        PlacedCIFn,
+        FilterCIFn,
         CIConstraints,
         Int[Array, "N T"],
         Int[Array, " B"],
@@ -208,9 +315,9 @@ def make_micro_grads(config: CIFilterConfig) -> MicroGrads:
 
     @eqx.filter_jit
     def micro_grads(
-        placed: PlacedModel,
+        placed: PlacedTransformer,
         prepared: Prepared,
-        ci_fn: PlacedCIFn,
+        ci_fn: FilterCIFn,
         constraints: CIConstraints,
         tokens_all: Int[Array, "N T"],
         idx: Int[Array, " B"],
@@ -218,11 +325,11 @@ def make_micro_grads(config: CIFilterConfig) -> MicroGrads:
         targets: Int[Array, " N"],
         train_frac: Array,
     ) -> tuple[Trainable, dict[str, Array], dict[str, Array]]:
-        tokens = gather_rows(tokens_all, idx)
         target_idx = targets[idx]
-        clean = placed.clean_forward(tokens, capture_keys=ci_fn.capture_keys)
-        clean_last = jax.lax.stop_gradient(clean.output[:, -1, :])
-        captures = jax.lax.stop_gradient(clean.captures)
+        clean = jax.lax.stop_gradient(
+            placed.clean_forward(gather_batch(tokens_all, idx), ci_fn.capture_keys)
+        )
+        clean_last = last_logits(clean.output)
         gamma = scheduled_value_at(train_frac, imp.gamma)
         impmin_coeff = scheduled_value_at(train_frac, imp.coeff)
         freq_coeff = (
@@ -234,17 +341,21 @@ def make_micro_grads(config: CIFilterConfig) -> MicroGrads:
         def loss_fn(params: Trainable) -> tuple[Array, dict[str, Array]]:
             ci = output_ci(
                 placed,
-                cast(PlacedCIFn, eqx.combine(params, ci_fn)),
+                prepared,
+                cast(FilterCIFn, eqx.combine(params, ci_fn)),
                 constraints,
-                captures,
+                clean,
                 config.remat,
             )
-            masked_last = placed.masked_forward(
-                prepared,
-                tokens,
-                masking=MaterializedMasking(component_masks=ci.lower),
-                remat=config.remat,
-            ).output[:, -1, :]
+            masked_last = last_logits(
+                masked_output(
+                    placed,
+                    prepared,
+                    clean.conditioning,
+                    MaterializedMasking(component_masks=ci.lower),
+                    remat=config.remat,
+                )
+            )
             recon = jnp.mean(
                 objective_rows(objective, masked_last, clean_last, answer_ids, target_idx)
             )
@@ -252,7 +363,7 @@ def make_micro_grads(config: CIFilterConfig) -> MicroGrads:
                 ci.upper,
                 gamma,
                 None if imp.frequency_coeff is None else imp.reference_datapoint_count,
-                imp.normalize_at_one,
+                normalize_at_one=imp.normalize_at_one,
             )
             total = recon_coeff * recon + impmin_coeff * activity + freq_coeff * freq
             metrics = {
@@ -284,9 +395,9 @@ type MicroCall = Callable[[int, np.ndarray], tuple[Trainable, dict[str, Array], 
 
 def ci_masked_micro_call(
     micro_grads: MicroGrads,
-    placed: PlacedModel,
+    placed: PlacedTransformer,
     prepared: Prepared,
-    ci_fn: PlacedCIFn,
+    ci_fn: FilterCIFn,
     constraints: CIConstraints,
     tokens_all: Int[Array, "N T"],
     answer_ids: Int[Array, " K"],
@@ -346,11 +457,11 @@ def batch_gradients(
 
 def make_apply_update(
     optimizer: optax.GradientTransformation,
-) -> Callable[[PlacedCIFn, optax.OptState, Trainable], tuple[PlacedCIFn, optax.OptState, Array]]:
+) -> Callable[[FilterCIFn, optax.OptState, Trainable], tuple[FilterCIFn, optax.OptState, Array]]:
     @eqx.filter_jit(donate="all-except-first")
     def apply_update(
-        ci_fn: PlacedCIFn, opt_state: optax.OptState, grads: Trainable
-    ) -> tuple[PlacedCIFn, optax.OptState, Array]:
+        ci_fn: FilterCIFn, opt_state: optax.OptState, grads: Trainable
+    ) -> tuple[FilterCIFn, optax.OptState, Array]:
         params = trainable(ci_fn)
         updates, opt_state = optimizer.update(grads, opt_state, params)
         return eqx.apply_updates(ci_fn, updates), opt_state, optax.tree.norm(grads)
@@ -378,9 +489,9 @@ def _replicated_rows(
 
 type EvalBatch = Callable[
     [
-        PlacedModel,
+        PlacedTransformer,
         Prepared,
-        PlacedCIFn,
+        FilterCIFn,
         CIConstraints,
         Int[Array, "N T"],
         Int[Array, " B"],
@@ -400,29 +511,34 @@ def make_eval_batch(config: CIFilterConfig) -> EvalBatch:
 
     @eqx.filter_jit
     def eval_batch(
-        placed: PlacedModel,
+        placed: PlacedTransformer,
         prepared: Prepared,
-        ci_fn: PlacedCIFn,
+        ci_fn: FilterCIFn,
         constraints: CIConstraints,
         tokens_all: Int[Array, "N T"],
         idx: Int[Array, " B"],
         answer_ids: Int[Array, " K"],
         targets: Int[Array, " N"],
     ) -> tuple[dict[str, RowArrays], dict[str, Array], dict[str, Array]]:
-        tokens = gather_rows(tokens_all, idx)
         target_idx = targets[idx]
-        clean = placed.clean_forward(tokens, capture_keys=ci_fn.capture_keys)
-        clean_last = clean.output[:, -1, :]
-        ci = output_ci(placed, ci_fn, constraints, clean.captures, remat=False)
+        clean = placed.clean_forward(gather_batch(tokens_all, idx), ci_fn.capture_keys)
+        clean_last = last_logits(clean.output)
+        ci = output_ci(placed, prepared, ci_fn, constraints, clean, remat=False)
         maskings = {
             "ci": ci.lower,
             "rounded": {k: (v > threshold).astype(COMPUTE_DT) for k, v in ci.lower.items()},
         }
         rows: dict[str, RowArrays] = {}
         for name, masks in maskings.items():
-            masked_last = placed.masked_forward(
-                prepared, tokens, masking=MaterializedMasking(component_masks=masks), remat=False
-            ).output[:, -1, :]
+            masked_last = last_logits(
+                masked_output(
+                    placed,
+                    prepared,
+                    clean.conditioning,
+                    MaterializedMasking(component_masks=masks),
+                    remat=False,
+                )
+            )
             value = objective_rows(objective, masked_last, clean_last, answer_ids, target_idx)
             rows[name] = _replicated_rows(value, masked_last, clean_last, answer_ids, target_idx)
         site_max = {
@@ -444,7 +560,7 @@ def make_eval_batch(config: CIFilterConfig) -> EvalBatch:
 
 type ScoreFixedMasks = Callable[
     [
-        PlacedModel,
+        PlacedTransformer,
         Prepared,
         dict[str, Array],
         Int[Array, "N T"],
@@ -462,7 +578,7 @@ def make_score_fixed_masks(config: CIFilterConfig) -> ScoreFixedMasks:
 
     @eqx.filter_jit
     def score(
-        placed: PlacedModel,
+        placed: PlacedTransformer,
         prepared: Prepared,
         masks: dict[str, Array],
         tokens_all: Int[Array, "N T"],
@@ -470,13 +586,19 @@ def make_score_fixed_masks(config: CIFilterConfig) -> ScoreFixedMasks:
         answer_ids: Int[Array, " K"],
         targets: Int[Array, " N"],
     ) -> RowArrays:
-        tokens = gather_rows(tokens_all, idx)
         target_idx = targets[idx]
-        clean_last = placed.clean_forward(tokens).output[:, -1, :]
+        clean = placed.clean_forward(gather_batch(tokens_all, idx))
+        clean_last = last_logits(clean.output)
         broadcast = {k: v[None, None, :].astype(COMPUTE_DT) for k, v in masks.items()}
-        masked_last = placed.masked_forward(
-            prepared, tokens, masking=MaterializedMasking(component_masks=broadcast), remat=False
-        ).output[:, -1, :]
+        masked_last = last_logits(
+            masked_output(
+                placed,
+                prepared,
+                clean.conditioning,
+                MaterializedMasking(component_masks=broadcast),
+                remat=False,
+            )
+        )
         value = objective_rows(objective, masked_last, clean_last, answer_ids, target_idx)
         return _replicated_rows(value, masked_last, clean_last, answer_ids, target_idx)
 
@@ -485,9 +607,9 @@ def make_score_fixed_masks(config: CIFilterConfig) -> ScoreFixedMasks:
 
 type PGDEval = Callable[
     [
-        PlacedModel,
+        PlacedTransformer,
         Prepared,
-        PlacedCIFn,
+        FilterCIFn,
         CIConstraints,
         Int[Array, "N T"],
         Int[Array, " B"],
@@ -502,16 +624,16 @@ type PGDEval = Callable[
 def make_pgd_eval(config: CIFilterConfig) -> PGDEval:
     """One batch of the decomposition's fresh-PGD reconstruction eval (`PGDEvalConfig`),
     on the prepared component weights and scored by the filter's objective at the LAST
-    position: the kernel is `core.recon_eval.fresh_pgd_recon_loss`, delta channel attacked."""
-    assert config.pgd_eval is not None
-    probe = FreshPGDReconEval(n_steps=config.pgd_eval.n_steps, step_size=config.pgd_eval.step_size)
+    position: the kernel is `core.recon_eval.fresh_pgd_masking`, delta channel attacked."""
+    pgd = config.pgd_eval
+    assert pgd is not None
     objective = config.objective
 
     @eqx.filter_jit
     def pgd_eval(
-        placed: PlacedModel,
+        placed: PlacedTransformer,
         prepared: Prepared,
-        ci_fn: PlacedCIFn,
+        ci_fn: FilterCIFn,
         constraints: CIConstraints,
         tokens_all: Int[Array, "N T"],
         idx: Int[Array, " B"],
@@ -519,25 +641,29 @@ def make_pgd_eval(config: CIFilterConfig) -> PGDEval:
         targets: Int[Array, " N"],
         key: PRNGKeyArray,
     ) -> Array:
-        tokens = gather_rows(tokens_all, idx)
         target_idx = targets[idx]
-        clean = placed.clean_forward(tokens, capture_keys=ci_fn.capture_keys)
-        clean_last = clean.output[:, -1, :]
-        ci_lower = output_ci(placed, ci_fn, constraints, clean.captures, remat=False).lower
-        leading = next(iter(ci_lower.values())).shape[:-1]
+        clean = placed.clean_forward(gather_batch(tokens_all, idx), ci_fn.capture_keys)
+        clean_last = last_logits(clean.output)
+        ci_lower = output_ci(placed, prepared, ci_fn, constraints, clean, remat=False).lower
 
-        def loss_at_masks(masks: dict[str, Array], delta_masks: dict[str, Array]) -> Array:
-            masked_last = placed.masked_forward(
-                prepared,
-                tokens,
-                masking=MaterializedMasking(component_masks=masks, weight_delta_masks=delta_masks),
-                remat=config.remat,
-            ).output[:, -1, :]
+        def loss_at_masking(masking: MaterializedMasking) -> Array:
+            masked_last = last_logits(
+                masked_output(placed, prepared, clean.conditioning, masking, remat=config.remat)
+            )
             return jnp.mean(
                 objective_rows(objective, masked_last, clean_last, answer_ids, target_idx)
             )
 
-        return fresh_pgd_recon_loss(placed.sites, ci_lower, leading, key, probe, loss_at_masks)
+        masking = fresh_pgd_masking(
+            placed.model.sites,
+            ci_lower,
+            clean.leading_shape,
+            key,
+            pgd.step_size,
+            pgd.n_steps,
+            loss_at_masking,
+        )
+        return loss_at_masking(masking)
 
     return pgd_eval
 

@@ -140,7 +140,7 @@ def nontarget_probe(
         f"{dataset} -> {out_dir}"
     )
 
-    site_c = {site.name: site.C for site in placed.sites}
+    site_c = {site.name: site.C for site in placed.model.sites}
     summary: list[dict[str, str | float]] = []
     examples = (out_dir / "examples.jsonl").open("w")
     with jax.set_mesh(mesh):
@@ -175,7 +175,7 @@ def nontarget_probe(
         for batch_index, block in enumerate(batches):
             tokens = jnp.asarray(block)
             baseline = baseline_of(placed, prepared, tokens, ones)
-            ci_all = np.asarray(ci_of(placed, ci_fn, tokens)) if heatmap_rows else None
+            ci_all = np.asarray(ci_of(placed, prepared, ci_fn, tokens)) if heatmap_rows else None
             base_top1 = np.asarray(baseline.top1)
             base_kls.append(float(np.mean(np.asarray(baseline.clean_kl))))
             for site, component in keys:

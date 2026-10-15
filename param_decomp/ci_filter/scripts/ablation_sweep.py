@@ -90,7 +90,7 @@ def ablation_sweep(
         rng = np.random.default_rng(np.random.SeedSequence((config.seed, 11)))
         subset = np.sort(rng.choice(pool.n_prompts, size=prompts, replace=False)).astype(np.int32)
         state = make_ablation_state()(
-            placed, ci_fn, constraints, tokens_all, jnp.asarray(subset), target_all
+            placed, prepared, ci_fn, constraints, tokens_all, jnp.asarray(subset), target_all
         )
         if alive_npz is None:
             alive = {

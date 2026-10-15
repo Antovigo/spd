@@ -5,6 +5,7 @@ and prompt pool, and turn the rankings into the init's `NeuronAlignment`. The wr
 
 import json
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -13,9 +14,9 @@ from param_decomp.experiments.lm.resolved import (
     AnyLMTargetConfig,
     LlamaSimpleMLPTargetConfig,
     LMTargetedRun,
+    Qwen36MoeTargetConfig,
     TargetConfig,
 )
-from param_decomp.targets.glu_transformer import GLUDecomposedModel
 from param_decomp.targets.neuron_alignment import (
     NeuronAlignment,
     alignment_coverage,
@@ -25,6 +26,7 @@ from param_decomp.targets.neuron_alignment import (
     read_neuron_ranks,
     resolve_neuron_ranks_ref,
 )
+from param_decomp.targets.transformer import TransformerDecomposedModel
 
 NEURON_ALIGNMENT_FILENAME = "neuron_alignment.json"
 
@@ -37,11 +39,13 @@ def target_identity(target: AnyLMTargetConfig) -> str:
             return model_name
         case LlamaSimpleMLPTargetConfig(pretrain_run_path=run_path):
             return run_path
+        case Qwen36MoeTargetConfig():
+            raise AssertionError("neuron rankings exist for the dense transformer targets only")
 
 
 def load_neuron_alignment(
     built: LMTargetedRun,
-    model: PlacedModel,
+    model: PlacedModel[Any, Any, Any, Any, Any],
     pool_tokens: np.ndarray,
     data_root: Path,
     *,
@@ -51,12 +55,16 @@ def load_neuron_alignment(
     Cheap (a file read), so every entry — fresh, requeue, fine-tune — takes it; a restore
     simply overwrites the aligned reference. `write_summary_to` (rank 0's run dir) gets
     `neuron_alignment.json`: the artifact, each site's C and the score fraction it covers."""
-    assert built.target.neuron_ranks is not None, "validated at parse"
+    target = built.target
+    assert isinstance(target, TargetConfig | LlamaSimpleMLPTargetConfig), (
+        f"neuron_aligned_targeted needs a dense transformer target, got {type(target).__name__}"
+    )
+    assert target.neuron_ranks is not None, "validated at parse"
     glu = model.model
-    assert isinstance(glu, GLUDecomposedModel), (
+    assert isinstance(glu, TransformerDecomposedModel), (
         f"neuron_aligned_targeted needs a transformer target, got {type(glu)}"
     )
-    artifact_dir = resolve_neuron_ranks_ref(built.target.neuron_ranks, data_root)
+    artifact_dir = resolve_neuron_ranks_ref(target.neuron_ranks, data_root)
     ranks = read_neuron_ranks(artifact_dir)
     blocks = ranked_blocks(glu.sites, glu.anatomy)
     assert blocks, "neuron_aligned_targeted: the decomposition has no site to align"

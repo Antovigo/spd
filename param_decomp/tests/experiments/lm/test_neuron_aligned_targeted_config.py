@@ -4,7 +4,6 @@ artifact reference is required by — and only by — that init, and a plain run
 from typing import Any
 
 import pytest
-import yaml
 from pydantic import ValidationError
 
 from param_decomp.core.configs import NamedNeuronRanks, NeuronRanksDir
@@ -13,7 +12,8 @@ from param_decomp.experiments.lm.config import (
     LMExperimentConfig,
     LMTargetedExperimentConfig,
 )
-from param_decomp.tests.experiments.test_repo_configs_parse import LM_CONFIG_PATHS
+from param_decomp.tests.experiments.lm.test_lm_targeted import _targeted_raw
+from param_decomp.tests.lm_configs import l18_mlp_raw
 
 _SITES: dict[str, Any] = {
     "kind": "glu_transformer",
@@ -56,13 +56,8 @@ def test_neuron_ranks_refs_are_flat_names_or_absolute_dirs():
         NeuronRanksDir.model_validate({"kind": "dir", "dir": "relative/ranks"})
 
 
-def _seat(name: str) -> dict[str, Any]:
-    [path] = [p for p in LM_CONFIG_PATHS if p.stem == name]
-    return yaml.safe_load(path.read_text())
-
-
 def test_a_plain_run_refuses_the_targeted_init():
-    raw = _seat("llama8b_l18_C49k_200k")
+    raw = l18_mlp_raw()
     raw["decomposition"]["sites"]["initialization"] = "neuron_aligned_targeted"
     raw["decomposition"]["sites"]["neuron_ranks"] = {"kind": "name", "name": "x"}
     with pytest.raises(ValidationError, match="targeted-run"):
@@ -70,7 +65,7 @@ def test_a_plain_run_refuses_the_targeted_init():
 
 
 def test_a_targeted_run_admits_the_targeted_init():
-    raw = _seat("llama8b_l18_arith_targeted")
+    raw = _targeted_raw()
     raw["decomposition"]["sites"]["initialization"] = "neuron_aligned_targeted"
     raw["decomposition"]["sites"]["neuron_ranks"] = {"kind": "name", "name": "x"}
     cfg = LMTargetedExperimentConfig.model_validate(raw)

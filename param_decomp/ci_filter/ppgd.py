@@ -2,11 +2,11 @@
 S14′, S24), scored by the CI filter's objective (`MergedPPGDRecon`).
 
 Built from core's own kernels — `init_persistent_sources`, `sources_adam_ascend_project`,
-`uniform_k_subset_routes`, `masks_from_sources`, `mixed_persistent_stochastic_masks` — with the
-filter's frozen components (only the CI fn trains). The persistent sources hold one row per
-batch slot; microbatches read consecutive row slices, and every Adam ascent updates the whole
-bundle once from the concatenated slice gradients, so the trajectory does not depend on the
-microbatch split beyond float reassociation."""
+`UniformKRouting`, `source_masking`, `mixed_persistent_stochastic_masking` — with the filter's
+frozen components (only the CI fn trains). The persistent sources hold one row per batch slot
+(the axis after each stack's stack axis); microbatches read consecutive row slices, and every
+Adam ascent updates the whole bundle once from the concatenated slice gradients, so the
+trajectory does not depend on the microbatch split beyond float reassociation."""
 
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -24,33 +24,43 @@ from param_decomp.ci_filter.config import CIFilterConfig, MergedPPGDRecon
 from param_decomp.ci_filter.objective import objective_rows
 from param_decomp.ci_filter.step import (
     CIConstraints,
+    FilterCIFn,
     MicroCall,
     Prepared,
     Trainable,
     batch_gradients,
     count_above,
-    gather_rows,
+    gather_batch,
+    last_logits,
+    masked_output,
     output_ci,
     trainable,
 )
 from param_decomp.core.adversary import (
-    Sources,
     SourcesAdamState,
+    SourceStacks,
     init_persistent_sources,
     init_sources_adam_state,
     sources_adam_ascend_project,
 )
-from param_decomp.core.ci_fn import PlacedCIFn
-from param_decomp.core.losses import importance_minimality_terms, scheduled_value_at
-from param_decomp.core.masking import masks_from_sources, mixed_persistent_stochastic_masks
-from param_decomp.core.model import MaterializedMasking, PlacedModel
-from param_decomp.core.recon import uniform_k_subset_routes
+from param_decomp.core.losses import importance_minimality_terms
+from param_decomp.core.masking import (
+    materialize_masking,
+    mixed_persistent_stochastic_masking,
+    source_masking,
+)
+from param_decomp.core.recon import UniformKRouting
+from param_decomp.core.runtime_schedule import scheduled_value_at
+from param_decomp.experiments.lm.load_run import PlacedTransformer
+
+ROW_AXIS = 1
+"""The batch-slot axis of every source stack leaf (`[stack, batch, ...]`)."""
 
 
 @jax.tree_util.register_dataclass
 @dataclass(frozen=True)
 class Adversary:
-    sources: Sources
+    sources: SourceStacks
     opt_state: SourcesAdamState
 
 
@@ -60,44 +70,41 @@ def _ppgd(config: CIFilterConfig) -> MergedPPGDRecon:
 
 
 def init_adversary(
-    placed: PlacedModel, batch_size: int, seq_len: int, key: PRNGKeyArray
+    placed: PlacedTransformer, batch_size: int, seq_len: int, key: PRNGKeyArray
 ) -> Adversary:
-    """U[0,1] fp32 sources of shape `(batch, position, C + 1)` per site, replicated (the
-    microbatch row slices are host-side indexing; a batch-sharded bundle would make each slice
-    a cross-device gather)."""
-    sources = init_persistent_sources(
-        placed.site_names,
-        tuple(site.C for site in placed.sites),
-        (batch_size, seq_len),
-        jnp.float32,
-        key,
-    )
+    """U[0,1] fp32 component sources `(batch, position, C)` and delta sources
+    `(batch, position)` per site, stacked per group and replicated (the microbatch row slices
+    are host-side indexing; a batch-sharded bundle would make each slice a cross-device
+    gather)."""
+    sources = init_persistent_sources(placed.model.sites, (batch_size, seq_len), jnp.float32, key)
     if not jax.sharding.get_abstract_mesh().empty:
         sources = jax.tree.map(lambda x: jax.sharding.reshard(x, P()), sources)
     return Adversary(sources=sources, opt_state=init_sources_adam_state(sources))
 
 
-def _rows(sources: Sources, start: int, stop: int) -> Sources:
-    return jax.tree.map(lambda x: x[start:stop], sources)
+def _rows(sources: SourceStacks, start: int, stop: int) -> SourceStacks:
+    return jax.tree.map(lambda x: jax.lax.slice_in_dim(x, start, stop, axis=ROW_AXIS), sources)
 
 
-def _concat_rows(parts: list[Sources]) -> Sources:
-    return parts[0] if len(parts) == 1 else jax.tree.map(lambda *xs: jnp.concatenate(xs), *parts)
+def _concat_rows(parts: list[SourceStacks]) -> SourceStacks:
+    if len(parts) == 1:
+        return parts[0]
+    return jax.tree.map(lambda *xs: jnp.concatenate(xs, axis=ROW_AXIS), *parts)
 
 
 type WarmupGrads = Callable[
     [
-        PlacedModel,
+        PlacedTransformer,
         Prepared,
-        PlacedCIFn,
+        FilterCIFn,
         CIConstraints,
         Int[Array, "N T"],
         Int[Array, " B"],
         Int[Array, " K"],
         Int[Array, " N"],
-        Sources,
+        SourceStacks,
     ],
-    Sources,
+    SourceStacks,
 ]
 
 
@@ -110,32 +117,28 @@ def make_warmup_grads(config: CIFilterConfig) -> WarmupGrads:
 
     @eqx.filter_jit
     def warmup_grads(
-        placed: PlacedModel,
+        placed: PlacedTransformer,
         prepared: Prepared,
-        ci_fn: PlacedCIFn,
+        ci_fn: FilterCIFn,
         constraints: CIConstraints,
         tokens_all: Int[Array, "N T"],
         idx: Int[Array, " B"],
         answer_ids: Int[Array, " K"],
         targets: Int[Array, " N"],
-        sources: Sources,
-    ) -> Sources:
-        tokens = gather_rows(tokens_all, idx)
+        sources: SourceStacks,
+    ) -> SourceStacks:
         target_idx = targets[idx]
-        clean = placed.clean_forward(tokens, capture_keys=ci_fn.capture_keys)
-        clean_last = jax.lax.stop_gradient(clean.output[:, -1, :])
+        clean = placed.clean_forward(gather_batch(tokens_all, idx), ci_fn.capture_keys)
+        clean_last = jax.lax.stop_gradient(last_logits(clean.output))
         lower = jax.lax.stop_gradient(
-            output_ci(placed, ci_fn, constraints, clean.captures, remat=False).lower
+            output_ci(placed, prepared, ci_fn, constraints, clean, remat=False).lower
         )
 
-        def score(sources: Sources) -> Array:
-            masks, delta_masks = masks_from_sources(lower, sources)
-            masked_last = placed.masked_forward(
-                prepared,
-                tokens,
-                masking=MaterializedMasking(component_masks=masks, weight_delta_masks=delta_masks),
-                remat=config.remat,
-            ).output[:, -1, :]
+        def score(sources: SourceStacks) -> Array:
+            masking = materialize_masking(source_masking(lower, sources.per_site()))
+            masked_last = last_logits(
+                masked_output(placed, prepared, clean.conditioning, masking, remat=config.remat)
+            )
             return scale * jnp.mean(
                 objective_rows(objective, masked_last, clean_last, answer_ids, target_idx)
             )
@@ -147,19 +150,19 @@ def make_warmup_grads(config: CIFilterConfig) -> WarmupGrads:
 
 type PPGDMicroGrads = Callable[
     [
-        PlacedModel,
+        PlacedTransformer,
         Prepared,
-        PlacedCIFn,
+        FilterCIFn,
         CIConstraints,
         Int[Array, "N T"],
         Int[Array, " B"],
         Int[Array, " K"],
         Int[Array, " N"],
         Array,
-        Sources,
+        SourceStacks,
         PRNGKeyArray,
     ],
-    tuple[Trainable, Sources, dict[str, Array], dict[str, Array]],
+    tuple[Trainable, SourceStacks, dict[str, Array], dict[str, Array]],
 ]
 
 
@@ -174,23 +177,24 @@ def make_ppgd_micro_grads(config: CIFilterConfig) -> PPGDMicroGrads:
 
     @eqx.filter_jit
     def micro_grads(
-        placed: PlacedModel,
+        placed: PlacedTransformer,
         prepared: Prepared,
-        ci_fn: PlacedCIFn,
+        ci_fn: FilterCIFn,
         constraints: CIConstraints,
         tokens_all: Int[Array, "N T"],
         idx: Int[Array, " B"],
         answer_ids: Int[Array, " K"],
         targets: Int[Array, " N"],
         train_frac: Array,
-        sources: Sources,
+        sources: SourceStacks,
         key: PRNGKeyArray,
-    ) -> tuple[Trainable, Sources, dict[str, Array], dict[str, Array]]:
-        tokens = gather_rows(tokens_all, idx)
+    ) -> tuple[Trainable, SourceStacks, dict[str, Array], dict[str, Array]]:
         target_idx = targets[idx]
-        clean = placed.clean_forward(tokens, capture_keys=ci_fn.capture_keys)
-        clean_last = jax.lax.stop_gradient(clean.output[:, -1, :])
-        captures = jax.lax.stop_gradient(clean.captures)
+        clean = jax.lax.stop_gradient(
+            placed.clean_forward(gather_batch(tokens_all, idx), ci_fn.capture_keys)
+        )
+        clean_last = last_logits(clean.output)
+        leading = clean.leading_shape
         gamma = scheduled_value_at(train_frac, imp.gamma)
         impmin_coeff = scheduled_value_at(train_frac, imp.coeff)
         freq_coeff = (
@@ -200,27 +204,30 @@ def make_ppgd_micro_grads(config: CIFilterConfig) -> PPGDMicroGrads:
         )
         adv_fraction = scheduled_value_at(train_frac, recon.adv_fraction)
         route_key, mask_key = random.split(key)
-        routes = uniform_k_subset_routes(route_key, placed.site_names, tokens.shape)
+        routes = UniformKRouting(placed.model.site_names)(route_key, leading)
 
-        def loss_fn(params: Trainable, sources: Sources) -> tuple[Array, dict[str, Array]]:
+        def loss_fn(params: Trainable, sources: SourceStacks) -> tuple[Array, dict[str, Array]]:
             ci = output_ci(
                 placed,
-                cast(PlacedCIFn, eqx.combine(params, ci_fn)),
+                prepared,
+                cast(FilterCIFn, eqx.combine(params, ci_fn)),
                 constraints,
-                captures,
+                clean,
                 config.remat,
             )
-            masks, delta_masks, merged_routes = mixed_persistent_stochastic_masks(
-                mask_key, ci.lower, sources, tokens.shape, adv_fraction, routes
+            masking, merged_routes = mixed_persistent_stochastic_masking(
+                mask_key, ci.lower, sources.per_site(), leading, adv_fraction, routes
             )
-            masked_last = placed.masked_forward(
-                prepared,
-                tokens,
-                masking=MaterializedMasking(
-                    component_masks=masks, weight_delta_masks=delta_masks, routes=merged_routes
-                ),
-                remat=config.remat,
-            ).output[:, -1, :]
+            masked_last = last_logits(
+                masked_output(
+                    placed,
+                    prepared,
+                    clean.conditioning,
+                    materialize_masking(masking),
+                    remat=config.remat,
+                    routes=merged_routes,
+                )
+            )
             recon_value = jnp.mean(
                 objective_rows(objective, masked_last, clean_last, answer_ids, target_idx)
             )
@@ -228,7 +235,7 @@ def make_ppgd_micro_grads(config: CIFilterConfig) -> PPGDMicroGrads:
                 ci.upper,
                 gamma,
                 None if imp.frequency_coeff is None else imp.reference_datapoint_count,
-                imp.normalize_at_one,
+                normalize_at_one=imp.normalize_at_one,
             )
             total = recon.coeff * recon_value + impmin_coeff * activity + freq_coeff * freq
             metrics = {
@@ -258,12 +265,12 @@ def make_ppgd_micro_grads(config: CIFilterConfig) -> PPGDMicroGrads:
     return micro_grads
 
 
-def make_ascend(config: CIFilterConfig) -> Callable[[Adversary, Sources, Array], Adversary]:
+def make_ascend(config: CIFilterConfig) -> Callable[[Adversary, SourceStacks, Array], Adversary]:
     """One Adam ascent-and-project of the whole bundle (S13′/S15)."""
     optimizer = _ppgd(config).optimizer
 
     @eqx.filter_jit
-    def ascend(adversary: Adversary, grads: Sources, train_frac: Array) -> Adversary:
+    def ascend(adversary: Adversary, grads: SourceStacks, train_frac: Array) -> Adversary:
         lr = scheduled_value_at(train_frac, optimizer.lr_schedule)
         sources, opt_state = sources_adam_ascend_project(
             adversary.sources, grads, adversary.opt_state, lr, optimizer
@@ -277,7 +284,7 @@ def make_ascend(config: CIFilterConfig) -> Callable[[Adversary, Sources, Array],
 class PPGDStep:
     warmup_grads: WarmupGrads
     micro_grads: PPGDMicroGrads
-    ascend: Callable[[Adversary, Sources, Array], Adversary]
+    ascend: Callable[[Adversary, SourceStacks, Array], Adversary]
     n_warmup: int
 
     @staticmethod
@@ -291,9 +298,9 @@ class PPGDStep:
 
     def __call__(
         self,
-        placed: PlacedModel,
+        placed: PlacedTransformer,
         prepared: Prepared,
-        ci_fn: PlacedCIFn,
+        ci_fn: FilterCIFn,
         constraints: CIConstraints,
         tokens_all: Int[Array, "N T"],
         idx: np.ndarray,
@@ -325,7 +332,7 @@ class PPGDStep:
             ]
             adversary = self.ascend(adversary, _concat_rows(parts), train_frac)
 
-        source_parts: list[Sources] = []
+        source_parts: list[SourceStacks] = []
 
         def micro_call(
             k: int, micro_idx: np.ndarray

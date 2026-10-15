@@ -12,12 +12,12 @@ import numpy as np
 from jaxtyping import Array
 
 from param_decomp.core.components import SiteC
-from param_decomp.core.masking import masks_from_sources, persistent_delta_pinned_masks
-from param_decomp.core.recon_eval import FreshPGDReconEval, fresh_pgd_recon_sources
+from param_decomp.core.model import MaterializedMasking
+from param_decomp.core.recon_eval import FreshPGDAttack, fresh_pgd_read_outs
 from param_decomp.targets.tms import TMSConfig, site_specs
 
 SITES = site_specs(TMSConfig(n_features=5, n_hidden=2), (SiteC("linear1", 8), SiteC("linear2", 6)))
-PROBE = FreshPGDReconEval(n_steps=10, step_size=0.2)
+ATTACK = FreshPGDAttack(step_size=0.2, read_out_steps=(10,))
 
 
 def _ci_lower() -> dict[str, Array]:
@@ -25,20 +25,34 @@ def _ci_lower() -> dict[str, Array]:
     return {site.name: jnp.full((4, site.C), 0.3) for site in SITES}
 
 
-def _ablation_reward(masks: dict[str, Array], delta_masks: dict[str, Array]) -> Array:
+def _masks_of(masking: MaterializedMasking) -> tuple[dict[str, Array], dict[str, Array]]:
+    assert masking.weight_delta_masks is not None
+    masks = {site: jnp.asarray(m) for site, m in masking.component_masks.items()}
+    return masks, dict(masking.weight_delta_masks)
+
+
+def _ablation_reward(masking: MaterializedMasking) -> Array:
     """A stand-in worst case that grows as component AND delta masks fall."""
+    masks, delta_masks = _masks_of(masking)
     component = sum((jnp.sum(1.0 - m) for m in masks.values()), start=jnp.zeros(()))
     delta = sum((jnp.sum(1.0 - dm) for dm in delta_masks.values()), start=jnp.zeros(()))
     return component + delta
 
 
 def _ascended(delta_pinned: bool) -> tuple[dict[str, Array], dict[str, Array]]:
-    ci = _ci_lower()
-    sources = fresh_pgd_recon_sources(
-        SITES, ci, (4,), jax.random.PRNGKey(0), PROBE, _ablation_reward, delta_pinned
+    """The production probe's ascent (`fresh_pgd_read_outs`, as `make_fresh_pgd_eval_step`
+    drives it), read out as the composed masks after the last step."""
+    (masks,) = fresh_pgd_read_outs(
+        SITES,
+        _ci_lower(),
+        (4,),
+        jax.random.PRNGKey(0),
+        ATTACK,
+        _ablation_reward,
+        _masks_of,
+        delta_pinned=delta_pinned,
     )
-    mask_fn = persistent_delta_pinned_masks if delta_pinned else masks_from_sources
-    return mask_fn(ci, sources)
+    return masks
 
 
 def test_unpinned_probe_attacks_the_delta_channel():

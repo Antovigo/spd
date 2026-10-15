@@ -10,7 +10,10 @@ from typing import Literal, override
 
 _EMBED_RE = re.compile(r"^embed$")
 _OUTPUT_RE = re.compile(r"^output$")
-_LAYER_RE = re.compile(r"^(?P<layer>\d+)\.(?P<sublayer>attn|attn_fused|glu|mlp)\.(?P<proj>[a-z]+)$")
+_LAYER_RE = re.compile(
+    r"^(?P<layer>\d+)\.(?P<sublayer>attn|attn_fused|deltanet|glu|mlp|moe|moe_shared)"
+    r"\.(?P<proj>[a-z]+)$"
+)
 
 
 class CanonicalWeight(ABC):
@@ -70,6 +73,15 @@ AttnWeight = SeparateAttnWeight | FusedAttnWeight
 
 
 @dataclass(frozen=True)
+class DeltaNetWeight:
+    """One projection of a gated-DeltaNet (linear-attention) token mixer: the q/k/v row
+    blocks of the fused `in_proj_qkv`, the output gate `z`, the write strength `b`, the
+    decay `a`, and the `out` projection."""
+
+    weight: Literal["q", "k", "v", "z", "b", "a", "out"]
+
+
+@dataclass(frozen=True)
 class GLUWeight:
     weight: Literal["up", "down", "gate"]
 
@@ -79,13 +91,27 @@ class MLPWeight:
     weight: Literal["up", "down"]
 
 
-FFNWeight = GLUWeight | MLPWeight
+@dataclass(frozen=True)
+class MoEExpertsWeight:
+    """One fused all-expert GLU matrix of an MoE block (every expert's blocks in one site)."""
+
+    weight: Literal["up", "down", "gate"]
+
+
+@dataclass(frozen=True)
+class MoESharedWeight:
+    """One GLU matrix of an MoE block's shared (always-on) expert."""
+
+    weight: Literal["up", "down", "gate"]
+
+
+FFNWeight = GLUWeight | MLPWeight | MoEExpertsWeight | MoESharedWeight
 
 
 @dataclass(frozen=True)
 class LayerWeight(CanonicalWeight):
     layer_idx: int
-    name: AttnWeight | FFNWeight
+    name: AttnWeight | DeltaNetWeight | FFNWeight
 
     @override
     def canonical_str(self) -> str:
@@ -94,15 +120,24 @@ class LayerWeight(CanonicalWeight):
                 return f"{self.layer_idx}.attn.{p}"
             case FusedAttnWeight(weight=p):
                 return f"{self.layer_idx}.attn_fused.{p}"
+            case DeltaNetWeight(weight=p):
+                return f"{self.layer_idx}.deltanet.{p}"
             case GLUWeight(weight=p):
                 return f"{self.layer_idx}.glu.{p}"
             case MLPWeight(weight=p):
                 return f"{self.layer_idx}.mlp.{p}"
+            case MoEExpertsWeight(weight=p):
+                return f"{self.layer_idx}.moe.{p}"
+            case MoESharedWeight(weight=p):
+                return f"{self.layer_idx}.moe_shared.{p}"
 
 
 _SUBLAYER_PROJECTIONS: dict[str, tuple[type, tuple[str, ...]]] = {
     "attn": (SeparateAttnWeight, ("q", "k", "v", "o")),
     "attn_fused": (FusedAttnWeight, ("qkv", "o")),
+    "deltanet": (DeltaNetWeight, ("q", "k", "v", "z", "b", "a", "out")),
     "glu": (GLUWeight, ("up", "down", "gate")),
     "mlp": (MLPWeight, ("up", "down")),
+    "moe": (MoEExpertsWeight, ("up", "down", "gate")),
+    "moe_shared": (MoESharedWeight, ("up", "down", "gate")),
 }

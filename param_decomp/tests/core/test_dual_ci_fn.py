@@ -16,36 +16,46 @@ import jax.numpy as jnp
 import pytest
 from jaxtyping import Array
 
-from param_decomp.core.ci_fn import (
+from param_decomp.core.ci_fn.implementations.chunkwise.arch import (
+    Chunk,
+    ChunkwiseTransformerCIFnArch,
+)
+from param_decomp.core.ci_fn.implementations.layerwise_mlp import LayerwiseMLPCIFnArch
+from param_decomp.core.ci_fn.implementations.transformer.layers import MHACIFnAttention
+from param_decomp.core.ci_fn.interface import (
     CI,
     DUAL_CI_ROLES,
-    Chunk,
-    ChunkwiseTransformerCIArch,
+    AnyCI,
     CIFn,
     CIRole,
     DualCI,
-    LayerwiseMLPCIArch,
-    MHACIAttention,
-    build_ci_fn,
     ci_for_role,
     is_dual,
 )
-from param_decomp.core.components import SiteSpec
+from param_decomp.core.components import (
+    DenseFactorization,
+    SiteSpec,
+    init_component_stacks,
+    require_full_emission,
+)
+from param_decomp.tests.sequence import unsegmented_sequence_layout
 
 D_TAP = 8
 SITES = (
-    SiteSpec(name="s0", d_in=D_TAP, d_out=4, C=3, group="s0"),
-    SiteSpec(name="s1", d_in=D_TAP, d_out=4, C=5, group="s1"),
+    SiteSpec(name="s0", factorization=DenseFactorization(d_in=D_TAP, d_out=4, C=3), group="s0"),
+    SiteSpec(name="s1", factorization=DenseFactorization(d_in=D_TAP, d_out=4, C=5), group="s1"),
 )
+COMPONENTS = init_component_stacks(SITES, jax.random.key(3))
+"""Read by component-conditioned CI only; both arches here ignore it."""
 
 
-def _chunkwise_arch(dual: bool = False) -> ChunkwiseTransformerCIArch:
-    return ChunkwiseTransformerCIArch(
+def _chunkwise_arch(dual: bool = False) -> ChunkwiseTransformerCIFnArch:
+    return ChunkwiseTransformerCIFnArch(
         chunks=(Chunk(input_taps=("t0",), output_sites=("s0", "s1")),),
         input_dim=D_TAP,
         d_model=8,
         n_blocks=1,
-        attention=MHACIAttention(n_heads=2),
+        attention=MHACIFnAttention(n_heads=2, implementation="xla", mask="bidirectional"),
         ffn_hidden=16,
         ffn_kind="gelu",
         learned_norm_scale=False,
@@ -53,13 +63,26 @@ def _chunkwise_arch(dual: bool = False) -> ChunkwiseTransformerCIArch:
     )
 
 
-def _mlp_arch(dual: bool = False) -> LayerwiseMLPCIArch:
-    return LayerwiseMLPCIArch(
+def _mlp_arch(dual: bool = False) -> LayerwiseMLPCIFnArch:
+    return LayerwiseMLPCIFnArch(
         hidden_dims=(6,), has_position_axis=False, input_names=("t0", "t1"), dual=dual
     )
 
 
-ArchOf = Callable[..., ChunkwiseTransformerCIArch | LayerwiseMLPCIArch]
+def _build_ci_fn(
+    arch: ChunkwiseTransformerCIFnArch | LayerwiseMLPCIFnArch,
+    sites: tuple[SiteSpec, ...],
+    key: jax.Array,
+) -> CIFn[object]:
+    """An unplaced CI fn (no placement rules)."""
+    return arch.initialize(sites, None, key)
+
+
+def _evaluate(ci_fn: CIFn[object], taps: dict[str, Array]) -> AnyCI:
+    return ci_fn(taps, None, COMPONENTS, sequence=unsegmented_sequence_layout(taps), remat=False)
+
+
+ArchOf = Callable[..., ChunkwiseTransformerCIFnArch | LayerwiseMLPCIFnArch]
 TapsOf = Callable[[], dict[str, Array]]
 
 
@@ -87,9 +110,9 @@ def test_single_role_returns_bare_ci_and_refuses_the_hidden_head(
 ) -> None:
     """A plain run never sees the dual vocabulary, and asking it for the hidden bundle is a
     wiring bug rather than a silent fallback to the output one."""
-    ci_fn = build_ci_fn(arch_of(), SITES, jax.random.key(0))
+    ci_fn = _build_ci_fn(arch_of(), SITES, jax.random.key(0))
     assert not is_dual(ci_fn) and ci_fn.roles == ("output",)
-    ci = ci_fn(taps_of(), remat=False, placement=None)
+    ci = _evaluate(ci_fn, taps_of())
     assert isinstance(ci, CI)
     assert ci_for_role(ci, "output") is ci
     with pytest.raises(AssertionError, match="no 'hidden' head"):
@@ -100,20 +123,21 @@ def test_single_role_returns_bare_ci_and_refuses_the_hidden_head(
 def test_dual_returns_two_distinct_bundles_over_every_site(
     arch_of: ArchOf, taps_of: TapsOf
 ) -> None:
-    ci_fn = build_ci_fn(arch_of(dual=True), SITES, jax.random.key(0))
+    ci_fn = _build_ci_fn(arch_of(dual=True), SITES, jax.random.key(0))
     assert is_dual(ci_fn) and ci_fn.roles == DUAL_CI_ROLES
-    ci = ci_fn(taps_of(), remat=False, placement=None)
+    ci = _evaluate(ci_fn, taps_of())
     assert isinstance(ci, DualCI)
     for role in DUAL_CI_ROLES:
         bundle = ci_for_role(ci, role)
         assert set(bundle.lower) == {s.name for s in SITES}
         for site in SITES:
-            assert bundle.lower[site.name].shape[-1] == site.C
+            assert require_full_emission(bundle.lower[site.name]).shape[-1] == site.C
     # Two heads, not one tied to itself: a run whose heads agreed everywhere would report a
     # dual objective while training a single CI.
     for site in SITES:
         assert not jnp.allclose(
-            ci.output.preactivations[site.name], ci.hidden.preactivations[site.name]
+            require_full_emission(ci.output.preactivations[site.name]),
+            require_full_emission(ci.hidden.preactivations[site.name]),
         )
 
 
@@ -123,10 +147,10 @@ def test_trunk_gradient_is_the_sum_of_the_two_objectives(arch_of: ArchOf, taps_o
     the two single-head pullbacks — that is what makes running the objectives sequentially and
     adding their gradients identical to fusing them, and what makes the trunk see both."""
     arch, taps = arch_of(dual=True), taps_of()
-    ci_fn = build_ci_fn(arch, SITES, jax.random.key(0))
+    ci_fn = _build_ci_fn(arch, SITES, jax.random.key(0))
 
-    def run(cf: CIFn) -> DualCI:
-        result = cf(taps, remat=False, placement=None)
+    def run(cf: CIFn[object]) -> DualCI:
+        result = _evaluate(cf, taps)
         assert isinstance(result, DualCI)
         return result
 
@@ -172,13 +196,14 @@ def test_dual_init_leaves_the_trunk_and_output_head_bit_identical(
     run and a single-role run at the same seed start from the SAME trunk and output head — the
     two topologies are comparable from step 0, and existing goldens do not move."""
     arch, taps = arch_of(), taps_of()
-    single = build_ci_fn(arch, SITES, jax.random.key(0))
-    dual = build_ci_fn(arch_of(dual=True), SITES, jax.random.key(0))
+    single = _build_ci_fn(arch, SITES, jax.random.key(0))
+    dual = _build_ci_fn(arch_of(dual=True), SITES, jax.random.key(0))
 
-    single_ci = single(taps, remat=False, placement=None)
-    dual_ci = dual(taps, remat=False, placement=None)
+    single_ci = _evaluate(single, taps)
+    dual_ci = _evaluate(dual, taps)
     assert isinstance(single_ci, CI) and isinstance(dual_ci, DualCI)
     for site in SITES:
         assert jnp.array_equal(
-            single_ci.preactivations[site.name], dual_ci.output.preactivations[site.name]
+            require_full_emission(single_ci.preactivations[site.name]),
+            require_full_emission(dual_ci.output.preactivations[site.name]),
         ), "the dual fn's OUTPUT head diverged from the single-role fn at the same seed"

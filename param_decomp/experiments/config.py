@@ -3,7 +3,7 @@ helpers every experiment reuses.
 
 Each experiment subclasses `ExperimentConfig` to fix the concrete `target` / `data` types.
 The generic engine reads the pydantic `pd` / `cadence` DIRECTLY, so there is no
-flattened mirror to build; `run_instance` / `ci_arch` resolve the run identity and the
+flattened mirror to build; `run_instance` / `ci_fn_arch` resolve the run identity and the
 CI-fn architecture, and each experiment's `run.py` assembles the rest (target + data).
 """
 
@@ -11,13 +11,14 @@ import re
 from pathlib import Path
 
 from param_decomp.core.base_config import BaseConfig
-from param_decomp.core.built_run import LAUNCH_CONFIG_FILENAME, RunInstance
+from param_decomp.core.built_run import RunInstance
 from param_decomp.core.configs import (
     Cadence,
     PDConfig,
     ResumeProvenance,
     WandbConfig,
 )
+from param_decomp.core.run_files import LAUNCH_CONFIG_FILENAME
 
 
 class ExperimentConfigBase(BaseConfig):
@@ -37,8 +38,8 @@ class ExperimentConfigBase(BaseConfig):
     Each domain owns its `eval:` schema. Omit `wandb:` to skip wandb (the run still writes
     `launch_config.yaml` + checkpoints locally).
 
-    The run id is NOT a config field: it is minted by the launcher and passed to
-    `run_instance` as an explicit argument. The run dir is a pure function of the
+    The run id is NOT a config field: the entry point mints it or accepts it explicitly,
+    then passes it to `run_instance`. The run dir is a pure function of the
     entry point's `data_root` + id (`<data_root>/runs/<run_id>`).
     """
 
@@ -67,8 +68,8 @@ def run_instance(
     data_root: Path,
     resume_provenance: ResumeProvenance | None,
 ) -> RunInstance:
-    """The resolved run identity + logging lineage. `run_id` is minted by the launcher (a
-    toy mints its own); the run dir is `<data_root>/runs/<run_id>`. Fine-tune provenance is
+    """The resolved run identity + logging lineage. The composition root supplies
+    `run_id` (a toy mints its own); the run dir is `<data_root>/runs/<run_id>`. Fine-tune provenance is
     explicit because only domains that implement resume expose it."""
     assert _RUN_ID_PATTERN.match(run_id), f"run_id must be p-<8hex>, got {run_id!r}"
     return RunInstance(

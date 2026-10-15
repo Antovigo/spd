@@ -23,18 +23,18 @@ from param_decomp.core.init_placed import init_model_component_stacks_placed
 from param_decomp.core.model import PlacedModel, site_weight_delta
 from param_decomp.core.placement import from_config
 from param_decomp.core.sharding import single_device_mesh
-from param_decomp.targets.glu_transformer import (
-    GLU_ANATOMY,
-    canonical_site_cs,
-    glu_site_specs,
-    site_name,
-)
 from param_decomp.targets.neuron_alignment import (
     NeuronAlignment,
     neuron_aligned_targeted_component_initializer,
     neuron_aligned_zero_u_component_initializer,
 )
 from param_decomp.targets.testing import tiny_glu_cfg, tiny_glu_decomposed_lm
+from param_decomp.targets.transformer import (
+    GLU_ANATOMY,
+    canonical_site_cs,
+    glu_site_specs,
+    site_name,
+)
 
 RANKING = [5, 2, 7, 0, 3, 6, 1, 4]  # the same hand ranking the targeted init's tests use
 

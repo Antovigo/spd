@@ -12,6 +12,7 @@ saves (their union), which the host splits per position."""
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import equinox as eqx
 import jax
@@ -23,18 +24,21 @@ from jaxtyping import Array, Int
 from param_decomp.ci_filter.pool import ArithmeticPool, OperationBlock
 from param_decomp.ci_filter.step import (
     CIConstraints,
+    FilterCIFn,
     Prepared,
-    gather_rows,
+    gather_batch,
     index_batches,
     output_ci,
 )
-from param_decomp.core.ci_fn import PlacedCIFn
-from param_decomp.core.model import PlacedModel
+from param_decomp.core.components import require_full_emission
 from param_decomp.experiments.lm.ab_grid_dataset import (
     ABGridSnapshot,
     ab_grid_payload,
+    ab_grid_split_payload,
     saved_indices,
+    thumbnail_factor,
 )
+from param_decomp.experiments.lm.load_run import PlacedTransformer
 
 APPLET = Path(__file__).parent / "grids_app.html"
 GATHER_INDEX_MULTIPLE = 64
@@ -42,18 +46,18 @@ GATHER_INDEX_MULTIPLE = 64
 
 @eqx.filter_jit
 def _chunk_ci_sums(
-    placed: PlacedModel,
-    ci_fn: PlacedCIFn,
+    placed: PlacedTransformer,
+    prepared: Prepared,
+    ci_fn: FilterCIFn,
     constraints: CIConstraints,
     tokens_all: Int[Array, "N T"],
     idx: Int[Array, " B"],
     n_real: Array,
 ) -> dict[str, Array]:
     """`{site: (T, C)}` lower CI summed over the chunk's real rows."""
-    tokens = gather_rows(tokens_all, idx)
-    clean = placed.clean_forward(tokens, capture_keys=ci_fn.capture_keys)
-    lower = output_ci(placed, ci_fn, constraints, clean.captures, remat=False).lower
-    real = (jnp.arange(tokens.shape[0]) < n_real)[:, None, None]
+    clean = placed.clean_forward(gather_batch(tokens_all, idx), ci_fn.capture_keys)
+    lower = output_ci(placed, prepared, ci_fn, constraints, clean, remat=False).lower
+    real = (jnp.arange(idx.shape[0]) < n_real)[:, None, None]
     return {
         site: jax.sharding.reshard(jnp.where(real, v.astype(jnp.float32), 0.0).sum(axis=0), P())
         for site, v in lower.items()
@@ -62,9 +66,9 @@ def _chunk_ci_sums(
 
 @eqx.filter_jit
 def _chunk_columns(
-    placed: PlacedModel,
+    placed: PlacedTransformer,
     prepared: Prepared,
-    ci_fn: PlacedCIFn,
+    ci_fn: FilterCIFn,
     constraints: CIConstraints,
     v_norms: dict[str, Array],
     tokens_all: Int[Array, "N T"],
@@ -73,15 +77,22 @@ def _chunk_columns(
 ) -> dict[str, tuple[Array, Array]]:
     """`{site: (ci, inner)}`, each `(B, T, len(columns[site]))` fp32 and replicated: the lower
     CI and the normalized inner activation `(x . V_c) / ||V_c||` of the requested components."""
-    tokens = gather_rows(tokens_all, idx)
     clean, acts = placed.component_activation_forward(
-        prepared, tokens, capture_keys=ci_fn.capture_keys
+        prepared,
+        gather_batch(tokens_all, idx),
+        sites=tuple(columns),
+        capture_keys=ci_fn.capture_keys,
     )
-    lower = output_ci(placed, ci_fn, constraints, clean.captures, remat=False).lower
+    lower = output_ci(placed, prepared, ci_fn, constraints, clean, remat=False).lower
     out: dict[str, tuple[Array, Array]] = {}
     for site, cols in columns.items():
         ci = lower[site].astype(jnp.float32).at[:, :, cols].get(out_sharding=P())
-        act = acts[site].astype(jnp.float32).at[:, :, cols].get(out_sharding=P())
+        act = (
+            require_full_emission(acts[site])
+            .astype(jnp.float32)
+            .at[:, :, cols]
+            .get(out_sharding=P())
+        )
         out[site] = (ci, act / jnp.maximum(v_norms[site][cols], 1e-12))
     return out
 
@@ -95,9 +106,9 @@ class GridSlices:
 
 
 def collect_operation(
-    placed: PlacedModel,
+    placed: PlacedTransformer,
     prepared: Prepared,
-    ci_fn: PlacedCIFn,
+    ci_fn: FilterCIFn,
     constraints: CIConstraints,
     v_norms: dict[str, Array],
     tokens_all: Int[Array, "N T"],
@@ -112,7 +123,7 @@ def collect_operation(
     totals: dict[str, np.ndarray] = {}
     for idx, real in chunks:
         sums = _chunk_ci_sums(
-            placed, ci_fn, constraints, tokens_all, jnp.asarray(idx), jnp.asarray(real)
+            placed, prepared, ci_fn, constraints, tokens_all, jnp.asarray(idx), jnp.asarray(real)
         )
         for site, value in sums.items():
             totals[site] = np.asarray(value) + totals.get(site, 0.0)
@@ -178,19 +189,66 @@ def slice_filename(operation: str, position: int) -> str:
     return f"{operation}_pos{position}.js"
 
 
+def module_filename(operation: str, position: int, site: str) -> str:
+    """A split slice's full-resolution module file, relative to `ab_grids/`."""
+    return f"{operation}_pos{position}/{site}.js"
+
+
+def slice_key(symbol: str, position: int) -> str:
+    """The applet's slice key (manifest `files` key, `registerABGridModule` doc `slice`)."""
+    return f"{symbol}:{position}"
+
+
+def write_slice(
+    grid_dir: Path,
+    operation: str,
+    symbol: str,
+    position: int,
+    index: dict[str, Any],
+    modules: dict[str, dict[str, Any]],
+) -> None:
+    """One slice file; a split slice (`modules` non-empty) writes its module files FIRST, so
+    the index never names a module file that is still missing."""
+    for site, module in modules.items():
+        path = grid_dir / module_filename(operation, position, site)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        doc = module | {"slice": slice_key(symbol, position)}
+        path.write_text(f"window.registerABGridModule({json.dumps(doc)});")
+    for entry in index["modules"]:
+        if entry["name"] in modules:
+            entry["file"] = module_filename(operation, position, entry["name"])
+    (grid_dir / slice_filename(operation, position)).write_text(
+        f"window.registerABGridSlice({json.dumps(index)});"
+    )
+
+
+def alive_page() -> str:
+    """The applet with its alive-only-inner dataset reader switched on."""
+    page = APPLET.read_text()
+    anchor = '<script src="manifest.js"></script>'
+    assert page.count(anchor) == 1
+    return page.replace(anchor, f"<script>window.ALIVE_MODE = true;</script>\n{anchor}")
+
+
 def write_operation(
     grid_dir: Path, slices: GridSlices, pool: ArithmeticPool, step: int, mean_ci_floor: float
 ) -> dict[str, int]:
-    """Write one file per position of this operation; returns saved-component counts."""
+    """Write one file per position of this operation; returns saved-component counts. A grid
+    wider than `THUMBNAIL_MAX_SIDE` on a side is written SPLIT (`ab_grid_split_payload`):
+    pooled thumbnails in the slice file, full grids in one file per module."""
     grid_dir.mkdir(parents=True, exist_ok=True)
+    block = slices.block
     counts: dict[str, int] = {}
     for p, snapshot in enumerate(slices.snapshots):
-        payload = ab_grid_payload(
-            snapshot, slices.block.grid, (p,), pool.seq_len, step, mean_ci_floor
+        args = (snapshot, block.grid, (p,), pool.seq_len, step, mean_ci_floor)
+        if thumbnail_factor(block.grid) > 1:
+            index, modules = ab_grid_split_payload(*args)
+        else:
+            index, modules = ab_grid_payload(*args), {}
+        write_slice(grid_dir, block.operation, block.grid.symbol, p, index, modules)
+        counts[slice_filename(block.operation, p)] = int(
+            sum(ids.size for ids in snapshot.saved.values())
         )
-        name = slice_filename(slices.block.operation, p)
-        (grid_dir / name).write_text(f"window.registerABGridSlice({json.dumps(payload)});")
-        counts[name] = int(sum(ids.size for ids in snapshot.saved.values()))
     return counts
 
 
@@ -210,3 +268,4 @@ def write_applet(grid_dir: Path, pool: ArithmeticPool, title: str) -> None:
     }
     (grid_dir / "manifest.js").write_text(f"window.AB_GRID_SLICES = {json.dumps(manifest)};\n")
     (grid_dir / "index.html").write_bytes(APPLET.read_bytes())
+    (grid_dir / "alive.html").write_text(alive_page())

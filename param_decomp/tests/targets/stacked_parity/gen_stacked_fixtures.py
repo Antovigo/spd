@@ -10,7 +10,7 @@ restructured away. Regenerate from a base-branch checkout, e.g.:
 
 `test_stacked_parity.py` then rebuilds the same model in the per-site representation
 and must reproduce: clean logits BIT-IDENTICAL, masked logits / weight deltas /
-site inputs to reassociation tolerance (SPEC D4, rel ~1e-5). This script once also
+site inputs to reassociation tolerance (rel ~1e-5). This script once also
 recorded a 2-step training trajectory; that part is deleted because its loss was the
 removed L_p penalty, which only this old branch can still express — no comparable
 recording can be made again (the committed npz still carries the dead `out::` arrays).
@@ -36,6 +36,7 @@ from param_decomp.core.adversary import (  # noqa: E402
     init_persistent_sources,
 )
 from param_decomp.core.ci_fn import CIArch, init_ci_fn  # noqa: E402
+from param_decomp.target_ports.llama import LlamaConfig  # noqa: E402
 from param_decomp.targets.llama31 import (  # noqa: E402
     KINDS,
     LayerRange,
@@ -44,7 +45,6 @@ from param_decomp.targets.llama31 import (  # noqa: E402
     site_name,
 )
 from param_decomp.tests.targets.test_llama31 import _tiny_cfg, _tiny_target  # noqa: E402
-from param_decomp.vendored_jax.llama import LlamaConfig  # noqa: E402
 
 OUT = Path(__file__).resolve().parent / "stacked_fixtures.npz"
 
@@ -100,13 +100,7 @@ def main() -> None:
     model = llama_decomposed_lm(cfg, layer_range, C)
     vu = init_decomp_vu(cfg, C, layer_range.n_layers, random.PRNGKey(1))
     ci_fn = init_ci_fn(CI_ARCH, model.sites, random.PRNGKey(2))
-    sources = init_persistent_sources(
-        model.site_names,
-        tuple(s.C for s in model.sites),
-        (1, T),
-        jax.numpy.float32,
-        random.PRNGKey(3),
-    )
+    sources = init_persistent_sources(model.sites, (1, T), jax.numpy.float32, random.PRNGKey(3))
     resid = random.normal(random.PRNGKey(4), (B, T, cfg.n_embd)) * 0.5
 
     arrays = _save_target_arrays(cfg, tgt, layer_range)
@@ -117,7 +111,7 @@ def main() -> None:
             arrays[f"vu::U::{site_name(layer, kind)}"] = np.asarray(U)
     for leaf_idx, leaf in enumerate(jax.tree.leaves(eqx.filter(ci_fn, eqx.is_array))):
         arrays[f"ci_leaf::{leaf_idx}"] = np.asarray(leaf)
-    for name, source in sources.items():
+    for name, source in sources.per_site().items():
         arrays[f"src::{name}"] = np.asarray(source)
     arrays["resid"] = np.asarray(resid)
 

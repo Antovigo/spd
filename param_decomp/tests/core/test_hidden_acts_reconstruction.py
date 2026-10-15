@@ -1,53 +1,52 @@
-"""Target-selected residual relative-MSE auxiliary recon loss (SPEC S35)."""
+"""Target-selected residual relative-MSE auxiliary recon loss."""
 
 from collections.abc import Callable
-from typing import Any
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-import optax
 import pytest
 from pydantic import ValidationError
 
 from param_decomp.core import train as train_module
 from param_decomp.core.adversary import (
     PersistentAdversary,
+    SourcesAdamState,
     init_persistent_sources,
     init_sources_adam_state,
 )
-from param_decomp.core.components import init_component_stacks
+from param_decomp.core.components import DenseFactorization, SiteSpec, init_component_stacks
 from param_decomp.core.configs import (
     AdamPGDConfig,
-    BatchHiddenActsNormalization,
+    AdamWOptimizerConfig,
+    AuxiliaryReconstructionConfig,
+    CaptureReconstruction,
     FaithfulnessLossConfig,
-    HiddenActsReconstruction,
     ImportanceMinimalityLossConfig,
-    PerPositionHiddenActsNormalization,
     PersistentPGDReconLossConfig,
     PGDReconLossConfig,
     StochasticReconSubsetLossConfig,
     UniformKSubsetRoutingConfig,
 )
 from param_decomp.core.faithfulness import faithfulness_loss_for
-from param_decomp.core.losses import OutputOnlyReconstructionLoss, relative_squared_error
+from param_decomp.core.losses import BatchFrequency, ReconstructionLoss, relative_squared_error
 from param_decomp.core.model import MaterializedMasking, PlacedModel
 from param_decomp.core.objective import build_objective
 from param_decomp.core.recon import (
+    AuxiliaryReconstruction,
     ForwardObservations,
-    OutputOnlyReconstruction,
-    ReconstructionSpec,
 )
+from param_decomp.core.run_state import _adamw_optimizer
 from param_decomp.core.schedule import Knot, ScheduleConfig
 from param_decomp.core.train import (
     Decomposition,
     ForwardSubstrate,
-    TrainingItem,
+    PDState,
+    PDTrainingState,
     TrainState,
     make_train_step,
 )
-from param_decomp.targets.glu_transformer import glu_site_specs, mlp_family_site_cs
-from param_decomp.targets.glu_transformer import parse_site_name as parse_glu_site_name
+from param_decomp.lm.batch import LMBatchWithDocuments
 from param_decomp.targets.llama_simple_mlp import site_specs
 from param_decomp.targets.testing import (
     SIMPLE_MLP_MIXED_SITE_CS,
@@ -57,14 +56,25 @@ from param_decomp.targets.testing import (
     tiny_simple_mlp_chunkwise_ci_fn,
     tiny_simple_mlp_decomposed_model,
 )
+from param_decomp.targets.transformer import glu_site_specs, mlp_family_site_cs
+from param_decomp.targets.transformer import parse_site_name as parse_glu_site_name
 
 SIMPLE_MLP_POINTS = ("resid.3", "resid.4", "resid.5", "resid.6")
-"""Meaningful S35 points for blocks 2-3 of 6: downstream residual boundaries only."""
+"""Hidden-activation reconstruction points for blocks 2-3 of 6: downstream residual boundaries only."""
 
 
-def _hidden_acts_reconstruction(coeff: float | None) -> HiddenActsReconstruction | None:
+def _hidden_acts_reconstruction(coeff: float | None) -> tuple[AuxiliaryReconstructionConfig, ...]:
+    if coeff is None:
+        return ()
     return (
-        None if coeff is None else HiddenActsReconstruction(coeff=coeff, points=SIMPLE_MLP_POINTS)
+        AuxiliaryReconstructionConfig(
+            name="hidden_acts_reconstruction",
+            coeff=coeff,
+            comparisons=tuple(
+                CaptureReconstruction(capture=point, distance="relative_squared_error")
+                for point in SIMPLE_MLP_POINTS
+            ),
+        ),
     )
 
 
@@ -109,120 +119,6 @@ def test_relative_squared_error_pools_energy_over_batch_and_sequence():
     assert got != pytest.approx(per_position)
 
 
-PER_POSITION = PerPositionHiddenActsNormalization(floor_fraction=0.01)
-
-
-def test_per_position_normalization_hand_computed_matches_the_per_entry_mean():
-    """The fixture of `..._pools_energy_over_batch_and_sequence`, read the other way: the
-    per-position mode returns exactly the mean of per-entry ratios that the batch mode does
-    not. Floor set negligible (median clean energy here is 6.5, floor 0.065) and folded in."""
-    clean = jnp.array([[[1.0], [3.0]], [[2.0], [4.0]]])
-    masked = jnp.array([[[2.0], [3.0]], [[2.0], [0.0]]])
-    floor = 0.01 * 6.5  # median of {1, 9, 4, 16}
-    expected = (1.0 / (1.0 + floor) + 0.0 + 0.0 + 16.0 / (16.0 + floor)) / 4
-    got = float(relative_squared_error(masked, clean, normalization=PER_POSITION))
-    assert got == pytest.approx(expected, rel=1e-6)
-    batch = float(
-        relative_squared_error(masked, clean, normalization=BatchHiddenActsNormalization())
-    )
-    assert batch == pytest.approx((1.0 + 16.0) / (1.0 + 9.0 + 4.0 + 16.0))
-    assert got != pytest.approx(batch)
-
-
-def test_per_position_normalization_does_not_let_one_position_silence_the_others():
-    """The failure this mode exists for (Llama's BOS massive activation): one position holds
-    ~all of the clean energy and is reproduced exactly, every other position is badly wrong.
-    Batch mode reads ~0 — the point is dead; per-position mode reads the other positions'
-    actual relative error."""
-    b, t, d = 4, 5, 8
-    clean = jnp.ones((b, t, d))
-    clean = clean.at[:, 0, :].set(1000.0)  # position 0: 1e6 energy per entry vs 8 elsewhere
-    masked = clean.at[:, 1:, :].set(0.0)  # BOS perfect, every other position fully lost
-    batch = float(relative_squared_error(masked, clean))
-    per_position = float(relative_squared_error(masked, clean, normalization=PER_POSITION))
-    assert batch < 1e-4  # 4*4*8 / (4*8e6 + 4*4*8) ~ 4e-6: the point is silent
-    # 4 of 5 positions at ratio 8/(8 + 0.01*8) = 1/1.01, BOS at 0; median energy is 8.
-    assert per_position == pytest.approx(0.8 / 1.01, rel=1e-5)
-
-
-def test_per_position_normalization_floor_is_the_median_not_the_mean():
-    """A silent position (zero clean energy) would divide by zero without the floor; the floor
-    is a fraction of the MEDIAN per-entry energy, so the outlier position cannot inflate it."""
-    clean = jnp.array([[[0.0, 0.0], [1.0, 1.0], [1.0, 1.0], [100.0, 0.0]]])  # energies 0,2,2,1e4
-    masked = clean.at[0, 0, :].set(1.0)  # error 2 at the silent position, 0 elsewhere
-    # median of {0, 2, 2, 1e4} is 2 -> floor 0.02; the silent entry scores 2/0.02 = 100.
-    got = float(relative_squared_error(masked, clean, normalization=PER_POSITION))
-    assert got == pytest.approx(100.0 / 4, rel=1e-5)
-    assert jnp.isfinite(got)
-
-
-def test_per_position_normalization_stays_finite_when_the_median_energy_is_zero():
-    """Sparse / ReLU taps: when at least half the valid entries are silent the median is
-    exactly zero, and a floor built on it alone would vanish — `0/0` at the silent entries.
-    The floor falls back to the MEAN clean energy, and an entirely silent point still divides
-    by fp32 tiny rather than by zero."""
-    clean = jnp.array([[[0.0, 0.0], [0.0, 0.0], [0.0, 0.0], [2.0, 0.0]]])  # energies 0,0,0,4
-    masked = clean.at[0, 0, :].set(1.0)  # error 2 at one silent entry, 0 elsewhere
-    got = float(relative_squared_error(masked, clean, normalization=PER_POSITION))
-    # median 0 -> scale = mean = 1 -> floor 0.01: the silent entry scores 2/0.01 = 200.
-    assert got == pytest.approx(200.0 / 4, rel=1e-4)
-    assert jnp.isfinite(got)
-    silent = jnp.zeros((1, 4, 2))
-    got = float(relative_squared_error(silent, silent, normalization=PER_POSITION))
-    assert got == 0.0  # 0 / tiny, not 0 / 0
-    got = float(
-        relative_squared_error(silent.at[0, 0, 0].set(1.0), silent, normalization=PER_POSITION)
-    )
-    assert jnp.isfinite(got)
-
-
-def test_per_position_normalization_respects_the_valid_row_mask():
-    """A padded row must not enter the mean, the sums, or the median."""
-    clean = jnp.ones((2, 3, 4))
-    masked = clean.at[0].set(0.0)  # row 0 fully wrong, row 1 perfect
-    valid = jnp.array([1.0, 0.0])
-    got = float(
-        relative_squared_error(masked, clean, valid_row_mask=valid, normalization=PER_POSITION)
-    )
-    assert got == pytest.approx(1.0 / 1.01, rel=1e-6)
-    valid = jnp.array([0.0, 1.0])
-    got = float(
-        relative_squared_error(masked, clean, valid_row_mask=valid, normalization=PER_POSITION)
-    )
-    assert got == 0.0
-
-
-def test_per_position_normalization_is_the_batch_mode_when_energies_are_uniform():
-    """With equal clean energy at every entry the two reductions agree up to the floor, which
-    pins the per-position mean to `1/(B·T)` per token — the KL's and imp-min's normalization."""
-    clean = jnp.full((3, 4, 8), 2.0)
-    masked = clean * 1.25
-    batch = float(relative_squared_error(masked, clean))
-    per_position = float(relative_squared_error(masked, clean, normalization=PER_POSITION))
-    assert batch == 0.0625
-    assert per_position == pytest.approx(0.0625 / 1.01, rel=1e-6)
-
-
-def test_hidden_acts_normalization_config_parses_and_refuses_a_zero_floor():
-    """Parsed the way YAML arrives: the `kind` discriminator selects the form, the floor
-    defaults to 0.01, the default form is the original `batch`, and a zero floor is refused."""
-    cfg = HiddenActsReconstruction.model_validate(
-        {"coeff": 1.0, "points": SIMPLE_MLP_POINTS, "normalization": {"kind": "per_position"}}
-    )
-    assert isinstance(cfg.normalization, PerPositionHiddenActsNormalization)
-    assert cfg.normalization.floor_fraction == 0.01
-    default = HiddenActsReconstruction(coeff=1.0, points=SIMPLE_MLP_POINTS)
-    assert isinstance(default.normalization, BatchHiddenActsNormalization)
-    with pytest.raises(ValidationError):
-        HiddenActsReconstruction.model_validate(
-            {
-                "coeff": 1.0,
-                "points": SIMPLE_MLP_POINTS,
-                "normalization": {"kind": "per_position", "floor_fraction": 0.0},
-            }
-        )
-
-
 def test_target_resolves_explicit_points_and_refuses_unknown_ones():
     """The loss chooses points; the target validates its own closed vocabulary before JIT."""
     cfg = tiny_simple_mlp_cfg()
@@ -231,29 +127,27 @@ def test_target_resolves_explicit_points_and_refuses_unknown_ones():
 
     tokens = jax.random.randint(jax.random.PRNGKey(1), (1, 4), 0, cfg.vocab_size)
     assert (
-        tuple(model.clean_forward(tokens, frozenset(SIMPLE_MLP_POINTS), placement=None).captures)
+        tuple(
+            model.clean_forward(
+                LMBatchWithDocuments.from_unsegmented_sequences(tokens),
+                frozenset(SIMPLE_MLP_POINTS),
+                placement=None,
+            ).captures
+        )
         == SIMPLE_MLP_POINTS
     )
-    model.assert_hidden_acts_reconstruction_points(SIMPLE_MLP_POINTS)
-    # Capture may inspect an invariant point, but a mean loss refuses it: resid.2 enters the
-    # first decomposed block and therefore cannot change under masking.
-    assert tuple(model.clean_forward(tokens, frozenset(("resid.2",)), placement=None).captures) == (
-        "resid.2",
-    )
-    with pytest.raises(AssertionError, match="guaranteed zeros"):
-        model.assert_hidden_acts_reconstruction_points(("resid.2",))
-    model.assert_hidden_acts_reconstruction_points(("h.2.attn.q_proj.out", "post_attn.2"))
-    with pytest.raises(AssertionError, match="guaranteed zeros"):
-        model.assert_hidden_acts_reconstruction_points(("h.2.attn.k_proj.out",))
-    with pytest.raises(AssertionError, match="guaranteed zeros"):
-        model.assert_hidden_acts_reconstruction_points(("attn_in.2",))
-    model.assert_hidden_acts_reconstruction_points(
-        ("attn_out.2", "mlp_in.2", "mlp_hidden.2", "attn_in.3")
-    )
     with pytest.raises(AssertionError, match="out of range"):
-        model.clean_forward(tokens, frozenset(("resid.7",)), placement=None)
+        model.clean_forward(
+            LMBatchWithDocuments.from_unsegmented_sequences(tokens),
+            frozenset(("resid.7",)),
+            placement=None,
+        )
     with pytest.raises(AssertionError, match="unknown transformer activation"):
-        model.clean_forward(tokens, frozenset(("python_local",)), placement=None)
+        model.clean_forward(
+            LMBatchWithDocuments.from_unsegmented_sequences(tokens),
+            frozenset(("python_local",)),
+            placement=None,
+        )
 
 
 def test_masked_residuals_reassemble_correctly_across_the_three_scan_segments():
@@ -284,19 +178,30 @@ def test_masked_residuals_reassemble_correctly_across_the_three_scan_segments():
     masks = {n: jnp.full((2, 8, c_by_site[n]), 0.25) for n in model.site_names}
     delta_masks = {n: jnp.full((2, 8), 0.25) for n in model.site_names}
 
-    masked_result = model.masked_forward(
-        prepared,
-        tokens,
-        masking=MaterializedMasking(
-            component_masks=masks,
-            weight_delta_masks=delta_masks,
-        ),
-        placement=None,
-        capture_keys=frozenset(taps),
-        remat=False,
+    batch = LMBatchWithDocuments.from_unsegmented_sequences(tokens)
+    clean_result = model.clean_forward(batch, frozenset(taps), placement=None)
+    masking = model.prepare_masking(
+        MaterializedMasking(component_masks=masks, weight_delta_masks=delta_masks)
     )
-    masked_taps = masked_result.captures
-    clean_taps = model.clean_forward(tokens, frozenset(taps), placement=None).captures
+
+    def masked_captures(
+        inputs: LMBatchWithDocuments, keys: tuple[str, ...]
+    ) -> dict[str, jax.Array]:
+        return model.masked_forward(
+            prepared,
+            inputs,
+            masking=masking,
+            routes=None,
+            placement=None,
+            capture_keys=frozenset(keys),
+            remat=False,
+        ).captures
+
+    # The PLAIN batch runs all three segments from tokens. (The clean forward's conditioning
+    # is a prefix-resumed batch, which resumes at `resid.<live_block>` unless a capture inside
+    # the prefix is requested.)
+    masked_taps = masked_captures(batch, taps)
+    clean_taps = clean_result.captures
 
     for tap in taps:
         boundary = int(tap.split(".")[1])
@@ -306,13 +211,18 @@ def test_masked_residuals_reassemble_correctly_across_the_three_scan_segments():
         else:
             assert not identical, f"{tap} is downstream of block {live_block} but matches clean"
 
+    # The prefix-resumed path stitches the same residuals from `resid.<live_block>` on.
+    resumed_taps = tuple(tap for tap in taps if int(tap.split(".")[1]) >= live_block)
+    resumed = masked_captures(clean_result.conditioning, resumed_taps)
+    for tap in resumed_taps:
+        assert jnp.array_equal(resumed[tap], masked_taps[tap]), tap
+
 
 def test_build_loss_terms_threads_hidden_acts_reconstruction_coeff():
     cfg = StochasticReconSubsetLossConfig(
         routing=UniformKSubsetRoutingConfig(),
         coeff=0.5,
-        n_mask_samples=1,
-        hidden_acts_reconstruction=_hidden_acts_reconstruction(0.1),
+        auxiliaries=_hidden_acts_reconstruction(0.1),
     )
     losses = build_objective(
         (
@@ -325,53 +235,49 @@ def test_build_loss_terms_threads_hidden_acts_reconstruction_coeff():
             ),
             cfg,
         ),
-        ("a", "b"),
+        tuple(
+            SiteSpec(name=name, factorization=DenseFactorization(d_in=4, d_out=4, C=4), group="g")
+            for name in ("a", "b")
+        ),
     )
     (term,) = losses.recon
-    assert term.hidden_acts_reconstruction is not None
-    assert term.hidden_acts_reconstruction.coeff == 0.1
+    (auxiliary,) = term.auxiliaries
+    assert float(auxiliary.coeff.at(jnp.asarray(0.0, jnp.float32))) == pytest.approx(0.1)
 
 
-def test_hidden_acts_reconstruction_config_needs_both_halves_and_sane_points():
-    """Strength and points are two halves of one setting (SPEC S35), so they live in one
-    object: a coefficient with nowhere to measure is not expressible, which is why there is
-    no cross-section validator. What still needs checking is the points themselves."""
-    HiddenActsReconstruction(coeff=0.3, points=("resid.3", "resid.4"))
-
-    with pytest.raises(ValidationError):  # a strength alone is not a valid object
-        HiddenActsReconstruction(coeff=0.3)  # pyright: ignore[reportCallIssue]
-    with pytest.raises(ValidationError):  # nor are points alone
-        HiddenActsReconstruction(points=("resid.3",))  # pyright: ignore[reportCallIssue]
-    with pytest.raises(ValidationError, match="at least one activation"):
-        HiddenActsReconstruction(coeff=0.3, points=())
-    with pytest.raises(ValidationError, match="duplicate points"):
-        HiddenActsReconstruction(coeff=0.3, points=("resid.3", "resid.3"))
+def test_auxiliary_reconstruction_requires_a_coefficient_and_distinct_comparisons():
+    comparison = {"capture": "resid.3", "distance": "relative_squared_error"}
+    raw = {"name": "hidden_acts_reconstruction", "coeff": 0.3, "comparisons": [comparison]}
+    AuxiliaryReconstructionConfig.model_validate(raw)
+    for missing in ("name", "coeff", "comparisons"):
+        with pytest.raises(ValidationError):
+            AuxiliaryReconstructionConfig.model_validate(
+                {key: value for key, value in raw.items() if key != missing}
+            )
     with pytest.raises(ValidationError):
-        HiddenActsReconstruction(coeff=0.0, points=("resid.3",))
+        AuxiliaryReconstructionConfig.model_validate({**raw, "comparisons": []})
+    with pytest.raises(ValidationError):
+        AuxiliaryReconstructionConfig.model_validate(
+            {**raw, "comparisons": [comparison, comparison]}
+        )
+    measured = AuxiliaryReconstructionConfig.model_validate({**raw, "coeff": 0.0})
+    assert measured.coeff == 0.0
 
 
 def _one_step_with_recon(
     recon: StochasticReconSubsetLossConfig | PGDReconLossConfig,
-):
+) -> tuple[PDState[LMBatchWithDocuments], dict[str, jax.Array]]:
     cfg = tiny_simple_mlp_cfg()
     seq = 16
     sites = site_specs(cfg, SIMPLE_MLP_MIXED_SITE_CS)
     model = tiny_simple_mlp_decomposed_model(cfg, sites, jax.random.PRNGKey(0))
     vu = init_component_stacks(sites, jax.random.PRNGKey(1))
     ci_fn = tiny_simple_mlp_chunkwise_ci_fn(model, jax.random.PRNGKey(2))
-    opt_vu = optax.chain(optax.clip_by_global_norm(0.01), optax.adamw(1e-3, weight_decay=0.0))
-    opt_ci = optax.adamw(1e-3, weight_decay=0.0)
-
-    state = TrainState(
-        decomposition=Decomposition(components=vu, ci_fn=ci_fn),
-        training=TrainingItem(
-            components_opt_state=opt_vu.init(eqx.filter(vu, eqx.is_array)),
-            ci_fn_opt_state=opt_ci.init(eqx.filter(ci_fn, eqx.is_array)),
-            adversaries={},
-            freq_ema=None,
-            step=jnp.zeros((), jnp.int32),
-        ),
+    opt_vu = _adamw_optimizer(
+        AdamWOptimizerConfig(lr_schedule=ScheduleConfig.constant(1e-3), grad_clip_norm=0.01), 1
     )
+    opt_ci = _adamw_optimizer(AdamWOptimizerConfig(lr_schedule=ScheduleConfig.constant(1e-3)), 1)
+
     losses = build_objective(
         (
             FaithfulnessLossConfig(coeff=1e5),
@@ -383,37 +289,52 @@ def _one_step_with_recon(
             ),
             recon,
         ),
-        model.site_names,
+        model.sites,
+    )
+    state = TrainState(
+        decomposition=Decomposition[LMBatchWithDocuments](components=vu, ci_fn=ci_fn),
+        training=PDTrainingState(
+            frequency=BatchFrequency(),
+            objective=losses,
+            components_opt_state=opt_vu.init(eqx.filter(vu, eqx.is_array)),
+            ci_fn_opt_state=opt_ci.init(eqx.filter(ci_fn, eqx.is_array)),
+            adversaries={},
+            step=jnp.zeros((), jnp.int32),
+        ),
     )
     placed = PlacedModel(model=model, placement=None)
-    step = make_train_step(
-        model_static=placed,
-        substrate=ForwardSubstrate.of(
-            placed,
-            remat_recon_forwards=True,
-            remat_ci_fn=False,
-            ci_capture_keys=ci_fn.capture_keys,
-            ci_placement=None,
-        ),
-        objective=losses,
-        components_optimizer=opt_vu,
-        ci_fn_optimizer=opt_ci,
-        total_steps=100,
-        faithfulness=faithfulness_loss_for(model),
+    step = jax.jit(
+        make_train_step(
+            model_static=placed,
+            substrate=ForwardSubstrate.of(
+                placed,
+                remat_recon_forwards=True,
+                remat_ci_fn=False,
+                ci_capture_keys=ci_fn.capture_keys,
+            ),
+            components_optimizer=opt_vu,
+            ci_fn_optimizer=opt_ci,
+            total_steps=100,
+            faithfulness=faithfulness_loss_for(placed),
+        )
     )
     tokens = jax.random.randint(jax.random.PRNGKey(4), (2, seq), 0, cfg.vocab_size)
-    return step(placed, state, tokens, jax.random.PRNGKey(100))
+    return step(
+        placed,
+        state,
+        LMBatchWithDocuments.from_unsegmented_sequences(tokens),
+        jax.random.PRNGKey(100),
+    )
 
 
-def _step_with_stochastic_subset_recon(hidden_acts_reconstruction_coeff: float | None):
+def _step_with_stochastic_subset_recon(
+    hidden_acts_reconstruction_coeff: float | None,
+) -> tuple[PDState[LMBatchWithDocuments], dict[str, jax.Array]]:
     return _one_step_with_recon(
         StochasticReconSubsetLossConfig(
             routing=UniformKSubsetRoutingConfig(),
             coeff=0.5,
-            n_mask_samples=1,
-            hidden_acts_reconstruction=_hidden_acts_reconstruction(
-                hidden_acts_reconstruction_coeff
-            ),
+            auxiliaries=_hidden_acts_reconstruction(hidden_acts_reconstruction_coeff),
         )
     )
 
@@ -427,7 +348,7 @@ def test_fresh_pgd_training_ascends_the_combined_objective():
                 source_shape="bc",
                 n_steps=3,
                 step_size=0.2,
-                hidden_acts_reconstruction=_hidden_acts_reconstruction(coeff),
+                auxiliaries=_hidden_acts_reconstruction(coeff),
             )
         )
         return {key: value for key, value in metrics.items() if key.startswith("loss/PGD")}
@@ -456,7 +377,7 @@ def test_hidden_acts_reconstruction_coeff_logs_e2e_and_per_point_breakdown_separ
 
 
 def test_hidden_acts_reconstruction_combined_is_e2e_plus_coeff_times_point_MEAN():
-    """The production path's own composition (SPEC S35), not the loss fn in isolation:
+    """The production path's own composition, not the loss fn in isolation:
     `loss/<name>` == `e2e + coeff * mean_over_points`. Pins the MEAN specifically — a
     `jnp.mean` -> `jnp.sum` slip in `train.py` fails here as soon as there is >1 point."""
     coeff = 0.3
@@ -484,17 +405,18 @@ def test_hidden_acts_reconstruction_coeff_disabled_logs_no_breakdown_at_all(
     # not a valid bit-identity oracle: XLA can produce different (but internally deterministic)
     # fp32 reduction orderings on different CPU architectures. This differential pin remains
     # exact while exercising the complete optimizer trajectory on every backend CI uses.
-    def legacy_objective(
-        recon_loss_fn: Callable[[Any, Any], jax.Array],
+    def legacy_objective[Out](
+        recon_loss_fn: Callable[[Out, Out], jax.Array],
         *,
-        masked: ForwardObservations,
-        clean: ForwardObservations,
-        reconstruction: ReconstructionSpec,
+        masked: ForwardObservations[Out],
+        clean: ForwardObservations[Out],
+        reconstruction: tuple[AuxiliaryReconstruction, ...],
         valid_row_mask: jax.Array | None = None,
-    ) -> OutputOnlyReconstructionLoss:
+    ) -> ReconstructionLoss:
         del valid_row_mask
-        assert isinstance(reconstruction, OutputOnlyReconstruction)
-        return OutputOnlyReconstructionLoss(recon_loss_fn(masked.output, clean.output))
+        assert reconstruction == ()
+        output = recon_loss_fn(masked.output, clean.output)
+        return ReconstructionLoss(output, output, {})
 
     monkeypatch.setattr(train_module, "reconstruction_loss", legacy_objective)
     legacy_state, _ = _step_with_stochastic_subset_recon(hidden_acts_reconstruction_coeff=None)
@@ -518,7 +440,7 @@ def _ppgd_run(
     n_warmup: int = 1,
     *,
     constant_source_lr: bool = False,
-) -> tuple[TrainState, list[dict[str, jnp.ndarray]]]:
+) -> tuple[PDState[LMBatchWithDocuments], list[dict[str, jnp.ndarray]]]:
     """`n_steps` of a persistent-PGD term at a given hidden-activation reconstruction strength, everything else
     (seeds, batch, schedules) fixed."""
     cfg = tiny_simple_mlp_cfg()
@@ -527,20 +449,21 @@ def _ppgd_run(
     model = tiny_simple_mlp_decomposed_model(cfg, sites, jax.random.PRNGKey(0))
     vu = init_component_stacks(sites, jax.random.PRNGKey(1))
     ci_fn = tiny_simple_mlp_chunkwise_ci_fn(model, jax.random.PRNGKey(2))
-    opt_vu = optax.chain(optax.clip_by_global_norm(0.01), optax.adamw(1e-3, weight_decay=0.0))
-    opt_ci = optax.adamw(1e-3, weight_decay=0.0)
+    opt_vu = _adamw_optimizer(
+        AdamWOptimizerConfig(lr_schedule=ScheduleConfig.constant(1e-3), grad_clip_norm=0.01), 1
+    )
+    opt_ci = _adamw_optimizer(AdamWOptimizerConfig(lr_schedule=ScheduleConfig.constant(1e-3)), 1)
 
     src = init_persistent_sources(
-        model.site_names,
-        tuple(s.C for s in model.sites),
-        (1, seq),
+        model.sites,
+        (2, seq),
         jnp.float32,
         jax.random.PRNGKey(3),
     )
     ppgd_cfg = PersistentPGDReconLossConfig(
         coeff=0.5,
         adversary_objective="term",
-        source_shape="sc",
+        source_shape="bsc",
         optimizer=AdamPGDConfig(
             beta1=0.5,
             beta2=0.99,
@@ -558,26 +481,7 @@ def _ppgd_run(
             ),
         ),
         n_warmup_steps=n_warmup,
-        hidden_acts_reconstruction=_hidden_acts_reconstruction(hidden_acts_reconstruction_coeff),
-    )
-    assert ppgd_cfg.coeff is not None
-    state = TrainState(
-        decomposition=Decomposition(components=vu, ci_fn=ci_fn),
-        training=TrainingItem(
-            components_opt_state=opt_vu.init(eqx.filter(vu, eqx.is_array)),
-            ci_fn_opt_state=opt_ci.init(eqx.filter(ci_fn, eqx.is_array)),
-            adversaries={
-                ppgd_cfg.type: PersistentAdversary(
-                    sources=src,
-                    opt_state=init_sources_adam_state(src),
-                    state_key=ppgd_cfg.type,
-                    adam=ppgd_cfg.optimizer,
-                    n_warmup=ppgd_cfg.n_warmup_steps,
-                )
-            },
-            freq_ema=None,
-            step=jnp.zeros((), jnp.int32),
-        ),
+        auxiliaries=_hidden_acts_reconstruction(hidden_acts_reconstruction_coeff),
     )
     losses = build_objective(
         (
@@ -590,35 +494,59 @@ def _ppgd_run(
             ),
             ppgd_cfg,
         ),
-        model.site_names,
+        model.sites,
+    )
+    state = TrainState(
+        decomposition=Decomposition[LMBatchWithDocuments](components=vu, ci_fn=ci_fn),
+        training=PDTrainingState(
+            frequency=BatchFrequency(),
+            objective=losses,
+            components_opt_state=opt_vu.init(eqx.filter(vu, eqx.is_array)),
+            ci_fn_opt_state=opt_ci.init(eqx.filter(ci_fn, eqx.is_array)),
+            adversaries={
+                ppgd_cfg.type: PersistentAdversary(
+                    sources=src,
+                    opt_state=init_sources_adam_state(src),
+                    state_key=ppgd_cfg.type,
+                    optimizer=ppgd_cfg.optimizer,
+                    n_warmup=ppgd_cfg.n_warmup_steps,
+                )
+            },
+            step=jnp.zeros((), jnp.int32),
+        ),
     )
     placed = PlacedModel(model=model, placement=None)
-    step = make_train_step(
-        model_static=placed,
-        substrate=ForwardSubstrate.of(
-            placed,
-            remat_recon_forwards=True,
-            remat_ci_fn=False,
-            ci_capture_keys=ci_fn.capture_keys,
-            ci_placement=None,
-        ),
-        objective=losses,
-        components_optimizer=opt_vu,
-        ci_fn_optimizer=opt_ci,
-        total_steps=100,
-        faithfulness=faithfulness_loss_for(model),
+    step = jax.jit(
+        make_train_step(
+            model_static=placed,
+            substrate=ForwardSubstrate.of(
+                placed,
+                remat_recon_forwards=True,
+                remat_ci_fn=False,
+                ci_capture_keys=ci_fn.capture_keys,
+            ),
+            components_optimizer=opt_vu,
+            ci_fn_optimizer=opt_ci,
+            total_steps=100,
+            faithfulness=faithfulness_loss_for(placed),
+        )
     )
     tokens = jax.random.randint(jax.random.PRNGKey(4), (2, seq), 0, cfg.vocab_size)
     per_step: list[dict[str, jnp.ndarray]] = []
     for i in range(n_steps):
-        state, metrics = step(placed, state, tokens, jax.random.PRNGKey(100 + i))
+        state, metrics = step(
+            placed,
+            state,
+            LMBatchWithDocuments.from_unsegmented_sequences(tokens),
+            jax.random.PRNGKey(100 + i),
+        )
         per_step.append(metrics)
     return state, per_step
 
 
 def test_hidden_acts_reconstruction_with_persistent_pgd_adversary():
     """The adversary's warmup + final ascent must run through the combined (e2e +
-    hidden-activation reconstruction) objective without shape/finiteness errors (SPEC S35 x S13'/S14')."""
+    hidden-activation reconstruction) objective without shape/finiteness errors."""
     n_steps, n_warmup = 3, 1
     ppgd_key = "PersistentPGDReconLoss"
     state, per_step = _ppgd_run(hidden_acts_reconstruction_coeff=0.2, n_steps=n_steps)
@@ -626,6 +554,7 @@ def test_hidden_acts_reconstruction_with_persistent_pgd_adversary():
         assert all(bool(jnp.isfinite(v).all()) for v in metrics.values())
     assert int(state.training.step) == n_steps
     adv = state.training.adversaries[ppgd_key]
+    assert isinstance(adv.opt_state, SourcesAdamState)
     assert float(adv.opt_state.step_count) == n_steps * (n_warmup + 1)
     for v in jax.tree.leaves(adv.sources):
         assert float(v.min()) >= 0.0 and float(v.max()) <= 1.0
@@ -659,47 +588,13 @@ def test_adversary_actually_ascends_the_combined_objective():
     baseline, _ = _ppgd_run(hidden_acts_reconstruction_coeff=1.0, n_steps=1, n_warmup=0)
     pulled, _ = _ppgd_run(hidden_acts_reconstruction_coeff=50.0, n_steps=1, n_warmup=0)
     key = "PersistentPGDReconLoss"
-    base_m = baseline.training.adversaries[key].opt_state.m
-    pulled_m = pulled.training.adversaries[key].opt_state.m
-    assert set(base_m) == set(pulled_m)
-    changed = [
-        site
-        for site in base_m
-        if any(
-            not bool(jnp.array_equal(a, b))
-            for a, b in zip(
-                jax.tree.leaves(base_m[site]), jax.tree.leaves(pulled_m[site]), strict=True
-            )
-        )
-    ]
-    assert changed, (
+    base_state = baseline.training.adversaries[key].opt_state
+    pulled_state = pulled.training.adversaries[key].opt_state
+    assert isinstance(base_state, SourcesAdamState) and isinstance(pulled_state, SourcesAdamState)
+    assert any(
+        not bool(jnp.array_equal(a, b))
+        for a, b in zip(jax.tree.leaves(base_state.m), jax.tree.leaves(pulled_state.m), strict=True)
+    ), (
         "source moments are identical at hidden-activation reconstruction coeff 1 and 50, so the term "
         "is not reaching the final-ascent gradient"
     )
-
-
-def test_per_position_normalization_runs_with_a_batch_sharded_argument():
-    """The median lowers to `lax.sort`, which refuses a sharded sort dimension. The hidden
-    activations arrive batch-sharded on every real mesh, so without replicating the per-entry
-    energies first this mode raises `ShardingTypeError` at trace time and the per-position
-    recipe cannot run at all (measured on the 4x H100 seat, 2026-09-11). Run this file at
-    `XLA_FLAGS=--xla_force_host_platform_device_count=4` for the sharded arm to be real."""
-    n = jax.device_count()
-    if n < 2:
-        pytest.skip(f"needs >= 2 devices to shard the batch, have {n}")
-    mesh = jax.make_mesh((n,), ("batch",), axis_types=(jax.sharding.AxisType.Explicit,))
-    b, t, d = 4 * n, 3, 2
-    key = jax.random.key(0)
-    clean = jax.random.normal(key, (b, t, d))
-    masked = clean * 1.5
-    with jax.set_mesh(mesh):
-        spec = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("batch", None, None))
-        sharded_clean = jax.device_put(clean, spec)
-        sharded_masked = jax.device_put(masked, spec)
-        got = float(
-            jax.jit(lambda m, c: relative_squared_error(m, c, normalization=PER_POSITION))(
-                sharded_masked, sharded_clean
-            )
-        )
-    unsharded = float(relative_squared_error(masked, clean, normalization=PER_POSITION))
-    assert got == pytest.approx(unsharded, rel=1e-5)

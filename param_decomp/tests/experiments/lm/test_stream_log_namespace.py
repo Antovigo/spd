@@ -11,8 +11,7 @@ from typing import cast
 import jax.numpy as jnp
 import pytest
 
-from param_decomp.core.ci_fn import PlacedCIFn
-from param_decomp.core.train import TrainState
+from param_decomp.core.train import Decomposition
 from param_decomp.experiments.lm.eval_context import (
     LMEvalPass,
     Stream,
@@ -23,12 +22,14 @@ from param_decomp.experiments.lm.eval_context import (
 TARGET_BATCHES = (jnp.zeros((1, 4), jnp.int32),)
 
 
-def eval_pass(target_batches: tuple[jnp.ndarray, ...] | None) -> LMEvalPass:
-    """A pass carrying only what the namespace rule reads; `state` is never touched."""
+def eval_pass(
+    target_batches: tuple[jnp.ndarray, ...] | None,
+) -> LMEvalPass[jnp.ndarray, object]:
+    """A pass carrying only what the namespace rule reads; `decomposition` is never touched."""
     return LMEvalPass(
-        state=cast(TrainState, cast(object, None)),
+        decomposition=cast(Decomposition[object], cast(object, None)),
+        persistent_sources={},
         now_step=0,
-        placed_ci_fn=cast(PlacedCIFn, cast(object, None)),
         pass_index=0,
         batches=(),
         target_batches=target_batches,

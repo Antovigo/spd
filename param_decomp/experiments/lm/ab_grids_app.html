@@ -114,21 +114,54 @@ function b64F16(s) {
 const ciRoles = () => cur.ci_roles || ["output"];
 const hasHidden = () => ciRoles().includes("hidden");
 
-// Decoded per-module caches for the current payload (u8 CI per role, f32 inner, f32 mean CI).
+// Decoded per-module caches for the current payload (u8 CI per role, f32 inner, f32 mean CI),
+// each carrying the (n_a, n_b) of the grids it holds. A SPLIT snapshot (`thumb` present: a
+// grid too large for one file) holds pooled thumbnails here; its full-resolution grids live in
+// one file per module, loaded on demand for the detail drawer (`fullData`).
 const dec = new Map();
 function moduleData(mi) {
   const key = cur.step + ":" + mi;
   if (!dec.has(key)) {
-    const m = cur.modules[mi];
+    const m = cur.modules[mi], t = cur.thumb;
+    const [ci, ciHidden, inner] = t ? [m.ci_thumb, m.ci_hidden_thumb, m.inner_thumb] : [m.ci, m.ci_hidden, m.inner];
     dec.set(key, {
       meanCi: b64F32(m.mean_ci),
       meanCiHidden: m.mean_ci_hidden ? b64F32(m.mean_ci_hidden) : null,
-      ci: m.ci ? b64Bytes(m.ci) : null,
-      ciHidden: m.ci_hidden ? b64Bytes(m.ci_hidden) : null,
-      inner: m.inner ? b64F16(m.inner) : null,
+      ci: ci ? b64Bytes(ci) : null,
+      ciHidden: ciHidden ? b64Bytes(ciHidden) : null,
+      inner: inner ? b64F16(inner) : null,
+      n_a: t ? t.n_a : cur.n_a, n_b: t ? t.n_b : cur.n_b,
     });
   }
   return dec.get(key);
+}
+
+// Full-resolution module grids of a split snapshot, keyed "step:name". Script tags load
+// async; the module file calls registerABGridModule, which re-renders the drawer if that
+// module is still the one being inspected. Only the last few modules are kept decoded.
+const full = new Map(), requested = new Set(), FULL_KEEP = 6;
+window.registerABGridModule = doc => {
+  const key = doc.step + ":" + doc.name;
+  full.set(key, {
+    ci: b64Bytes(doc.ci), ciHidden: doc.ci_hidden ? b64Bytes(doc.ci_hidden) : null,
+    inner: b64F16(doc.inner), n_a: steps[doc.step].n_a, n_b: steps[doc.step].n_b,
+  });
+  requested.delete(key);
+  while (full.size > FULL_KEEP) full.delete(full.keys().next().value);
+  if (cur && cur.step === doc.step && selected && cur.modules[selected.mi].name === doc.name) renderDetail();
+};
+function fullData(mi) {
+  if (!cur.thumb) return moduleData(mi);
+  const m = cur.modules[mi], key = cur.step + ":" + m.name;
+  if (full.has(key)) return full.get(key);
+  if (!requested.has(key)) {
+    requested.add(key);
+    const tag = document.createElement("script");
+    tag.src = m.file;
+    tag.onerror = () => { requested.delete(key); $("readout").textContent = `failed to load ${m.file}`; };
+    document.body.append(tag);
+  }
+  return null;
 }
 
 const lerp = (a, b, t) => a + (b - a) * t;
@@ -142,14 +175,14 @@ const DIV_STOPS = [[5,48,97],[146,197,222],[247,247,247],[244,165,130],[103,0,31
 
 function pxValue() { return Math.max(1, +$("px").value | 0); }
 
-// value accessor into [comp, pos, op, a, b] flattened grids
-function gridIndex(si, pi, oi, ai, bi) {
+// value accessor into [comp, pos, op, a, b] flattened grids of `dims.n_a x dims.n_b`
+function gridIndex(si, pi, oi, ai, bi, dims) {
   const nPos = cur.positions.length, nOps = cur.ops.length;
-  return (((si * nPos + pi) * nOps + oi) * cur.n_a + ai) * cur.n_b + bi;
+  return (((si * nPos + pi) * nOps + oi) * dims.n_a + ai) * dims.n_b + bi;
 }
 
-function drawGrid(canvas, getVal, colour, px) {
-  const { n_a, n_b } = cur;
+function drawGrid(canvas, getVal, colour, px, dims) {
+  const { n_a, n_b } = dims;
   canvas.width = n_b; canvas.height = n_a;
   canvas.style.width = n_b * px + "px"; canvas.style.height = n_a * px + "px";
   const g = canvas.getContext("2d"), img = g.createImageData(n_b, n_a);
@@ -163,8 +196,8 @@ function drawGrid(canvas, getVal, colour, px) {
 
 function innerScale(data, si, pi, oi) {
   let mx = 0;
-  for (let ai = 0; ai < cur.n_a; ai++) for (let bi = 0; bi < cur.n_b; bi++) {
-    const v = data.inner[gridIndex(si, pi, oi, ai, bi)];
+  for (let ai = 0; ai < data.n_a; ai++) for (let bi = 0; bi < data.n_b; bi++) {
+    const v = data.inner[gridIndex(si, pi, oi, ai, bi, data)];
     if (!Number.isNaN(v)) mx = Math.max(mx, Math.abs(v));
   }
   return mx || 1;
@@ -177,22 +210,21 @@ const mergeRgb = ([out, hid]) => [
   Math.round(255 * (1 - hid)), Math.round(255 * (1 - out)), Math.round(255 * (1 - hid)),
 ];
 
-function tileDrawers(mi, si, pi, oi) {
-  const data = moduleData(mi);
-  const at = (ai, bi) => gridIndex(si, pi, oi, ai, bi);
+function tileDrawers(mi, si, pi, oi, data = moduleData(mi)) {
+  const at = (ai, bi) => gridIndex(si, pi, oi, ai, bi, data);
   const ciVal = (ai, bi) => data.ci[at(ai, bi)] / 255;
   const ciHiddenVal = data.ciHidden ? (ai, bi) => data.ciHidden[at(ai, bi)] / 255 : null;
   const innerVal = (ai, bi) => data.inner[at(ai, bi)];
   const mx = data.inner ? innerScale(data, si, pi, oi) : 1;
   const drawers = {
-    ci: cv => drawGrid(cv, ciVal, v => ramp(CI_STOPS, v), cv.dataset.px | 0),
-    inner: cv => drawGrid(cv, innerVal, v => ramp(DIV_STOPS, 0.5 + v / (2 * mx)), cv.dataset.px | 0),
-    ciVal, ciHiddenVal, innerVal,
+    ci: cv => drawGrid(cv, ciVal, v => ramp(CI_STOPS, v), cv.dataset.px | 0, data),
+    inner: cv => drawGrid(cv, innerVal, v => ramp(DIV_STOPS, 0.5 + v / (2 * mx)), cv.dataset.px | 0, data),
+    ciVal, ciHiddenVal, innerVal, dims: data,
   };
   if (ciHiddenVal) {
-    drawers.ci_hidden = cv => drawGrid(cv, ciHiddenVal, v => ramp(CI_STOPS, v), cv.dataset.px | 0);
+    drawers.ci_hidden = cv => drawGrid(cv, ciHiddenVal, v => ramp(CI_STOPS, v), cv.dataset.px | 0, data);
     drawers.ci_merge = cv =>
-      drawGrid(cv, (ai, bi) => [ciVal(ai, bi), ciHiddenVal(ai, bi)], mergeRgb, cv.dataset.px | 0);
+      drawGrid(cv, (ai, bi) => [ciVal(ai, bi), ciHiddenVal(ai, bi)], mergeRgb, cv.dataset.px | 0, data);
   }
   return drawers;
 }
@@ -296,16 +328,21 @@ function renderDetail() {
   document.body.classList.add("drawer-open");
   const pi = +$("pos").value, oi = +$("op").value;
   $("dtitle").textContent = `${selected.name} · component ${selected.c} · op ${cur.ops[oi]} · position ${cur.positions[pi]} · step ${cur.step}`;
-  const drawers = tileDrawers(selected.mi, selected.si, pi, oi);
+  // A split snapshot draws the pooled thumbnail until the module's full grids arrive.
+  const fullGrids = fullData(selected.mi), loading = !fullGrids;
+  const drawers = tileDrawers(selected.mi, selected.si, pi, oi, fullGrids || moduleData(selected.mi));
+  const factor = cur.thumb && !loading ? cur.thumb.factor : 1;
+  $("readout").textContent = loading ? "loading the full-resolution grid…" : "";
   $("dhidpane").style.display = drawers.ci_hidden ? "block" : "none";
   $("dmergepane").style.display = drawers.ci_merge ? "block" : "none";
   const panes = [["dci", "ci"], ["dinner", "inner"]];
   if (drawers.ci_hidden) panes.push(["dcihidden", "ci_hidden"], ["dcimerge", "ci_merge"]);
   for (const [id, kind] of panes) {
     const cv = $(id);
-    cv.dataset.px = pxValue() * 2;
+    cv.dataset.px = Math.max(1, Math.round(pxValue() * 2 / factor));
     drawers[kind](cv);
     cv.onmousemove = ev => {
+      if (loading) return;
       const r = cv.getBoundingClientRect();
       const bi = Math.floor((ev.clientX - r.left) / r.width * cur.n_b);
       const ai = Math.floor((ev.clientY - r.top) / r.height * cur.n_a);
@@ -338,8 +375,13 @@ const VIEW_OPTIONS = {
   inner: "inner act",
 };
 
+const AXIS_NOTE = document.querySelector(".axis-note").textContent;
 function setPayload(payload) {
   cur = payload;
+  const t = payload.thumb;
+  document.querySelector(".axis-note").textContent = AXIS_NOTE + (t
+    ? ` — gallery tiles are ${t.factor}×${t.factor}-cell means of the ${payload.n_a}×${payload.n_b} grid; click one for the full resolution`
+    : "");
   const viewSel = $("view"), keepView = viewSel.value;
   const views = hasHidden() ? ["ci_merge", "ci", "ci_hidden", "inner"] : ["ci", "inner"];
   viewSel.innerHTML = views.map(v => `<option value="${v}">${VIEW_OPTIONS[v]}</option>`).join("");

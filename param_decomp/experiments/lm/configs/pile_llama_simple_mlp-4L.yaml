@@ -1,25 +1,16 @@
-# Current JAX reference for decomposing the 4-layer Pile LlamaSimpleMLP target from
-# the VPD paper. This is the launch config of the completed reference run
-# https://wandb.ai/goodfire/param-decomp/runs/p-76082aa1, with its dataset path
-# made cluster-portable and its data parallelism narrowed to one node; per SPEC D4
-# the trajectory is invariant to device count at fixed global batch and seed.
-#
-# The paper artifact https://wandb.ai/goodfire/spd/runs/s-55ea3f9b remains the
-# exact historical PyTorch decomposition. Use this config for new decompositions:
-# it carries the current JAX algorithm (global 4-block chunkwise CI, smooth-L0
-# importance minimality, and merged stochastic-subset PPGD reconstruction).
-#
-# Run inside a 1-node allocation (8 GPUs, dp=8):
-#   python -m param_decomp.experiments.lm.run param_decomp/experiments/lm/configs/pile_llama_simple_mlp-4L.yaml
-run_name: ai-jax-pile4l-ppgd-bsc
+# Latest canonical run: https://wandb.ai/goodfire/param-decomp/runs/p-ed2347a8
+# Best-guess adaptation of that run's spirit to a config runnable on main, not a reproduction.
+# Omits the target-activation CI readout and uses main's per-batch adversary pools
+# and read/write locality loss. Equivalent decomposition quality has not been validated.
+# Model-only run name replaces the source run's experiment label.
+run_name: pile-llama-simple-mlp-4L
 cadence:
-  train_log_every: 200
   checkpointing:
     kind: periodic
     save_every: 5000
     retention:
       kind: keep_last
-      n: 2
+      n: 1
 data:
   train:
     kind: name
@@ -51,13 +42,30 @@ eval:
   - rounding_threshold: 0.0
     type: CEandKLLosses
   - type: CIMeanPerComponent
-  - coeff: null
-    init: random
+  - init: random
     source_shape: c
     n_steps: 20
-    name: PGDReconLoss_20step
     step_size: 0.1
     type: PGDReconLoss
+    auxiliaries:
+    - name: hidden_acts_reconstruction
+      coeff: 0.0
+      comparisons:
+      - capture: resid.1
+        distance: relative_squared_error
+      - capture: resid.2
+        distance: relative_squared_error
+      - capture: resid.3
+        distance: relative_squared_error
+      - capture: resid.4
+        distance: relative_squared_error
+  - init: random
+    source_shape: c
+    # One ascent read out at each step, logged as SlowPGDReconLoss_<n>step. Ladders
+    # from earlier versions ran one attack per step and logged as PGDReconLoss_<n>step.
+    read_out_steps: [40, 80, 160, 320, 640, 1280]
+    step_size: 0.1
+    type: SlowPGDReconLoss
   n_steps: 1
   slow_every: 10000
   slow_on_first_step: true
@@ -69,64 +77,95 @@ decomposition:
     cs:
       q_proj: 768
       k_proj: 768
-      v_proj: 1024
-      o_proj: 1024
+      v_proj: 768
+      o_proj: 768
       c_fc: 3072
-      down_proj: 3584
+      down_proj: 3072
+    initialization: nonlinearity_aligned
   ci:
+    # Omit p-ed2347a8's target-activation readout; this config uses transformer-only CI.
     type: chunkwise_transformer
     blocks_per_chunk: 4
     input_tap: all_block_resids
-    d_model: 2048
+    d_model: 1088
     n_blocks: 8
     attention:
       kind: mha
-      n_heads: 16
+      mask: causal
+      n_heads: 32
+      # Head dimension 34 requires XLA, matching the run's automatic backend selection.
+      implementation: xla
     ffn:
       kind: gelu
-      hidden: 8192
+      hidden: 4352
 pd:
-  batch_size: 64
-  steps: 400000
+  batch_size: 2048
+  steps: 100000
   ci_fn_optimizer:
-    betas:
-    - 0.9
-    - 0.999
+    type: muon
+    ns_dtype: bfloat16
     grad_clip_norm: 1.0
     lr_schedule:
-      max_val: 5.0e-05
+      max_val: 0.00028
       points:
-        - {at: 0.0, frac: 1.0}
-        - {at: 1.0, frac: 0.1, interp: cosine}
-    weight_decay: 0.0
+      - at: 0.0
+        frac: 1.0
+      - at: 0.9
+        frac: 0.1
+        interp: cosine
+      - at: 1.0
+        frac: 0.1
   components_optimizer:
-    betas:
-    - 0.9
-    - 0.999
+    type: muon
+    ns_dtype: bfloat16
     grad_clip_norm: 1.0
     lr_schedule:
-      max_val: 5.0e-05
+      max_val: 0.00028
       points:
-        - {at: 0.0, frac: 1.0}
-        - {at: 1.0, frac: 0.1, interp: cosine}
-    weight_decay: 0.0
+      - at: 0.0
+        frac: 1.0
+      - at: 0.9
+        frac: 0.1
+        interp: cosine
+      - at: 1.0
+        frac: 0.1
   faithfulness_warmup_lr: 0.001
-  faithfulness_warmup_steps: 400
+  faithfulness_warmup_steps: 0
   faithfulness_warmup_weight_decay: 0.0
   loss_metrics:
   - frequency:
-      coeff: 1.0e-04
-      reference_datapoint_count: 32768
-    coeff: 2.0e-04
+      coeff: 4.2e-05
+      reference_datapoint_count: 6553600
+      ema_halflife_steps: 200
+    coeff: 0.0001275
+    normalize_at_one: true
     type: ImportanceMinimalityLoss
     gamma:
       max_val: 1.0
       points:
-        - {at: 0.0, frac: 1.0}
-        - {at: 1.0, frac: 0.01}
-  - type: MergedStochasticSubsetPPGDReconLoss
+      - at: 0.0
+        frac: 1.0
+      - at: 0.9
+        frac: 0.01
+      - at: 1.0
+        frac: 0.01
+  # Retain main's locality over reads and writes, including o_proj/down_proj inputs;
+  # p-ed2347a8 penalized writes only, so coverage and averaging differ.
+  - type: NonlinearityLocalityLoss
+    coeff: 3.0e-05
+    relative_threshold:
+      max_val: 8.0
+      points:
+      - at: 0.0
+        frac: 1.0
+      - at: 1.0
+        frac: 0.25
+    unit_kind_coefficients:
+      neuron: 1.0
+      attention_head: 1.0
+  - type: MergedStochasticSubsetPooledPPGDReconLoss
     coeff: 1.0
-    adv_fraction: 0.5
+    adv_fraction: 0.9
     n_warmup_steps: 2
     routing:
       type: uniform_k_subset
@@ -135,30 +174,41 @@ pd:
       beta2: 0.99
       eps: 1.0e-08
       lr_schedule:
-        max_val: 0.01
+        max_val: 0.02
         points:
-          - {at: 0.0, frac: 0.0}
-          - {at: 0.025, frac: 1.0}
-          - {at: 1.0, frac: 1.0}
+        - at: 0.0
+          frac: 0.0
+        - at: 0.025
+          frac: 1.0
+        - at: 1.0
+          frac: 1.0
       type: adam
-    source_shape: bsc
-  - coeff: 1.0e+03
+    # p-ed2347a8 used a shared pool_size: 8192. Retain main's per-batch ownership
+    # with 8192 / 2048 = 4 particles each; total size matches, sampling differs.
+    pool:
+      size_per_batch_element: 4
+  - coeff: 1000.0
     type: FaithfulnessLoss
 runtime:
   compilation_cache_dir: ~/.cache/param-decomp/xla
   remat_recon_forwards: false
-  replicate: 1
-  fsdp: 8
-  tp: 1
-  sharding: zero1
-  compiler_options: tuned-v1
+  remat_ci_fn: false
+  mesh:
+    replicate: 1
+    fsdp: 32
+    tp: 1
+  sharding: owner
+  compiler_options: tuned-v2
 target:
-  attention_implementation: auto
+  # Explicit GPU attention instead of p-ed2347a8's auto selection.
+  attention_implementation: flash
   weights_dtype: bfloat16
+  output_edge:
+    kind: materialized
   spec:
     kind: pretrained
     model_class: param_decomp.experiments.lm.pretrain.models.llama_simple_mlp.LlamaSimpleMLP
     run_path: goodfire/spd/runs/t-9d2b8f02
+# Drop the source run's experiment-specific group/tags; retain its W&B project.
 wandb:
-  entity: null
   project: param-decomp

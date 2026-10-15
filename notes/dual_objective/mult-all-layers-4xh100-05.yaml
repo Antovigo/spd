@@ -49,7 +49,7 @@
 #     optimum under it.
 #   C x2 — measured 41.6 GB/rank of 80 and 2.49 s/step at C2x.
 #   hidden recon coefficients UNCHANGED (rho = 1). MEASURED 2026-09-11 with
-#     arms-4xh100/normcal.yaml under PD_LOG_ALT_HIDDEN_NORM=1: the aggregate
+#     arms-4xh100/normcal.yaml with pd.hidden.log_alternate_normalization: true: the aggregate
 #     per_position/batch ratio is 0.897 (target stochastic), 0.950 (target PPGD) and
 #     1.037 (nontarget merged) — i.e. ~1, so per_position already carries the L18
 #     exchange rate and needs no rescaling. It redistributes pressure WITHIN each point
@@ -176,7 +176,8 @@ decomposition:
       n_heads: 8
       # `xla`, as the L40 line: see target.attention_implementation. MEASURED on the
       # Runpod H100 pod 2026-09-10 — `auto` does not load there.
-      attention_implementation: xla
+      implementation: xla
+      mask: bidirectional  # the pre-017a17af4 CI attention was implicitly bidirectional
     ffn:
       kind: gelu
       hidden: 2048
@@ -501,6 +502,8 @@ cadence:
       kind: keep_last
       n: 2
 target:
+  output_edge:
+    kind: materialized  # the pre-017a17af4 behaviour: full logits every forward
   # `xla`, NOT `auto`. This was authored `auto` on the theory that the L40 line's `xla`
   # was a pre-CUDA-12.8-driver workaround and H100 + driver 580 would take cuDNN flash
   # attention. MEASURED FALSE on the Runpod 4x H100 pod, 2026-09-10 (driver 580.126.09,
@@ -513,7 +516,7 @@ target:
   # nor the tuned flag set. On 4 GPUs it presents as a SILENT HANG in `execute_sharded`
   # (the ranks block on a peer that never loads its module), which is what cost a day.
   # With `xla` the same config trains: 0.09 s/step at 1 block, batch 16, 22.1 GB/rank.
-  # Keep BOTH this and `decomposition.ci.attention.attention_implementation` at `xla`.
+  # Keep BOTH this and `decomposition.ci.attention.implementation` at `xla`.
   attention_implementation: xla
   spec:
     kind: hf_weights_in_vendored
@@ -531,7 +534,7 @@ runtime:
   # `~` expands to the pod user's home; the guide symlinks it onto the network volume so
   # the multi-minute compile survives a pod restart.
   compilation_cache_dir: ~/.cache/param-decomp/xla
-  compiler_options: tuned-v1
+  compiler_options: tuned-v2  # tuned-v1 retired upstream (jaxlib 0.11)
   # The explicit (replicate, fsdp, tp) mesh — 4 GPUs. SETTLED by the ladder on the Runpod
   # 4x H100 pod, 2026-09-10: `mesh-f4` (replicate 1 / fsdp 4) FITS at 34.8 GB/rank of 80 and
   # runs 2.55 s/step at batch 128/128 — 30.0 h projected for 40k steps including eval and
@@ -540,10 +543,11 @@ runtime:
   # Both shard optimizer state 8-way under `zero1`; they differ in how the frozen target and
   # compute weights are sharded and gathered (over NVLink either way). Header has the memory
   # argument against the 1-block line's `replicate 8 / fsdp 1 / ddp`.
-  replicate: 1
-  fsdp: 4
-  tp: 1
-  # `zero1`, NOT `ddp`: see the header. NEVER `zero1` at `fsdp: 1` (report §8.5).
+  mesh:
+    replicate: 1
+    fsdp: 4
+    tp: 1
+    # `zero1`, NOT `ddp`: see the header. NEVER `zero1` at `fsdp: 1` (report §8.5).
   sharding: zero1
   remat_recon_forwards: true
   remat_ci_fn: true

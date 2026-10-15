@@ -119,7 +119,8 @@ decomposition:
       n_heads: 8
       # `xla`, NOT `auto`: cuDNN's graph API cannot run against this box's pre-CUDA-12.8
       # driver. #1000 turned this branch's hard-coded cuDNN-off into this knob.
-      attention_implementation: xla
+      implementation: xla
+      mask: bidirectional  # the pre-017a17af4 CI attention was implicitly bidirectional
     ffn:
       kind: gelu
       hidden: 2048
@@ -382,6 +383,8 @@ cadence:
       kind: keep_last
       n: 2
 target:
+  output_edge:
+    kind: materialized  # the pre-017a17af4 behaviour: full logits every forward
   # `xla`, NOT `auto`: cuDNN's graph API cannot run against this box's pre-CUDA-12.8
   # driver — `CuDnnThunk::Initialize` fails inside `run_auxiliary_kernels`'
   # `cudaMemcpyAsync` with an unchecked `cudaErrorInvalidValue`, resurfacing later at an
@@ -404,29 +407,30 @@ data:
 runtime:
   # Upstream #1000 made these two required and un-defaulted.
   compilation_cache_dir: ~/.cache/param-decomp/xla
-  compiler_options: tuned-v1
+  compiler_options: tuned-v2  # tuned-v1 retired upstream (jaxlib 0.11)
   # The explicit `(replicate, fsdp, tp)` mesh (#1000) — the old
   # `dp: 2 / gpus_per_node: 2 / fsdp: 1` derivation spells exactly this.
-  replicate: 2
-  tp: 1  # L40s are PCIe, not NVLink — tensor parallel would pay a fabric cost for nothing
-  fsdp: 1  # degenerate the parameter-sharding axis: both cards go on `replicate` and the
-  # frozen target stops being gathered a layer at a time inside every scan. `nvidia-smi topo
-  # -p2p r` reports CNS between every GPU pair here, so that gather runs over shared memory,
-  # not NVLink, and it dominates the step. Costs the full ~16GiB target resident per card
-  # instead of ~9 (2.1 embed+head replicated either way, 14 of blocks). Subsumes
-  # `ascend_replicate`, whose whole job is hoisting the same gather off the ascents.
-  # `ddp`, NOT `zero1`. #1000 changed what `zero1` means (SPEC D4 amendment 2026-08-18:
-  # its faithfulness rows became the intra-matrix master layout for ALL groups), and at
-  # this config — one decomposed block, replicate 2, fsdp 1 — the new layout emits ~8.0 GB
-  # of cross-replicate all-reduce PER STEP against 0.30 GB before. On a box whose GPUs have
-  # no peer-to-peer (CNS between every pair, so NCCL routes over shared memory) that is the
-  # whole cost: 69 all-reduces/step vs 13. Measured, 60-step smokes:
-  #   pre-merge zero1  3.10 s/step, 21.16 GB, 13 all-reduce,  299.7 MB
-  #   merged   zero1   6.32 s/step, 28.23 GB, 69 all-reduce, 7968.9 MB
-  #   merged   ddp     2.83 s/step, 26.79 GB, 12 all-reduce,  356.1 MB
-  # `owner` is not available here: it shards the component stack axis over `replicate`, and
-  # a single-block decomposition gives every semantic group stack length 1, which cannot
-  # tile 2 — it refuses at config build. Layout-only change; SPEC D4 covers the numerics.
+  mesh:
+    replicate: 2
+    tp: 1  # L40s are PCIe, not NVLink — tensor parallel would pay a fabric cost for nothing
+    fsdp: 1  # degenerate the parameter-sharding axis: both cards go on `replicate` and the
+    # frozen target stops being gathered a layer at a time inside every scan. `nvidia-smi topo
+    # -p2p r` reports CNS between every GPU pair here, so that gather runs over shared memory,
+    # not NVLink, and it dominates the step. Costs the full ~16GiB target resident per card
+    # instead of ~9 (2.1 embed+head replicated either way, 14 of blocks). Subsumes
+    # `ascend_replicate`, whose whole job is hoisting the same gather off the ascents.
+    # `ddp`, NOT `zero1`. #1000 changed what `zero1` means (SPEC D4 amendment 2026-08-18:
+    # its faithfulness rows became the intra-matrix master layout for ALL groups), and at
+    # this config — one decomposed block, replicate 2, fsdp 1 — the new layout emits ~8.0 GB
+    # of cross-replicate all-reduce PER STEP against 0.30 GB before. On a box whose GPUs have
+    # no peer-to-peer (CNS between every pair, so NCCL routes over shared memory) that is the
+    # whole cost: 69 all-reduces/step vs 13. Measured, 60-step smokes:
+    #   pre-merge zero1  3.10 s/step, 21.16 GB, 13 all-reduce,  299.7 MB
+    #   merged   zero1   6.32 s/step, 28.23 GB, 69 all-reduce, 7968.9 MB
+    #   merged   ddp     2.83 s/step, 26.79 GB, 12 all-reduce,  356.1 MB
+    # `owner` is not available here: it shards the component stack axis over `replicate`, and
+    # a single-block decomposition gives every semantic group stack length 1, which cannot
+    # tile 2 — it refuses at config build. Layout-only change; SPEC D4 covers the numerics.
   sharding: ddp
   remat_recon_forwards: true
   remat_ci_fn: true

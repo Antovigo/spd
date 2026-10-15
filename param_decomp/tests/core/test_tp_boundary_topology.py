@@ -8,28 +8,39 @@ from jax.sharding import AxisType, Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
 from param_decomp.core.adversary import SiteSource
-from param_decomp.core.ci_fn import (
+from param_decomp.core.ci_fn.implementations.chunkwise.arch import (
     Chunk,
-    ChunkwiseTransformerCIArch,
-    ChunkwiseTransformerCIFn,
-    MHACIAttention,
-    PlacedCIFn,
-    evaluate_ci,
-    evaluate_compute_ci,
-    materialize_ci_compute_weights,
-    output_ci,
+    ChunkwiseTransformerCIFnArch,
 )
-from param_decomp.core.components import SiteSpec
+from param_decomp.core.ci_fn.implementations.chunkwise.placement import (
+    bind_chunkwise_rows,
+    preset_rows,
+)
+from param_decomp.core.ci_fn.implementations.transformer.backbone import BackboneCIFn
+from param_decomp.core.ci_fn.implementations.transformer.layers import (
+    MHACIFnAttention,
+    PlacedProjection,
+)
+from param_decomp.core.ci_fn.interface import output_ci
+from param_decomp.core.components import (
+    DenseFactorization,
+    SiteSpec,
+    init_component_stacks,
+    require_full_emission,
+)
 from param_decomp.core.decomposed_linear import (
     PlannedComponentLinear,
+    SiteWeights,
     constrain_component_activation,
     site_forward,
 )
-from param_decomp.core.init_placed import init_ci_fn_placed
 from param_decomp.core.linear_plan import LinearPlan, placed_linear
-from param_decomp.core.masking import masks_from_sources
+from param_decomp.core.masking import materialize_masking, source_masking
 from param_decomp.core.placement import TargetLinearPlacement, from_config
 from param_decomp.core.tools.hlo_census import collective_census
+from param_decomp.targets.testing import chunkwise_transformer_backbone
+from param_decomp.tests.placed_ci_fn import placed_ci_fn
+from param_decomp.tests.sequence import unsegmented_sequence_layout
 
 pytestmark = [
     pytest.mark.multidevice,
@@ -46,12 +57,9 @@ def test_ci_ffn_operand_gather_preserves_the_semantic_bias_basis():
         ("replicate", "fsdp", "tp"),
         axis_types=(AxisType.Explicit,) * 3,
     )
-    rules = from_config("zero1", mesh, (SiteSpec("site", 4, 4, 2, "group"),))
-    plan = rules.ci_fn.linear_plan(
-        "ffn",
-        ("d_model", "ffn_hidden"),
-        3,
-        transposed=False,
+    rows = bind_chunkwise_rows(preset_rows("zero1"), mesh)
+    plan = PlacedProjection(rows.weights.ffn, rows.activations).plan(
+        ("d_model", "ffn_hidden"), 3, transposed=False
     )
     x = jnp.arange(32, dtype=jnp.float32).reshape(4, 2, 4)
     weight = jnp.arange(32, dtype=jnp.float32).reshape(4, 8)
@@ -74,30 +82,39 @@ def test_ci_tap_rms_precedes_the_local_tp_input_slice():
         ("replicate", "fsdp", "tp"),
         axis_types=(AxisType.Explicit,) * 3,
     )
-    site = SiteSpec("layers.0.site", 8, 8, 8, "site")
+    site = SiteSpec("layers.0.site", DenseFactorization(d_in=8, d_out=8, C=8), "site")
     rules = from_config("zero1", mesh, (site,))
-    arch = ChunkwiseTransformerCIArch(
+    arch = ChunkwiseTransformerCIFnArch(
         chunks=(Chunk(input_taps=("tap",), output_sites=(site.name,)),),
         input_dim=8,
         d_model=8,
         n_blocks=0,
-        attention=MHACIAttention(n_heads=2),
+        attention=MHACIFnAttention(mask="bidirectional", implementation="xla", n_heads=2),
         ffn_hidden=8,
         ffn_kind="gelu",
         learned_norm_scale=False,
     )
-    ci_fn = init_ci_fn_placed(arch, (site,), jax.random.PRNGKey(0), mesh, rules)
+    ci_fn = placed_ci_fn(arch, (site,), jax.random.PRNGKey(0), mesh, rules)
+    components = init_component_stacks((site,), jax.random.PRNGKey(1))
     tap = jax.device_put(
         jnp.ones((2, 4, 8), jnp.bfloat16),
         NamedSharding(mesh, P(("replicate", "fsdp"), None, None)),
     )
 
     @jax.jit
-    def lower(cf: ChunkwiseTransformerCIFn, value: jax.Array) -> jax.Array:
-        ci = output_ci(
-            evaluate_ci(PlacedCIFn(fn=cf, placement=rules.ci_fn), {"tap": value}, remat=False)
+    def lower(cf: BackboneCIFn, value: jax.Array) -> jax.Array:
+        ci = cf.prepare()(
+            {"tap": value},
+            None,
+            components,
+            sequence=unsegmented_sequence_layout({"tap": value}),
+            remat=False,
         )
-        return constrain_component_activation(ci.lower[site.name], rules)
+        return require_full_emission(
+            constrain_component_activation(
+                output_ci(ci).lower[site.name], rules.activations.component
+            )
+        )
 
     compiled = lower.lower(ci_fn, tap).compile()
     output = compiled(ci_fn, tap)
@@ -131,29 +148,40 @@ def test_ci_operand_gathers_slice_the_scanned_stack_first():
         ("replicate", "fsdp", "tp"),
         axis_types=(AxisType.Explicit,) * 3,
     )
-    sites = tuple(SiteSpec(f"layers.{i}.site", 8, 8, 8, "site") for i in range(2))
+    sites = tuple(
+        SiteSpec(f"layers.{i}.site", DenseFactorization(d_in=8, d_out=8, C=8), "site")
+        for i in range(2)
+    )
     rules = from_config("zero1", mesh, sites)
-    arch = ChunkwiseTransformerCIArch(
+    arch = ChunkwiseTransformerCIFnArch(
         chunks=tuple(Chunk(input_taps=("tap",), output_sites=(site.name,)) for site in sites),
         input_dim=8,
         d_model=8,
         n_blocks=1,
-        attention=MHACIAttention(n_heads=2),
+        attention=MHACIFnAttention(mask="bidirectional", implementation="xla", n_heads=2),
         ffn_hidden=8,
         ffn_kind="gelu",
         learned_norm_scale=False,
     )
-    ci_fn = init_ci_fn_placed(arch, sites, jax.random.PRNGKey(0), mesh, rules)
+    ci_fn = placed_ci_fn(arch, sites, jax.random.PRNGKey(0), mesh, rules)
+    components = init_component_stacks(sites, jax.random.PRNGKey(1))
+    # Batch extents must differ from the chunk count for the gather-shape census.
     tap = jax.device_put(
-        jnp.ones((2, 4, 8), jnp.bfloat16),
+        jnp.ones((6, 4, 8), jnp.bfloat16),
         NamedSharding(mesh, P(("replicate", "fsdp"), None, None)),
     )
 
-    def loss(value: ChunkwiseTransformerCIFn) -> jax.Array:
-        ci = output_ci(
-            evaluate_ci(PlacedCIFn(fn=value, placement=rules.ci_fn), {"tap": tap}, remat=False)
+    def loss(value: BackboneCIFn) -> jax.Array:
+        ci = value.prepare()(
+            {"tap": tap},
+            None,
+            components,
+            sequence=unsegmented_sequence_layout({"tap": tap}),
+            remat=False,
         )
-        return jnp.stack([jnp.sum(ci.lower[site.name]) for site in sites]).sum()
+        return jnp.stack(
+            [jnp.sum(require_full_emission(output_ci(ci).lower[site.name])) for site in sites]
+        ).sum()
 
     hlo = jax.jit(jax.grad(loss)).lower(ci_fn).compile().as_text()
     assert hlo is not None
@@ -172,31 +200,42 @@ def test_ci_replica_residency_bounds_cross_replica_collectives_outside_the_scan(
         ("replicate", "fsdp", "tp"),
         axis_types=(AxisType.Explicit,) * 3,
     )
-    sites = tuple(SiteSpec(f"layers.{i}.site", 8, 8, 8, "site") for i in range(2))
+    sites = tuple(
+        SiteSpec(f"layers.{i}.site", DenseFactorization(d_in=8, d_out=8, C=8), "site")
+        for i in range(2)
+    )
     rules = from_config("zero1", mesh, sites)
-    arch = ChunkwiseTransformerCIArch(
+    arch = ChunkwiseTransformerCIFnArch(
         chunks=tuple(Chunk(input_taps=("tap",), output_sites=(site.name,)) for site in sites),
         input_dim=8,
         d_model=8,
         n_blocks=1,
-        attention=MHACIAttention(n_heads=2),
+        attention=MHACIFnAttention(mask="bidirectional", implementation="xla", n_heads=2),
         ffn_hidden=8,
         ffn_kind="gelu",
         learned_norm_scale=False,
     )
-    ci_fn = init_ci_fn_placed(arch, sites, jax.random.PRNGKey(0), mesh, rules)
+    ci_fn = placed_ci_fn(arch, sites, jax.random.PRNGKey(0), mesh, rules)
+    components = init_component_stacks(sites, jax.random.PRNGKey(1))
     tap = jax.device_put(
         jnp.ones((4, 2, 8), jnp.bfloat16),
         NamedSharding(mesh, P(("replicate", "fsdp"), None, None)),
     )
 
-    def loss(value: ChunkwiseTransformerCIFn) -> jax.Array:
+    def loss(value: BackboneCIFn) -> jax.Array:
         # The step's CI lifecycle: the masters->residents gather (cross-replica) runs
         # once in entry via materialize; only per-chunk fsdp gathers ride the scan.
-        compute = materialize_ci_compute_weights(PlacedCIFn(fn=value, placement=rules.ci_fn))
-        ci = output_ci(evaluate_compute_ci(compute, {"tap": tap}, remat=False))
+        compute = value.prepare()
+        ci = compute(
+            {"tap": tap},
+            None,
+            components,
+            sequence=unsegmented_sequence_layout({"tap": tap}),
+            remat=False,
+        )
         return sum(
-            (jnp.sum(ci.lower[site.name]) for site in sites), jnp.zeros((), jnp.bfloat16)
+            (jnp.sum(require_full_emission(output_ci(ci).lower[site.name])) for site in sites),
+            jnp.zeros((), jnp.bfloat16),
         ).astype(jnp.float32)
 
     with jax.set_mesh(mesh):
@@ -227,29 +266,30 @@ def test_ci_vector_state_starts_at_its_declared_tp_layout():
         ("replicate", "fsdp", "tp"),
         axis_types=(AxisType.Explicit,) * 3,
     )
-    site = SiteSpec("layers.0.site", 8, 8, 8, "site")
+    site = SiteSpec("layers.0.site", DenseFactorization(d_in=8, d_out=8, C=8), "site")
     rules = from_config("zero1", mesh, (site,))
-    arch = ChunkwiseTransformerCIArch(
+    arch = ChunkwiseTransformerCIFnArch(
         chunks=(Chunk(input_taps=("tap",), output_sites=(site.name,)),),
         input_dim=8,
         d_model=8,
         n_blocks=1,
-        attention=MHACIAttention(n_heads=2),
+        attention=MHACIFnAttention(mask="bidirectional", implementation="xla", n_heads=2),
         ffn_hidden=8,
         ffn_kind="gelu",
         learned_norm_scale=False,
     )
-    ci_fn = init_ci_fn_placed(arch, (site,), jax.random.PRNGKey(0), mesh, rules)
-    assert isinstance(ci_fn, ChunkwiseTransformerCIFn)
+    chunks = chunkwise_transformer_backbone(
+        placed_ci_fn(arch, (site,), jax.random.PRNGKey(0), mesh, rules)
+    ).chunks
 
     def spec(array: jax.Array) -> P:
         assert isinstance(array.sharding, NamedSharding)
         return array.sharding.spec
 
-    assert spec(ci_fn.chunks.in_proj_b) == P(None, None)
-    assert spec(ci_fn.chunks.blocks[0].b1) == P(None, "tp")
-    assert spec(ci_fn.chunks.blocks[0].b2) == P(None, None)
-    assert spec(ci_fn.chunks.out_bs[0]) == P(None, "tp")
+    assert spec(chunks.in_proj_b) == P(None, None)
+    assert spec(chunks.blocks[0].b1) == P(None, "tp")
+    assert spec(chunks.blocks[0].b2) == P(None, None)
+    assert spec(chunks.out_bs[0]) == P(None, "tp")
 
 
 def test_structured_source_materializes_masks_without_tp_redistribution():
@@ -271,8 +311,11 @@ def test_structured_source_materializes_masks_without_tp_redistribution():
     )
 
     @jax.jit
-    def lower(ci_value: jax.Array, source_value: SiteSource[jax.Array]):
-        masks, deltas = masks_from_sources({"site": ci_value}, {"site": source_value})
+    def lower(ci_value: jax.Array, source_value: SiteSource):
+        masking = materialize_masking(source_masking({"site": ci_value}, {"site": source_value}))
+        masks = masking.component_masks
+        assert masking.weight_delta_masks is not None
+        deltas = masking.weight_delta_masks
         return masks["site"], deltas["site"]
 
     compiled = lower.lower(ci, source).compile()
@@ -299,7 +342,7 @@ def test_component_delta_path_uses_one_u_and_preserves_value_and_gradients():
         ("replicate", "fsdp", "tp"),
         axis_types=(AxisType.Explicit,) * 3,
     )
-    site = SiteSpec("layers.0.mlp.gate_proj", 8, 16, 8, "gate")
+    site = SiteSpec("layers.0.mlp.gate_proj", DenseFactorization(d_in=8, d_out=16, C=8), "gate")
     rules = from_config("zero1", mesh, (site,))
     batch = P(("replicate", "fsdp"), None, None)
     x_host = jnp.arange(2 * 4 * 8, dtype=jnp.float32).reshape(2, 4, 8) / 64
@@ -334,7 +377,7 @@ def test_component_delta_path_uses_one_u_and_preserves_value_and_gradients():
         mask: jax.Array,
         delta: jax.Array,
     ) -> jax.Array:
-        return site_forward(x, v, u, w, mask, delta, None, rules, frozen_plan).output
+        return site_forward(x, SiteWeights(w, v, u, frozen_plan, rules), mask, delta, None).output
 
     with jax.set_mesh(mesh):
         compiled = jax.jit(forward).lower(*args).compile()
@@ -382,8 +425,8 @@ def test_target_native_component_linears_match_megatron_column_and_row_waists():
         axis_types=(AxisType.Explicit,) * 3,
     )
     sites = (
-        SiteSpec("layers.0.mlp.gate_proj", 8, 16, 8, "gate"),
-        SiteSpec("layers.0.mlp.down_proj", 16, 8, 8, "down"),
+        SiteSpec("layers.0.mlp.gate_proj", DenseFactorization(d_in=8, d_out=16, C=8), "gate"),
+        SiteSpec("layers.0.mlp.down_proj", DenseFactorization(d_in=16, d_out=8, C=8), "down"),
     )
     rules = from_config("zero1", mesh, sites)
     batch = P(("replicate", "fsdp"), None, None)
@@ -433,14 +476,12 @@ def test_target_native_component_linears_match_megatron_column_and_row_waists():
         target = rules.target.column
         return site_forward(
             x,
-            v,
-            u,
-            w,
+            SiteWeights(
+                w, v, u, frozen_plan(target, P("fsdp", "tp")), plan(target, v.ndim, u.ndim)
+            ),
             mask,
             delta,
             None,
-            plan(target, v.ndim, u.ndim),
-            frozen_plan(target, P("fsdp", "tp")),
         ).output
 
     column_host = (
@@ -495,14 +536,12 @@ def test_target_native_component_linears_match_megatron_column_and_row_waists():
         target = rules.target.row
         return site_forward(
             x,
-            v,
-            u,
-            w,
+            SiteWeights(
+                w, v, u, frozen_plan(target, P("tp", "fsdp")), plan(target, v.ndim, u.ndim)
+            ),
             mask,
             delta,
             None,
-            plan(target, v.ndim, u.ndim),
-            frozen_plan(target, P("tp", "fsdp")),
         ).output
 
     row_host = (

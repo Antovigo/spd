@@ -20,20 +20,21 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
-import optax
 import pytest
 from jaxtyping import Array
 from pydantic import ValidationError
 
 from param_decomp.core.adversary import (
     PersistentAdversary,
+    SourceStacks,
     init_persistent_sources,
-    init_sources_adam_state,
+    init_sources_opt_state,
 )
-from param_decomp.core.ci_fn import LayerwiseMLPCIArch, build_ci_fn
+from param_decomp.core.ci_fn.implementations.layerwise_mlp import LayerwiseMLPCIFnArch
 from param_decomp.core.components import SiteC, init_component_stacks
 from param_decomp.core.configs import (
     AdamPGDConfig,
+    AdamWOptimizerConfig,
     HiddenPassConfig,
     ImportanceMinimalityLossConfig,
     MergedStochasticSubsetPPGDReconLossConfig,
@@ -43,14 +44,16 @@ from param_decomp.core.configs import (
     StochasticReconLossConfig,
     TargetedLossMetricConfig,
 )
+from param_decomp.core.losses import init_frequency_estimator
 from param_decomp.core.model import PlacedModel
 from param_decomp.core.objective import build_targeted_objective
 from param_decomp.core.recon import MixedPersistentStochasticSources, PersistentSources
+from param_decomp.core.run_state import _adamw_optimizer
 from param_decomp.core.schedule import ScheduleConfig
 from param_decomp.core.train import (
     Decomposition,
     ForwardSubstrate,
-    TrainingItem,
+    TargetedPDTrainingState,
     TrainState,
     make_targeted_train_step,
 )
@@ -66,6 +69,8 @@ from param_decomp.targets.tms import (
 
 SITES = (SiteC("linear1", 8), SiteC("linear2", 6))
 N_WARMUP = 1
+NONTARGET_BATCH = 16
+TOTAL_STEPS = 20
 
 
 def _adversary_optimizer() -> AdamPGDConfig:
@@ -76,7 +81,7 @@ def _persistent_cfg() -> PersistentPGDReconLossConfig:
     return PersistentPGDReconLossConfig(
         coeff=0.5,
         optimizer=_adversary_optimizer(),
-        source_shape="c",
+        source_shape="bc",
         n_warmup_steps=N_WARMUP,
     )
 
@@ -85,7 +90,7 @@ def _merged_cfg() -> MergedStochasticSubsetPPGDReconLossConfig:
     return MergedStochasticSubsetPPGDReconLossConfig(
         coeff=1.0,
         optimizer=_adversary_optimizer(),
-        source_shape="c",
+        source_shape="bc",
         n_warmup_steps=0,
         adv_fraction=ScheduleConfig.constant(0.5),
     )
@@ -106,75 +111,94 @@ def _setup(
     target = init_tms_target(cfg, jax.random.PRNGKey(0))
     model = PlacedModel(model=tms_decomposed_model(cfg, target, sites), placement=None)
     vu = init_component_stacks(sites, jax.random.PRNGKey(1))
-    ci_fn = build_ci_fn(
-        LayerwiseMLPCIArch(
-            hidden_dims=(16,),
-            has_position_axis=False,
-            input_names=site_input_tap_keys(tuple(s.name for s in sites)),
-            dual=hidden is not None,
-        ),
-        sites,
-        jax.random.PRNGKey(2),
-    )
-    objective = build_targeted_objective(
-        _loss_metrics(), nontarget, model.site_names, hidden=hidden
-    )
-    # The step asks TrainState.adversaries for every plan's state keys — build each
-    # non-target bundle at ITS pass's geometry: positionless `c` is `(1, C+1)` (T2).
+    ci_fn = LayerwiseMLPCIFnArch(
+        hidden_dims=(16,),
+        has_position_axis=False,
+        input_names=site_input_tap_keys(tuple(s.name for s in sites)),
+        dual=hidden is not None,
+    ).initialize(sites, None, jax.random.PRNGKey(2))
+    loss_metrics = _loss_metrics()
+    objective = build_targeted_objective(loss_metrics, nontarget, sites, hidden=hidden)
+    # The step asks the training state's adversaries for every plan's state key — build
+    # each non-target bundle at ITS pass's geometry: positionless `bc` is `(B,)` over the
+    # broad stream's batch (T2).
     nt_terms = objective.nontarget.recon + (
         objective.nontarget_hidden.recon if objective.nontarget_hidden is not None else ()
     )
     adversaries: dict[str, PersistentAdversary] = {}
     for term in nt_terms:
-        if True:  # one family per term since the dechunk (upstream #1000)
-            match term.sources:
-                case PersistentSources() | MixedPersistentStochasticSources():
-                    strategy = term.sources
-                case _:
-                    continue
-            sources = init_persistent_sources(
-                model.site_names,
-                tuple(s.C for s in sites),
-                (1,),
-                jnp.float32,
-                jax.random.PRNGKey(3),
-            )
-            adversaries[strategy.state_key] = PersistentAdversary(
-                sources=sources,
-                opt_state=init_sources_adam_state(sources),
-                state_key=strategy.state_key,
-                adam=strategy.cfg.optimizer,
-                n_warmup=strategy.cfg.n_warmup_steps,
-            )
-    opt_vu = optax.adamw(1e-3, weight_decay=0.0)
-    opt_ci = optax.adamw(1e-3, weight_decay=0.0)
+        match term.sources:
+            case PersistentSources() | MixedPersistentStochasticSources():
+                strategy = term.sources
+            case _:
+                continue
+        sources = init_persistent_sources(
+            sites, (NONTARGET_BATCH,), jnp.float32, jax.random.PRNGKey(3)
+        )
+        adversaries[strategy.state_key] = PersistentAdversary(
+            sources=sources,
+            opt_state=init_sources_opt_state(strategy.cfg.optimizer, sources),
+            state_key=strategy.state_key,
+            optimizer=strategy.cfg.optimizer,
+            n_warmup=strategy.cfg.n_warmup_steps,
+        )
+    optimizer_config = AdamWOptimizerConfig(lr_schedule=ScheduleConfig.constant(1e-3))
+    opt_vu = _adamw_optimizer(optimizer_config, TOTAL_STEPS)
+    opt_ci = _adamw_optimizer(optimizer_config, TOTAL_STEPS)
+    importance = next(
+        term for term in loss_metrics if isinstance(term, ImportanceMinimalityLossConfig)
+    )
+
+    def frequency():
+        return init_frequency_estimator(importance.frequency, sites)
+
     state = TrainState(
-        decomposition=Decomposition(components=vu, ci_fn=ci_fn),
-        training=TrainingItem(
+        decomposition=Decomposition[Array](components=vu, ci_fn=ci_fn),
+        training=TargetedPDTrainingState(
+            objective=objective,
+            target_frequency=frequency(),
+            nontarget_frequency=frequency(),
+            hidden_frequency=frequency() if objective.hidden is not None else None,
+            nontarget_hidden_frequency=(
+                frequency() if objective.nontarget_hidden is not None else None
+            ),
+            ci_scaled_weight_decay=None,
             components_opt_state=opt_vu.init(eqx.filter(vu, eqx.is_array)),
             ci_fn_opt_state=opt_ci.init(eqx.filter(ci_fn, eqx.is_array)),
             adversaries=adversaries,
-            freq_ema=None,
             step=jnp.zeros((), jnp.int32),
         ),
     )
-    step = make_targeted_train_step(
-        model_static=model,
-        substrate=ForwardSubstrate.of(
+    step = jax.jit(
+        make_targeted_train_step(
             model,
-            remat_recon_forwards=False,
-            remat_ci_fn=False,
-            ci_capture_keys=ci_fn.capture_keys,
-            ci_placement=None,
-        ),
-        objective=objective,
-        ci_scaled_weight_decay=None,
-        components_optimizer=opt_vu,
-        ci_fn_optimizer=opt_ci,
-        total_steps=20,
-        sequential_passes=sequential,
+            substrate=ForwardSubstrate.of(
+                model,
+                remat_recon_forwards=False,
+                remat_ci_fn=False,
+                ci_capture_keys=ci_fn.capture_keys,
+            ),
+            components_optimizer=opt_vu,
+            ci_fn_optimizer=opt_ci,
+            total_steps=TOTAL_STEPS,
+            sequential_passes=sequential,
+        )
     )
     return cfg, state, step
+
+
+def _host_sources(sources: SourceStacks) -> list[np.ndarray]:
+    """The stored source leaves, copied off-device (the step donates its input state)."""
+    return [np.asarray(leaf) for leaf in jax.tree.leaves(sources)]
+
+
+def _sources_moved(before: list[np.ndarray], after: SourceStacks) -> bool:
+    return any(not np.allclose(b, a) for b, a in zip(before, _host_sources(after), strict=True))
+
+
+def _assert_projected(sources: SourceStacks) -> None:
+    for arr in _host_sources(sources):
+        assert arr.min() >= 0.0 and arr.max() <= 1.0, "S15: sources must stay projected"
 
 
 def _model_of():
@@ -192,7 +216,11 @@ def _batches(cfg: TMSConfig, i: int = 0) -> tuple[Array, Array]:
     )
     target_batch = scatter_features(narrow, (0, 1), cfg.n_features)
     broad = sample_sparse_features(
-        jax.random.fold_in(jax.random.PRNGKey(11), i), 16, 5, 0.3, "at_least_zero_active"
+        jax.random.fold_in(jax.random.PRNGKey(11), i),
+        NONTARGET_BATCH,
+        5,
+        0.3,
+        "at_least_zero_active",
     )
     return target_batch, broad
 
@@ -201,32 +229,23 @@ def test_nontarget_persistent_term_trains_its_adversary():
     """The bundle updates S13'-style: `n_warmup + 1` moment steps per training step, the
     final one riding the shared backward (S14') — off-target, delta pinned (T4)."""
     nontarget = NontargetConfig(
-        batch_size=16,
+        batch_size=NONTARGET_BATCH,
         impmin_coeff=6e-3,
         recon=[StochasticReconLossConfig(coeff=1.0), _persistent_cfg()],
     )
     cfg, state, step = _setup(nontarget)
     state_key = "nontarget/PersistentPGDReconLoss"
-    before = jax.tree.map(np.asarray, state.training.adversaries[state_key].sources)
+    before = _host_sources(state.training.adversaries[state_key].sources)
 
     target_batch, broad = _batches(cfg)
     new_state, metrics = step(_model_of(), state, target_batch, broad, jax.random.PRNGKey(7))
     adv = new_state.training.adversaries[state_key]
 
     assert int(adv.opt_state.step_count) == N_WARMUP + 1
-    moved = any(
-        # `Sources` is a SiteSource(components, delta) record since #1000 — compare channels.
-        not np.allclose(before[site].components, np.asarray(adv.sources[site].components))
-        or not np.allclose(before[site].delta, np.asarray(adv.sources[site].delta))
-        for site in ("linear1", "linear2")
-    )
+    # Every stored channel (component and weight-delta sources, every site's stack).
+    moved = _sources_moved(before, adv.sources)
     assert moved, "the non-target adversary's sources never moved"
-    for site in ("linear1", "linear2"):
-        for arr in (
-            np.asarray(adv.sources[site].components),
-            np.asarray(adv.sources[site].delta),
-        ):
-            assert arr.min() >= 0.0 and arr.max() <= 1.0, "S15: sources must stay projected"
+    _assert_projected(adv.sources)
     assert "nontarget_data/loss/PersistentPGDReconLoss" in metrics
     assert "nontarget_data/loss/StochasticReconLoss" in metrics
 
@@ -239,22 +258,20 @@ def test_nontarget_persistent_term_trains_its_adversary():
 def test_nontarget_merged_term_steps_with_zero_warmup():
     """The S34 merge off-target: one masked forward, no warmup ascents — the bundle's one
     update per step is the S14' final ascent, gated to adversarial-assigned samples."""
-    nontarget = NontargetConfig(batch_size=16, impmin_coeff=6e-3, recon=[_merged_cfg()])
+    nontarget = NontargetConfig(
+        batch_size=NONTARGET_BATCH, impmin_coeff=6e-3, recon=[_merged_cfg()]
+    )
     cfg, state, step = _setup(nontarget)
     state_key = "nontarget/MergedStochasticSubsetPPGDReconLoss"
-    before = jax.tree.map(np.asarray, state.training.adversaries[state_key].sources)
+    before = _host_sources(state.training.adversaries[state_key].sources)
 
     target_batch, broad = _batches(cfg)
     new_state, metrics = step(_model_of(), state, target_batch, broad, jax.random.PRNGKey(7))
     adv = new_state.training.adversaries[state_key]
 
     assert int(adv.opt_state.step_count) == 1  # final ascent only: n_warmup == 0
-    moved = any(
-        # `Sources` is a SiteSource(components, delta) record since #1000 — compare channels.
-        not np.allclose(before[site].components, np.asarray(adv.sources[site].components))
-        or not np.allclose(before[site].delta, np.asarray(adv.sources[site].delta))
-        for site in ("linear1", "linear2")
-    )
+    # Every stored channel (component and weight-delta sources, every site's stack).
+    moved = _sources_moved(before, adv.sources)
     assert moved
     assert "nontarget_data/loss/MergedStochasticSubsetPPGDReconLoss" in metrics
 
@@ -267,7 +284,7 @@ def test_sequential_and_fused_agree_with_nontarget_adversaries(
 ):
     """T1 with the amended arms in the graph: identical loss scalars either scheduling."""
     nontarget = NontargetConfig(
-        batch_size=16,
+        batch_size=NONTARGET_BATCH,
         impmin_coeff=6e-3,
         recon=[StochasticReconLossConfig(coeff=1.0), make_cfg()],
     )
@@ -297,7 +314,7 @@ def test_nontarget_hidden_refuses_standalone_persistent_type():
                             "type": "adam",
                             "lr_schedule": {"max_val": 0.05, "points": [{"at": 0.0, "frac": 1.0}]},
                         },
-                        "source_shape": "c",
+                        "source_shape": "bc",
                     }
                 ],
             }
@@ -318,7 +335,7 @@ def test_nontarget_hidden_refuses_standalone_persistent_type():
                             "points": [{"at": 0.0, "frac": 1.0}, {"at": 1.0, "frac": 1.0}],
                         },
                     },
-                    "source_shape": "c",
+                    "source_shape": "bc",
                 }
             ],
         }
@@ -345,33 +362,24 @@ def test_nontarget_hidden_merged_term_trains_its_adversary():
     (n_warmup 0), stays projected (S15), and reports under the composed
     stream x role namespace."""
     nontarget = NontargetConfig(
-        batch_size=16,
+        batch_size=NONTARGET_BATCH,
         impmin_coeff=6e-3,
         recon=[StochasticReconLossConfig(coeff=1.0)],
         hidden=NontargetHiddenConfig(impmin_coeff=6e-3, recon=[_merged_cfg()]),
     )
     cfg, state, step = _setup(nontarget, hidden=_target_hidden())
     state_key = "nontarget_hidden/MergedStochasticSubsetPPGDReconLoss"
-    before = jax.tree.map(np.asarray, state.training.adversaries[state_key].sources)
+    before = _host_sources(state.training.adversaries[state_key].sources)
 
     target_batch, broad = _batches(cfg)
     new_state, metrics = step(_model_of(), state, target_batch, broad, jax.random.PRNGKey(7))
     adv = new_state.training.adversaries[state_key]
 
     assert int(adv.opt_state.step_count) == 1  # final ascent only: n_warmup == 0
-    moved = any(
-        # `Sources` is a SiteSource(components, delta) record since #1000 — compare channels.
-        not np.allclose(before[site].components, np.asarray(adv.sources[site].components))
-        or not np.allclose(before[site].delta, np.asarray(adv.sources[site].delta))
-        for site in ("linear1", "linear2")
-    )
+    # Every stored channel (component and weight-delta sources, every site's stack).
+    moved = _sources_moved(before, adv.sources)
     assert moved, "the non-target hidden adversary's sources never moved"
-    for site in ("linear1", "linear2"):
-        for arr in (
-            np.asarray(adv.sources[site].components),
-            np.asarray(adv.sources[site].delta),
-        ):
-            assert arr.min() >= 0.0 and arr.max() <= 1.0, "S15: sources must stay projected"
+    _assert_projected(adv.sources)
     assert "nontarget_data/hidden_ci/loss/MergedStochasticSubsetPPGDReconLoss" in metrics
 
 
@@ -384,7 +392,7 @@ def test_sequential_and_fused_agree_with_nontarget_hidden_merged_term():
     codegen, while every logged component stays bit-equal (a dropped or double-counted
     pass would move `total` by far more than rounding)."""
     nontarget = NontargetConfig(
-        batch_size=16,
+        batch_size=NONTARGET_BATCH,
         impmin_coeff=6e-3,
         recon=[StochasticReconLossConfig(coeff=1.0)],
         hidden=NontargetHiddenConfig(impmin_coeff=6e-3, recon=[_merged_cfg()]),

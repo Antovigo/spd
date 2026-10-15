@@ -166,7 +166,8 @@ decomposition:
       n_heads: 8
       # `xla`, as the L40 line: see target.attention_implementation. MEASURED on the
       # Runpod H100 pod 2026-09-10 — `auto` does not load there.
-      attention_implementation: xla
+      implementation: xla
+      mask: bidirectional  # the pre-017a17af4 CI attention was implicitly bidirectional
     ffn:
       kind: gelu
       hidden: 2048
@@ -447,6 +448,8 @@ cadence:
       kind: keep_last
       n: 2
 target:
+  output_edge:
+    kind: materialized  # the pre-017a17af4 behaviour: full logits every forward
   # `xla`, NOT `auto`. This was authored `auto` on the theory that the L40 line's `xla`
   # was a pre-CUDA-12.8-driver workaround and H100 + a modern driver would take cuDNN flash
   # attention. MEASURED FALSE on a Runpod 4x H100 pod, 2026-09-10 (driver 580.126.09,
@@ -478,16 +481,17 @@ runtime:
   # `~` expands to the pod user's home; the guide symlinks it onto the network volume so
   # the multi-minute compile survives a pod restart.
   compilation_cache_dir: ~/.cache/param-decomp/xla
-  compiler_options: tuned-v1
+  compiler_options: tuned-v2  # tuned-v1 retired upstream (jaxlib 0.11)
   # The explicit (replicate, fsdp, tp) mesh — 8 GPUs. PENDING THE LADDER: set the winner of
   # `mesh-c` (replicate 2 / fsdp 4) vs `mesh-b` (replicate 1 / fsdp 8) here before launch.
   # Both shard optimizer state 8-way under `zero1`; they differ in how the frozen target and
   # compute weights are sharded and gathered (over NVLink either way). Header has the memory
   # argument against the 1-block line's `replicate 8 / fsdp 1 / ddp`.
-  replicate: 1
-  fsdp: 8
-  tp: 1
-  # `zero1`, NOT `ddp`: see the header. NEVER `zero1` at `fsdp: 1` (report §8.5).
+  mesh:
+    replicate: 1
+    fsdp: 8
+    tp: 1
+    # `zero1`, NOT `ddp`: see the header. NEVER `zero1` at `fsdp: 1` (report §8.5).
   sharding: zero1
   remat_recon_forwards: true
   remat_ci_fn: true

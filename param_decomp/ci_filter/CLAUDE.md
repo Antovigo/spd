@@ -32,11 +32,17 @@ switch off per prompt. Target stream only: no non-target pass, no hidden-activat
   or a filter's CI fn under all-on / alive-union / dead-only / per-prompt / per-prompt+dead
   masks, weight delta off.
 - `grid.py` + `grids_app.html` — the `(a, b)`-grid applet over every operation x position,
-  one lazily loaded file per slice (payload format of `experiments/lm/ab_grid_dataset.py`).
+  one lazily loaded file per slice (payload format of `experiments/lm/ab_grid_dataset.py`); a
+  grid wider than 100 on a side is written SPLIT like the run's own ab_grids (4x4-mean
+  thumbnails in the slice file, full grids in `<op>_pos<t>/<site>.js`, loaded on click;
+  `scripts/split_grids.py` converts older whole-grid slices). `alive.html` is the same page
+  plus the ALIVE-ONLY model's inner activations (rounded CI, delta off, normalized by ||V_c||)
+  as a view and a detail pane, read from `ab_grids/alive/` — written from the filter's
+  `dataset/` by `scripts/alive_grids.py` (no forward pass).
 - `checkpoint.py` — orbax save/restore of the fine-tuned CI fn (chains objective 2 onto 1), and
   `starting_ci` / `trained_ci`: the CI fn a filter starts from and the constraints capping it.
 - `paths.py` — the analysis layout, in its module docstring: filtering runs in
-  `<run_dir>/analysis/ci_filter/step_<step>/<cf-id>/` (retired ones in `Trash/`), and EVERY
+  `<run_dir>/<cf-id>-<step>/` (retired ones in `<run_dir>/Trash/`), and EVERY
   ablation study — screens, sweeps, model ablation, the non-target probe, mask ablations, the
   per-component table — in `<run_dir>/analysis/ablations/step_<step>/` (`ablations_dir`).
 - `scripts/run_ci_filter.py` — entry point.

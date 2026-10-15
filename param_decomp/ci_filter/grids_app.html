@@ -20,7 +20,22 @@
   #detail .panes { display: flex; flex-direction: column; gap: 16px; align-items: center; }
   #detail h3 { margin: 0 0 10px; font-size: 14px; }
   #detail .pane { text-align: center; }
-  #detail .pane .cap { color: var(--muted); margin-top: 4px; }
+  #detail .pane .cap { color: var(--fg); font-weight: 600; margin-bottom: 4px; }
+  /* detail-plot axes: a (rows, top = a_min) on the left, b (columns) along the bottom */
+  .ax { display: grid; grid-template-columns: 14px 30px auto; grid-template-rows: auto 16px 14px;
+        font: 10px ui-monospace, monospace; color: var(--muted); }
+  .ax .ylab { grid-column: 1; grid-row: 1; writing-mode: vertical-rl; transform: rotate(180deg);
+              text-align: center; font: italic 12px serif; color: var(--fg); }
+  .ax .yt { grid-column: 2; grid-row: 1; position: relative; }
+  .ax .plot { grid-column: 3; grid-row: 1; position: relative; }
+  .ax .xt { grid-column: 3; grid-row: 2; position: relative; }
+  .ax .xlab { grid-column: 3; grid-row: 3; text-align: center; font: italic 12px serif; color: var(--fg); }
+  .ax .yt span { position: absolute; right: 0; transform: translateY(-50%); }
+  .ax .yt span::after { content: ""; display: inline-block; width: 4px; height: 1px;
+                        background: var(--muted); vertical-align: middle; margin-left: 2px; }
+  .ax .xt span { position: absolute; top: 0; transform: translateX(-50%); padding-top: 4px; }
+  .ax .xt span::before { content: ""; position: absolute; left: 50%; top: 0; width: 1px; height: 4px;
+                         background: var(--muted); }
   #readout { font-family: ui-monospace, monospace; margin-top: 10px; min-height: 1.3em;
              white-space: pre-wrap; }
   #gallery { padding: 10px 16px; }
@@ -68,12 +83,14 @@
 <div id="detail">
   <h3 id="dtitle"></h3>
   <div class="panes">
-    <div class="pane"><canvas id="dci"></canvas><div class="cap">CI (output)</div></div>
-    <div class="pane" id="dhidpane" style="display:none"><canvas id="dcihidden"></canvas>
-      <div class="cap">CI (hidden)</div></div>
-    <div class="pane" id="dmergepane" style="display:none"><canvas id="dcimerge"></canvas>
-      <div class="cap">merge</div></div>
-    <div class="pane"><canvas id="dinner"></canvas><div class="cap">inner act</div></div>
+    <div class="pane"><div class="cap">CI (output)</div><div class="ax"><div class="ylab">a</div><div class="yt"></div><div class="plot"><canvas id="dci"></canvas></div><div class="xt"></div><div class="xlab">b</div></div></div>
+    <div class="pane" id="dhidpane" style="display:none"><div class="cap">CI (hidden)</div>
+      <div class="ax"><div class="ylab">a</div><div class="yt"></div><div class="plot"><canvas id="dcihidden"></canvas></div><div class="xt"></div><div class="xlab">b</div></div></div>
+    <div class="pane" id="dmergepane" style="display:none"><div class="cap">merge</div>
+      <div class="ax"><div class="ylab">a</div><div class="yt"></div><div class="plot"><canvas id="dcimerge"></canvas></div><div class="xt"></div><div class="xlab">b</div></div></div>
+    <div class="pane"><div class="cap">inner act (full model)</div><div class="ax"><div class="ylab">a</div><div class="yt"></div><div class="plot"><canvas id="dinner"></canvas></div><div class="xt"></div><div class="xlab">b</div></div></div>
+    <div class="pane" id="dalivepane" style="display:none"><div class="cap">inner act (alive-only model)</div>
+      <div class="ax"><div class="ylab">a</div><div class="yt"></div><div class="plot"><canvas id="dinneralive"></canvas></div><div class="xt"></div><div class="xlab">b</div></div></div>
   </div>
   <div id="readout"></div>
 </div>
@@ -124,21 +141,55 @@ function b64F16(s) {
 const ciRoles = () => cur.ci_roles || ["output"];
 const hasHidden = () => ciRoles().includes("hidden");
 
-// Decoded per-module caches for the current payload (u8 CI per role, f32 inner, f32 mean CI).
+// Decoded per-module caches for the current payload (u8 CI per role, f32 inner, f32 mean CI),
+// each carrying the (n_a, n_b) of the grids it holds. A SPLIT slice (`thumb` present: a grid
+// wider than 100 on a side) holds pooled thumbnails here; its full-resolution grids live in
+// one file per module, loaded on demand for the detail drawer (`fullData`).
 const dec = new Map();
 function moduleData(mi) {
   const key = curKey + ":" + mi;
   if (!dec.has(key)) {
-    const m = cur.modules[mi];
+    const m = cur.modules[mi], t = cur.thumb;
+    const [ci, ciHidden, inner] = t ? [m.ci_thumb, m.ci_hidden_thumb, m.inner_thumb] : [m.ci, m.ci_hidden, m.inner];
     dec.set(key, {
       meanCi: b64F32(m.mean_ci),
       meanCiHidden: m.mean_ci_hidden ? b64F32(m.mean_ci_hidden) : null,
-      ci: m.ci ? b64Bytes(m.ci) : null,
-      ciHidden: m.ci_hidden ? b64Bytes(m.ci_hidden) : null,
-      inner: m.inner ? b64F16(m.inner) : null,
+      ci: ci ? b64Bytes(ci) : null,
+      ciHidden: ciHidden ? b64Bytes(ciHidden) : null,
+      inner: inner ? b64F16(inner) : null,
+      n_a: t ? t.n_a : cur.n_a, n_b: t ? t.n_b : cur.n_b,
     });
   }
   return dec.get(key);
+}
+
+// Full-resolution module grids of a split slice, keyed "slice:name". The module file calls
+// registerABGridModule, which re-renders the drawer if that module is still being inspected.
+const full = new Map(), requested = new Set(), FULL_KEEP = 6;
+window.registerABGridModule = doc => {
+  const key = doc.slice + ":" + doc.name, p = cache.get(doc.slice);
+  if (!p) return;
+  full.set(key, {
+    ci: b64Bytes(doc.ci), ciHidden: doc.ci_hidden ? b64Bytes(doc.ci_hidden) : null,
+    inner: b64F16(doc.inner), n_a: p.n_a, n_b: p.n_b,
+  });
+  requested.delete(key);
+  while (full.size > FULL_KEEP) full.delete(full.keys().next().value);
+  if (curKey === doc.slice && selected && cur.modules[selected.mi].name === doc.name) renderDetail();
+};
+function fullData(mi) {
+  if (!cur.thumb) return moduleData(mi);
+  const m = cur.modules[mi], key = curKey + ":" + m.name;
+  if (full.has(key)) return full.get(key);
+  if (!requested.has(key)) {
+    requested.add(key);
+    const tag = document.createElement("script");
+    tag.src = m.file;
+    tag.onload = () => tag.remove();
+    tag.onerror = () => { requested.delete(key); $("readout").textContent = `failed to load ${m.file}`; };
+    document.body.append(tag);
+  }
+  return null;
 }
 
 const lerp = (a, b, t) => a + (b - a) * t;
@@ -152,14 +203,14 @@ const DIV_STOPS = [[5,48,97],[146,197,222],[247,247,247],[244,165,130],[103,0,31
 
 function pxValue() { return Math.max(1, +$("px").value | 0); }
 
-// value accessor into [comp, pos, op, a, b] flattened grids
-function gridIndex(si, pi, oi, ai, bi) {
+// value accessor into [comp, pos, op, a, b] flattened grids of `dims.n_a x dims.n_b`
+function gridIndex(si, pi, oi, ai, bi, dims) {
   const nPos = cur.positions.length, nOps = cur.ops.length;
-  return (((si * nPos + pi) * nOps + oi) * cur.n_a + ai) * cur.n_b + bi;
+  return (((si * nPos + pi) * nOps + oi) * dims.n_a + ai) * dims.n_b + bi;
 }
 
-function drawGrid(canvas, getVal, colour, px) {
-  const { n_a, n_b } = cur;
+function drawGrid(canvas, getVal, colour, px, dims) {
+  const { n_a, n_b } = dims;
   canvas.width = n_b; canvas.height = n_a;
   canvas.style.width = n_b * px + "px"; canvas.style.height = n_a * px + "px";
   const g = canvas.getContext("2d"), img = g.createImageData(n_b, n_a);
@@ -173,8 +224,8 @@ function drawGrid(canvas, getVal, colour, px) {
 
 function innerScale(data, si, pi, oi) {
   let mx = 0;
-  for (let ai = 0; ai < cur.n_a; ai++) for (let bi = 0; bi < cur.n_b; bi++) {
-    const v = data.inner[gridIndex(si, pi, oi, ai, bi)];
+  for (let ai = 0; ai < data.n_a; ai++) for (let bi = 0; bi < data.n_b; bi++) {
+    const v = data.inner[gridIndex(si, pi, oi, ai, bi, data)];
     if (!Number.isNaN(v)) mx = Math.max(mx, Math.abs(v));
   }
   return mx || 1;
@@ -187,22 +238,32 @@ const mergeRgb = ([out, hid]) => [
   Math.round(255 * (1 - hid)), Math.round(255 * (1 - out)), Math.round(255 * (1 - hid)),
 ];
 
-function tileDrawers(mi, si, pi, oi) {
-  const data = moduleData(mi);
-  const at = (ai, bi) => gridIndex(si, pi, oi, ai, bi);
+function tileDrawers(mi, si, pi, oi, data = moduleData(mi)) {
+  const at = (ai, bi) => gridIndex(si, pi, oi, ai, bi, data);
   const ciVal = (ai, bi) => data.ci[at(ai, bi)] / 255;
   const ciHiddenVal = data.ciHidden ? (ai, bi) => data.ciHidden[at(ai, bi)] / 255 : null;
   const innerVal = (ai, bi) => data.inner[at(ai, bi)];
   const mx = data.inner ? innerScale(data, si, pi, oi) : 1;
   const drawers = {
-    ci: cv => drawGrid(cv, ciVal, v => ramp(CI_STOPS, v), cv.dataset.px | 0),
-    inner: cv => drawGrid(cv, innerVal, v => ramp(DIV_STOPS, 0.5 + v / (2 * mx)), cv.dataset.px | 0),
-    ciVal, ciHiddenVal, innerVal,
+    ci: cv => drawGrid(cv, ciVal, v => ramp(CI_STOPS, v), cv.dataset.px | 0, data),
+    inner: cv => drawGrid(cv, innerVal, v => ramp(DIV_STOPS, 0.5 + v / (2 * mx)), cv.dataset.px | 0, data),
+    ciVal, ciHiddenVal, innerVal, innerAliveVal: null,
   };
+  // The alive-only grid at the same resolution as `data` (thumbnail or full).
+  const alive = aliveColumn(mi, si, data);
+  if (alive) {
+    drawers.innerAliveVal = alive.val;
+    drawers.inner_alive = cv =>
+      drawGrid(cv, alive.val, v => ramp(DIV_STOPS, 0.5 + v / (2 * alive.mx)), cv.dataset.px | 0, data);
+  } else {
+    // Not loaded, or never on at this position in the alive-only model (not cached): grey.
+    drawers.innerAliveVal = () => NaN;
+    drawers.inner_alive = cv => drawGrid(cv, () => NaN, () => [0, 0, 0], cv.dataset.px | 0, data);
+  }
   if (ciHiddenVal) {
-    drawers.ci_hidden = cv => drawGrid(cv, ciHiddenVal, v => ramp(CI_STOPS, v), cv.dataset.px | 0);
+    drawers.ci_hidden = cv => drawGrid(cv, ciHiddenVal, v => ramp(CI_STOPS, v), cv.dataset.px | 0, data);
     drawers.ci_merge = cv =>
-      drawGrid(cv, (ai, bi) => [ciVal(ai, bi), ciHiddenVal(ai, bi)], mergeRgb, cv.dataset.px | 0);
+      drawGrid(cv, (ai, bi) => [ciVal(ai, bi), ciHiddenVal(ai, bi)], mergeRgb, cv.dataset.px | 0, data);
   }
   return drawers;
 }
@@ -306,16 +367,24 @@ function renderDetail() {
   document.body.classList.add("drawer-open");
   const pi = 0, oi = 0;
   $("dtitle").textContent = `${selected.name} · component ${selected.c} · op ${cur.ops[oi]} · position ${positionLabel(cur.positions[pi])}`;
-  const drawers = tileDrawers(selected.mi, selected.si, pi, oi);
+  // A split slice draws the pooled thumbnail until the module's full grids arrive.
+  const fullGrids = fullData(selected.mi), loading = !fullGrids;
+  const drawers = tileDrawers(selected.mi, selected.si, pi, oi, fullGrids || moduleData(selected.mi));
+  const factor = cur.thumb && !loading ? cur.thumb.factor : 1;
+  $("readout").textContent = loading ? "loading the full-resolution grid…" : "";
   $("dhidpane").style.display = drawers.ci_hidden ? "block" : "none";
   $("dmergepane").style.display = drawers.ci_merge ? "block" : "none";
+  $("dalivepane").style.display = window.ALIVE_MODE ? "block" : "none";
   const panes = [["dci", "ci"], ["dinner", "inner"]];
+  if (window.ALIVE_MODE) panes.push(["dinneralive", "inner_alive"]);
   if (drawers.ci_hidden) panes.push(["dcihidden", "ci_hidden"], ["dcimerge", "ci_merge"]);
   for (const [id, kind] of panes) {
     const cv = $(id);
-    cv.dataset.px = pxValue() * 2;
+    cv.dataset.px = Math.max(1, Math.round(pxValue() * 2 / factor));
     drawers[kind](cv);
+    drawAxes(cv);
     cv.onmousemove = ev => {
+      if (loading) return;
       const r = cv.getBoundingClientRect();
       const bi = Math.floor((ev.clientX - r.left) / r.width * cur.n_b);
       const ai = Math.floor((ev.clientY - r.top) / r.height * cur.n_a);
@@ -323,7 +392,8 @@ function renderDetail() {
       const a = cur.a_min + ai, b = cur.b_min + bi;
       const hid = drawers.ciHiddenVal ? `   CI_hidden=${drawers.ciHiddenVal(ai, bi).toFixed(3)}` : "";
       $("readout").textContent =
-        `a=${a} ${cur.ops[oi]} b=${b}   CI=${drawers.ciVal(ai, bi).toFixed(3)}${hid}   inner=${drawers.innerVal(ai, bi).toFixed(4)}`;
+        `a=${a} ${cur.ops[oi]} b=${b}   CI=${drawers.ciVal(ai, bi).toFixed(3)}${hid}   inner=${drawers.innerVal(ai, bi).toFixed(4)}` +
+        (window.ALIVE_MODE ? `   inner_alive=${drawers.innerAliveVal(ai, bi).toFixed(4)}` : "");
     };
   }
   // Keep the gallery clear of the drawer (its width follows the canvas size).
@@ -341,23 +411,116 @@ document.addEventListener("click", ev => {
 
 function render() { renderGallery(); renderDetail(); }
 
+// Ticks at multiples of a round step over the operand range (a, b are integers), placed at
+// the centre of that value's cell; 0 sits on the edge just before a_min = 1.
+function ticks(min, n) {
+  const step = n > 150 ? 100 : n > 60 ? 20 : n > 25 ? 10 : 5, out = [];
+  for (let v = Math.ceil((min - 1) / step) * step; v <= min + n - 1; v += step) out.push(v);
+  return out;
+}
+function drawAxes(cv) {
+  const frame = cv.closest(".ax");
+  if (!frame) return;
+  const w = parseFloat(cv.style.width), h = parseFloat(cv.style.height);
+  const pos = (v, min, n, len) => Math.min(len, Math.max(0, (v - min + 0.5) / n * len));
+  frame.querySelector(".yt").innerHTML = ticks(cur.a_min, cur.n_a)
+    .map(v => `<span style="top:${pos(v, cur.a_min, cur.n_a, h)}px">${v}</span>`).join("");
+  frame.querySelector(".xt").innerHTML = ticks(cur.b_min, cur.n_b)
+    .map(v => `<span style="left:${pos(v, cur.b_min, cur.n_b, w)}px">${v}</span>`).join("");
+}
+
+// ---- alive-only inner activations (`alive.html` = this page with ALIVE_MODE set). The
+// files under `alive/` mirror the slice files (`scripts/alive_grids.py`, from the filter's
+// activation dataset): per slice, each module's saved components in the slice's own order,
+// the ALIVE-ONLY model's normalized inner `(x . V_c) / ||V_c||` (rounded CI masks, weight
+// delta off); NaN (grey) where a component is never on at that position in that model, so
+// it was not cached. A split slice ships thumbnails there and full grids per module.
+const aliveCache = new Map();   // slice key -> registered doc
+const aliveFull = new Map(), aliveReq = new Set();
+let aliveSlice = null;          // the current slice's doc
+const aliveDec = new Map();     // "slice:name[:full]" -> Float32Array
+
+window.registerAliveSlice = doc => {
+  aliveCache.set(doc.slice, doc);
+  while (aliveCache.size > 2) aliveCache.delete(aliveCache.keys().next().value);
+  if (doc.slice === curKey) { aliveSlice = doc; render(); }
+};
+window.registerAliveModule = doc => {
+  const key = doc.slice + ":" + doc.name;
+  aliveFull.set(key, b64F16(doc.inner));
+  aliveReq.delete(key);
+  while (aliveFull.size > FULL_KEEP) aliveFull.delete(aliveFull.keys().next().value);
+  if (curKey === doc.slice && selected && cur.modules[selected.mi].name === doc.name) renderDetail();
+};
+
+function loadAliveSlice() {
+  aliveSlice = null;
+  aliveDec.clear();
+  if (!window.ALIVE_MODE || !curKey) return;
+  if (aliveCache.has(curKey)) { aliveSlice = aliveCache.get(curKey); render(); return; }
+  const tag = document.createElement("script");
+  tag.src = "alive/" + SLICES.files[curKey];
+  tag.onload = () => tag.remove();
+  tag.onerror = () => { $("count").textContent = `missing alive/${SLICES.files[curKey]}`; };
+  document.body.append(tag);
+}
+
+// `{val, mx}` for component si of module mi at the resolution of `dims`, or null (not loaded).
+function aliveColumn(mi, si, dims) {
+  if (!aliveSlice || aliveSlice.slice !== curKey) return null;
+  const name = cur.modules[mi].name, mod = aliveSlice.modules[name];
+  if (!mod) return null;
+  const isFull = !cur.thumb || (dims.n_a === cur.n_a && dims.n_b === cur.n_b);
+  let arr;
+  if (isFull && cur.thumb) {
+    const key = curKey + ":" + name;
+    arr = aliveFull.get(key);
+    if (!arr) {
+      if (!aliveReq.has(key)) {
+        aliveReq.add(key);
+        const tag = document.createElement("script");
+        tag.src = "alive/" + mod.file;
+        tag.onload = () => tag.remove();
+        document.body.append(tag);
+      }
+      return null;
+    }
+  } else {
+    const key = curKey + ":" + name;
+    if (!aliveDec.has(key)) aliveDec.set(key, b64F16(mod.inner));
+    arr = aliveDec.get(key);
+  }
+  const cells = dims.n_a * dims.n_b, base = si * cells, nb = dims.n_b;
+  let mx = 0;
+  for (let i = 0; i < cells; i++) { const v = arr[base + i]; if (!Number.isNaN(v)) mx = Math.max(mx, Math.abs(v)); }
+  return { val: (ai, bi) => arr[base + ai * nb + bi], mx: mx || 1 };
+}
+
 const VIEW_OPTIONS = {
   ci_merge: "CI merge (out/hid)",
   ci: "CI (output)",
   ci_hidden: "CI (hidden)",
-  inner: "inner act",
+  inner: "inner act (full model)",
+  inner_alive: "inner act (alive-only model)",
 };
 
+const AXIS_NOTE = document.querySelector(".axis-note").textContent;
 function setPayload(key, payload) {
   cur = payload;
   curKey = key;
   dec.clear();
+  const t = payload.thumb;
+  document.querySelector(".axis-note").textContent = AXIS_NOTE + (t
+    ? ` — gallery tiles are ${t.factor}×${t.factor}-cell means of the ${payload.n_a}×${payload.n_b} grid; click one for the full resolution`
+    : "");
   const viewSel = $("view"), keepView = viewSel.value;
-  const views = hasHidden() ? ["ci_merge", "ci", "ci_hidden", "inner"] : ["ci", "inner"];
+  const views = (hasHidden() ? ["ci_merge", "ci", "ci_hidden", "inner"] : ["ci", "inner"])
+    .concat(window.ALIVE_MODE ? ["inner_alive"] : []);
   viewSel.innerHTML = views.map(v => `<option value="${v}">${VIEW_OPTIONS[v]}</option>`).join("");
-  viewSel.value = views.includes(keepView) ? keepView : views[0];
+  viewSel.value = views.includes(keepView) ? keepView : window.ALIVE_MODE ? "inner_alive" : views[0];
   $("count").textContent = "";
   render();
+  loadAliveSlice();
 }
 
 function loadSelected() {
