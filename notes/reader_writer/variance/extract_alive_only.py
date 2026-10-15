@@ -26,7 +26,6 @@ import numpy as np
 from jax.sharding import PartitionSpec as P
 from numpy.lib.format import open_memmap
 
-from param_decomp.ci_filter.checkpoint import trained_ci
 from param_decomp.ci_filter.config import CIFilterConfig
 from param_decomp.ci_filter.objective import kl_rows
 from param_decomp.ci_filter.paths import CIFilterOutputs
@@ -35,7 +34,6 @@ from param_decomp.ci_filter.step import (
     all_logits,
     gather_batch,
     prepare_components,
-    remove_components,
 )
 from param_decomp.core.components import require_full_emission
 from param_decomp.core.model import MaterializedMasking
@@ -71,18 +69,20 @@ def main() -> None:
     sites = {(b, k): f"layers.{b}.mlp.{k}_proj" for b in range(N_LAYER) for k in KINDS}
 
     restored = restore_jax_run(RUN_DIR, STEP, data_root=DATA_ROOT)
-    placed, mesh = restored.placed, restored.mesh
+    placed, mesh, components = restored.placed, restored.mesh, restored.components
     pool = build_pool(config.pool, load_tokenizer(restored.deliverable.target.model_name))
+    del restored  # its CI fn is not needed: the masks are fixed (one A40 has no room for it)
     n = pool.n_prompts if args.limit is None else args.limit
     assert pool.seq_len == 5, pool.seq_len
+    # The filter's removed components (`alive/kept.npz`) are never alive, and every non-alive
+    # component is masked to 0, so the filter's pruning (`remove_components`) changes nothing
+    # here; checked instead of applied, which saves a copy of the components.
+    if outputs.kept.exists():
+        with np.load(outputs.kept) as kept:
+            for s, ids in alive.items():
+                assert kept[s][ids].all(), f"{s}: an alive component is a removed one"
 
     with jax.set_mesh(mesh):
-        _, constraints = trained_ci(RUN_DIR, STEP, FILTER, restored.ci_fn)
-        components = (
-            restored.components
-            if constraints.kept is None
-            else remove_components(restored.components, constraints.kept)
-        )
         assert set(alive) == set(placed.model.site_names), set(alive) ^ set(placed.model.site_names)
         n_comp = {s: int(components.site(s).V.shape[1]) for s in placed.model.site_names}
         for b in range(N_LAYER):
@@ -96,7 +96,7 @@ def main() -> None:
                      kind=np.asarray([k for k in KINDS for _ in alive[sites[(b, k)]]]),
                      index=np.concatenate([alive[sites[(b, k)]] for k in KINDS]), **uv)  # fmt: skip
         prepared, _ = prepare_components(placed, components)
-        del restored, components
+        del components
         # (C,) 1.0 on the site's alive components, 0.0 elsewhere; broadcast over (B, T) in-jit
         on = {}
         for s in placed.model.site_names:
