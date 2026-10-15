@@ -112,11 +112,16 @@ minus the sum over `R ∩ H_c` (phase B knows which of its prompts are in `R`), 
   shows a positive entry at `(τ, k) = (20, 5)`.
 - Per-prompt `δ_p` on `R` and on `H_c` (fp16, ~140 MB in all), for later analysis.
 
-**Estimator check.** For 30 components spread over the `ΔĈE_c / SE_c` range, measure `ΔCE_c(S₀)`
-exactly over all of `P` (one factored forward over `P` each) and report `(ΔCE − ΔĈE)/SE`; its spread
+**Estimator check.** For 20 components spread over the `ΔĈE_c / SE_c` range, measure `ΔCE_c(S₀)`
+on the independent check set `Q` (§4) and report `z = (ΔĈE − ΔCE_Q) / √(SE² + SE_Q²)`; its spread
 should be close to 1.
 
 ## 4. Stage 2: pruning rounds
+
+**Check set.** An all-`P` pass costs ~14 min on one A100 (the full-vocabulary unembedding of
+239,800 prompts dominates), so every `CE` check and mask gradient of the rounds runs on a fixed
+uniform random check set `Q ⊂ P` of 32,768 prompts (all of `P` only for the references and the
+final report). "Exact" below means exact on `Q`.
 
 Round `j` (from `S_j`):
 
@@ -124,13 +129,13 @@ Round `j` (from `S_j`):
    first, at most 10% of `|S_j|`. `z = 1` (dimensionless); `ε` is a per-component negligible effect
    in nats, set after stage 1 from the distribution of `SE_c` (recorded in the run config). Noisy
    components with mean near 0 are protected; quiet null components still go.
-2. **Remove and check.** `S' = S_j ∖ batch`; compute `CE(S')` exactly over all of `P`. The batch is
+2. **Remove and check.** `S' = S_j ∖ batch`; compute `CE(S')` exactly on `Q`. The batch is
    accepted if `CE(S') − CE(S_j) ≤ 0.01` nats (per round) AND `CE(S') − CE(S₀) ≤ 0.03` nats (global
    budget, so the per-round allowance cannot accumulate). Otherwise put back the less-negative half
    of the batch and recheck (repeat until it passes or the batch is empty). `S_{j+1}` = the accepted
    `S'`.
 3. **Gradient pass** on `S_{j+1}`: `g_c` for every `c ∈ S₀` (on and off), in one forward and
-   backward over all of `P` (microbatched, accumulated). With the factored forward this is `jax.grad`
+   backward over `Q` (microbatched, accumulated). With the factored forward this is `jax.grad`
    with respect to the mask vectors.
 4. **Disagreement re-ablations.** For each `c ∈ S_{j+1}` with
    `|−g_c − ΔĈE_c| > max(3 · SE_c, ε)`, re-measure `ΔĈE_c` and `SE_c` by direct ablation on
@@ -174,9 +179,11 @@ masked forward; the final per-component screen of `S_final`; the composition of
   component = the decomposition's masked forward with all masks 1, delta off; partial = full
   forward; per-row mask ablation = refolding without `c`; mask gradient = finite difference; the
   estimator is unbiased on synthetic data with a known mean; the `Δq_rel` scatter on a hand case.
-- Outputs: `<run_dir>/analysis/pruning/step_40000/<prune-id>/` — `config.yaml`, `references.json`,
-  `hc.npz`, `screen/` (per-component table, vectors, per-prompt `δ_p`), `rounds.jsonl`,
-  `sets/S_<j>.npz` (`{site: (C,) bool}`), `report.json`, `logs/`.
+- Outputs: `<run_dir>/analysis/pruning/step_40000/<prune-id>/` — `config.yaml`, `hc.npz`
+  (`H_c`), `strata.npz` (`R`, `Q`), `validation.json`, `references.{json,npz}`, `screen/{a,b}_*.npz`
+  (per-prompt `δ_p` and shift sums), `components.tsv` (one row per component), `vectors.npz`
+  (`Δq`, `Δq_rel` and their residue sums), `estimator_check.json`, `rounds.jsonl`,
+  `sets/S_<j>.npz` (canonical-order `on`, `est`, `se`, gradient), `report.json`.
 
 ## 7. Running
 
