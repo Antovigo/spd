@@ -15,6 +15,7 @@ l this writes, for the block's alive gate / up / down components (columns in tha
 
 import argparse
 import json
+import os
 import time
 from pathlib import Path
 
@@ -42,8 +43,8 @@ from param_decomp.core.precision import COMPUTE_DT
 from param_decomp.experiments.lm.arithmetic_eval import component_activation_model
 from param_decomp.experiments.lm.load_run import restore_jax_run
 
-RUN_DIR = Path("/mnt/nw/home/a.vigouroux/out/pod-backup/p-ba8b0c08")
-DATA_ROOT = Path("/mnt/nw/home/a.vigouroux/out")
+RUN_DIR = Path(os.environ.get("RUN_DIR", "/mnt/nw/home/a.vigouroux/out/pod-backup/p-ba8b0c08"))
+DATA_ROOT = Path(os.environ.get("DATA_ROOT", "/mnt/nw/home/a.vigouroux/out"))
 STEP = 40000
 FILTER = "addsub-08-last-pos"
 KINDS = ("gate", "up", "down")

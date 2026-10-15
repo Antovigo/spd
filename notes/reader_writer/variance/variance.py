@@ -32,7 +32,8 @@ import numpy as np
 
 jax.config.update("jax_default_matmul_precision", "highest")  # float32, TF32 off (plan §10)
 
-SRC = Path("/mnt/nw/home/a.vigouroux/out/pod-backup/p-ba8b0c08/analysis/reader_writer/variance")
+SRC = Path(os.environ.get("RUN_DIR", "/mnt/nw/home/a.vigouroux/out/pod-backup/p-ba8b0c08"))
+SRC = SRC / "analysis" / "reader_writer" / "variance"
 POSITIONS = (1, 2, 3, 4)
 """Token positions stored by `extract_alive_only.py` (column p of inner.npy is position p + 1)."""
 N_SUB = 20_000
