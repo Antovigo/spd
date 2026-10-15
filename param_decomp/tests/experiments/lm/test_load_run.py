@@ -58,7 +58,7 @@ from param_decomp.targets.transformer_taps import resid_tap_key
 def test_restore_decomposition_uses_consumer_sharded_abstract(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    abstract = object()
+    abstract = SimpleNamespace(ci_fn=object())  # a non-backbone CI fn: the current layout
     manager = SimpleNamespace(latest_step=lambda: 17)
     restored = object()
     monkeypatch.setattr(load_run, "_consumer_decomposition_abstract", lambda *_args: abstract)

@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import yaml
 from pydantic import ConfigDict, TypeAdapter
 
 from param_decomp.core.base_config import BaseConfig
@@ -23,6 +22,7 @@ from param_decomp.experiments.lm.config import (
 from param_decomp.experiments.lm.resolved import AnyLMTargetConfig, LMCIFnArch, ResolvedLMData
 from param_decomp.experiments.lm.run_data import load_data_config, product_document
 from param_decomp.infra.dataset_store import resolve_dataset_ref
+from param_decomp.migrations.fork_2026_10 import read_stored_config
 
 
 class _ScheduleSeed(BaseConfig):
@@ -48,7 +48,7 @@ def _mapping(raw: object, field_for_err: str) -> dict[str, Any]:
 
 def load_deliverable(run_dir: Path, data_root: Path) -> ResolvedDeliverable:
     """Resolve the current product schema from a normalized product or current run pin."""
-    raw = _mapping(yaml.safe_load(product_document(run_dir).read_text()), "config")
+    raw = read_stored_config(product_document(run_dir))
     target_raw = _mapping(raw.get("target"), "target")
     target_config = LMTargetConfig.model_validate(target_raw)
     decomposition = LMDecompositionConfig.model_validate(
@@ -75,7 +75,7 @@ def load_dense_target(run_dir: Path, data_root: Path) -> AnyLMTargetConfig:
     stored config: `target` and `decomposition.sites`, each validated strictly by its own
     type. The CI definition is never read; consumers that substitute component activations
     have no use for it."""
-    raw = _mapping(yaml.safe_load(product_document(run_dir).read_text()), "config")
+    raw = read_stored_config(product_document(run_dir))
     target_config = LMTargetConfig.model_validate(_mapping(raw["target"], "target"))
     decomposition = _mapping(raw["decomposition"], "decomposition")
     sites = TypeAdapter(DenseCSpec).validate_python(decomposition["sites"])
