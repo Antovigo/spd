@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Run on the POD after pilot.sh: variance.py --pilot on blocks 0, 31 and 18 at several batch sizes
-# (throughput and checks per size), against pilot.sh's 6000-prompt extraction.
+# (throughput and checks per size; the pilot pool is 6000 prompts, so chunk * batch must stay
+# well below it for any chunk after the first, which carries the compile, to be timed), against pilot.sh's 6000-prompt extraction.
 #     source /workspace/spd/notes/reader_writer/variance/pod/env.sh && ./pilot_sizes.sh
 # Follow: tail -f $DATA_ROOT/logs/rwv-pilot-sizes.latest.log
 set -euo pipefail
@@ -15,11 +16,11 @@ fi
 P="$RUN_DIR/analysis/reader_writer/variance/pilot_src"
 cd "$HERE"
 echo "commit $(git -C "$REPO" log -1 --format=%h)"
-for cfg in "0 32 16 8" "31 32 16 8" "31 128 32 16" "18 128 32 16"; do
+for cfg in ${CFGS:-"31 128 32 16 8" "31 64 32 32 8" "18 128 32 16 8"}; do  # layer batch jbatch wc chunk
   set -- $cfg
-  echo "CFG layer=$1 batch=$2 jbatch=$3 wc=$4"
+  echo "CFG layer=$1 batch=$2 jbatch=$3 wc=$4 chunk=$5"
   rm -rf "$P/pilot/L$1"
-  "$VENV_PY" -u variance.py --layer "$1" --pilot --src "$P" --batch "$2" --jbatch "$3" --wc "$4" 2>&1 \
+  "$VENV_PY" -u variance.py --layer "$1" --pilot --src "$P" --batch "$2" --jbatch "$3" --wc "$4" --chunk "$5" 2>&1 \
     | grep -vE "^WARNING|^W1" || echo "CFG FAILED"
 done
 echo PILOTS_DONE
