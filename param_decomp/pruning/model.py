@@ -229,6 +229,10 @@ def build(
             "down": stacked.mlp.Wd,
         }
     )
+    # Off the restored run's explicit (fsdp/tp-typed) mesh: every pruning array is a plain
+    # single-device array, so the engine's gathers need no sharding annotations.
+    device = jax.sharding.SingleDeviceSharding(jax.devices()[0])
+    shared, dense = jax.device_put((shared, dense), device)
     slots = slots_of(alive)
     V: dict[str, Array] = {}
     U: dict[str, Array] = {}
@@ -239,8 +243,8 @@ def build(
             site = site_name(layer, kind)
             ids = jnp.asarray(np.nonzero(alive[site])[0])
             factors = components.site(site)
-            v = jnp.take(factors.V.astype(jnp.float32), ids, axis=1)
-            u = jnp.take(factors.U.astype(jnp.float32), ids, axis=0)
+            v = jnp.take(jax.device_put(factors.V, device).astype(jnp.float32), ids, axis=1)
+            u = jnp.take(jax.device_put(factors.U, device).astype(jnp.float32), ids, axis=0)
             pad = width - int(ids.size)
             v_layers.append(jnp.pad(v, ((0, 0), (0, pad))))
             u_layers.append(jnp.pad(u, ((0, pad), (0, 0))))

@@ -416,3 +416,56 @@ def test_engine_runs_under_the_consumer_mesh(setup: Setup) -> None:
     with jax.set_mesh(mesh):
         test_lean_screen_is_exact_when_the_sample_is_everything(setup)
         test_mask_gradient_is_the_derivative(setup)
+
+
+def test_build_and_select_under_a_zero1_placement() -> None:
+    """The restored run's layout (`zero1`, explicit fsdp/tp-typed arrays): building the factored
+    model and selecting `H_c` with a real CI fn both run, and the selection is the top CI."""
+    from dataclasses import replace
+
+    from param_decomp.ci_filter.step import UNCONSTRAINED, gather_batch, output_ci
+    from param_decomp.pruning.select import select_top_ci
+    from param_decomp.targets.testing import tiny_glu_chunkwise_ci_fn_arch
+    from param_decomp.tests.placed_ci_fn import placed_ci_fn
+
+    cfg = tiny_glu_cfg()
+    sites = glu_site_specs(
+        cfg,
+        tuple(
+            SiteC(site_name(layer, kind), C) for layer in range(cfg.n_layer) for kind in KIND_ORDER
+        ),
+    )
+    mesh = single_device_mesh()
+    model = tiny_glu_decomposed_lm(cfg, sites, jax.random.PRNGKey(0))
+    rules = from_config("zero1", mesh, sites)
+    placed: PlacedTransformer = place_target(model, rules)
+    arch_ci = replace(tiny_glu_chunkwise_ci_fn_arch(model, n_blocks=1), dual=True)
+    rng = np.random.default_rng(0)
+    alive = {s.name: rng.random(C) < 0.6 for s in sites}
+    for name in alive:
+        alive[name][0] = True
+    tokens = rng.integers(1, 64, size=(20, 5)).astype(np.int32)
+    with jax.set_mesh(mesh):
+        ci_fn = placed_ci_fn(arch_ci, sites, jax.random.PRNGKey(3), mesh, rules)
+        components = init_model_component_stacks_placed(
+            placed, jax.random.PRNGKey(1), rules, random_component_initializer
+        )
+        prepared = placed.prepare_compute_weights(components)
+        assert isinstance(placed.model, TransformerDecomposedModel)
+        arch, shared, factors, _dense, slots = pm.build(placed.model, components, alive)
+        mask = slots.mask(np.ones(slots.n, bool), arch.n_layer)
+        logits = pm.factored_logits(
+            arch, shared, factors, mask, pm.Flips.none(4), jnp.asarray(tokens[:4]), "fp32", "fp32"
+        )
+        assert bool(jnp.all(jnp.isfinite(logits)))
+        top, values = select_top_ci(
+            placed, prepared, ci_fn, UNCONSTRAINED, tokens, slots, k=3, batch_size=8
+        )
+        clean = placed.clean_forward(
+            gather_batch(jnp.asarray(tokens), jnp.arange(20)), ci_fn.capture_keys
+        )
+        lower = output_ci(placed, prepared, ci_fn, UNCONSTRAINED, clean, remat=False).lower
+    a = 5
+    ci = np.asarray(lower[slots.sites[a]], np.float32)[:, :, slots.index[a]].max(axis=1)
+    np.testing.assert_allclose(np.sort(values[a])[::-1], np.sort(ci)[::-1][:3], rtol=1e-2)
+    assert set(top[a].tolist()) <= set(range(20))

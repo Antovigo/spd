@@ -47,7 +47,14 @@ def make_update(slots: Slots, k: int) -> Callable[..., TopK]:
         clean = placed.clean_forward(gather_batch(tokens_all, idx), ci_fn.capture_keys)
         lower = output_ci(placed, prepared, ci_fn, constraints, clean, remat=False).lower
         per_site = [
-            jnp.max(jnp.take(lower[site].astype(jnp.float32), columns[site], axis=-1), axis=1)
+            jnp.max(
+                jnp.take(
+                    jax.sharding.reshard(lower[site].astype(jnp.float32), P()),
+                    columns[site],
+                    axis=-1,
+                ),
+                axis=1,
+            )
             for site in order
         ]
         ci = jax.sharding.reshard(jnp.concatenate(per_site, axis=-1), P())  # (B, A)
