@@ -2,7 +2,7 @@
 # Run on the POD, detached: the alive-only extraction (skipped once alive_only/meta.json exists),
 # then variance.py for blocks 0..31 (each skips the positions already published, and resumes a
 # half-done position from its saved accumulators). Stops at the first failure.
-#     source /workspace/spd/notes/reader_writer/variance/pod/env.sh && ./run_all.sh [LAYERS...]
+#     source /workspace/spd/notes/reader_writer/variance/pod/env.sh && [VARIANCE_ARGS="--n_sub 8000"] ./run_all.sh [LAYERS...]
 # Follow: tail -f $DATA_ROOT/logs/rwv.latest.log
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -10,7 +10,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [ "${FOREGROUND:-0}" != 1 ]; then
   LOG="$DATA_ROOT/logs/rwv.$(date +%Y%m%d-%H%M%S).log"
   ln -sfn "$LOG" "$DATA_ROOT/logs/rwv.latest.log"
-  FOREGROUND=1 nohup "$0" "$@" > "$LOG" 2>&1 &
+  FOREGROUND=1 nohup "$0" "$@" > "$LOG" 2>&1 < /dev/null &
   echo "started pid $! -> $LOG"; exit 0
 fi
 LAYERS=("$@"); [ ${#LAYERS[@]} -gt 0 ] || LAYERS=($(seq 0 31))
@@ -24,6 +24,6 @@ if [ ! -f "$OUT/alive_only/meta.json" ]; then
 fi
 for L in "${LAYERS[@]}"; do
   echo "$(date -u +%FT%TZ) block $L"
-  "$VENV_PY" -u variance.py --layer "$L" --src "$OUT"
+  "$VENV_PY" -u variance.py --layer "$L" --src "$OUT" ${VARIANCE_ARGS:-}
 done
 echo "$(date -u +%FT%TZ) all done"
