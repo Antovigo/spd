@@ -5,7 +5,7 @@ on every prompt and position; every other component and the weight delta are off
 l this writes, for the block's alive gate / up / down components (columns in that order, as
 `../L<l>/comps.npz`), positions 1..4 (position 0, BOS, is the same on every prompt):
 
-    OUT/L<l>/inner.npy  (N, 4, K_l) float16   t_c = x . V_c (raw gauge), alive-only model
+    OUT/L<l>/inner.npy  (N, 4, K_l) float32   t_c = x . V_c (raw gauge), alive-only model
     OUT/L<l>/comps.npz  kind (K_l,), index (K_l,); U_<kind> (K_kind, d_out), V_<kind> (d_in, K_kind)
     OUT/kl_last.npy     (N,) float32           KL(original || alive-only) at the last position
     OUT/meta.json
@@ -57,6 +57,7 @@ def main() -> None:
     ap.add_argument("--batch_size", type=int, default=200)
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--out", type=Path, default=OUT)
+    ap.add_argument("--profile", action="store_true", help="time the forward pieces, write nothing")
     args = ap.parse_args()
     out: Path = args.out
     out.mkdir(parents=True, exist_ok=True)
@@ -142,12 +143,15 @@ def main() -> None:
             kl = kl_rows(all_logits(masked.output)[:, -1], all_logits(clean.output)[:, -1])
             return per_block, jax.sharding.reshard(kl, P())
 
+        if args.profile:
+            profile(placed, prepared, on, cols, tokens_all, collect, args.batch_size)
+            return
         widths = [sum(alive[sites[(b, k)]].size for k in KINDS) for b in range(N_LAYER)]
         mm = [
             open_memmap(
                 out / f"L{b}" / "inner.npy",
                 mode="w+",
-                dtype=np.float16,
+                dtype=np.float32,
                 shape=(n, len(POSITIONS), widths[b]),
             )  # fmt: skip
             for b in range(N_LAYER)
@@ -164,25 +168,76 @@ def main() -> None:
             for b, got in enumerate(per_block):
                 got = np.asarray(got)[:real]
                 absmax = max(absmax, float(np.abs(got).max()))
-                mm[b][start:stop] = got.astype(np.float16)
+                mm[b][start:stop] = got
             kl_last[start:stop] = np.asarray(kl)[:real]
             if i % 50 == 0 or stop == n:
                 el = time.time() - t0
                 print(f"{stop}/{n} {el:.0f}s eta {el / (i + 1) * (len(starts) - i - 1):.0f}s "
                       f"absmax {absmax:.1f} kl_last mean so far {kl_last[:stop].mean():.4f}",
                       flush=True)  # fmt: skip
-        assert absmax < 65504, f"activations overflow float16 ({absmax})"
         for m in mm:
             m.flush()
     np.save(out / "kl_last.npy", kl_last)
     meta = {"run_dir": str(RUN_DIR), "step": STEP, "filter": FILTER, "model": "alive-only",
-            "n_prompts": n, "positions": list(POSITIONS), "inner_dtype": "float16",
+            "n_prompts": n, "positions": list(POSITIONS), "inner_dtype": "float32",
             "absmax": absmax, "kl_last_mean": float(kl_last.mean()),
             "n_alive": {b: {k: int(alive[sites[(b, k)]].size) for k in KINDS}
                         for b in range(N_LAYER)},
             "seconds": time.time() - t0}  # fmt: skip
     (out / "meta.json").write_text(json.dumps(meta, indent=2))
     print(json.dumps({k: v for k, v in meta.items() if k != "n_alive"}, indent=2), flush=True)
+
+
+def profile(placed, prepared, on, cols, tokens_all, collect, bs: int) -> None:  # noqa: ANN001
+    """Seconds per batch of each forward piece (after a warm-up call), and of the full collect."""
+
+    def masks_of(clean_acts):  # noqa: ANN001, ANN202
+        return MaterializedMasking(
+            component_masks={
+                s: (jnp.zeros_like(require_full_emission(v)) + on[s]).astype(COMPUTE_DT)
+                for s, v in clean_acts.items()
+            }
+        )
+
+    @eqx.filter_jit
+    def clean_only(placed, prepared, tokens_all, idx):  # noqa: ANN001, ANN202
+        batch = gather_batch(tokens_all, idx)
+        clean, acts = placed.component_activation_forward(
+            prepared, batch, sites=placed.model.site_names, capture_keys=frozenset()
+        )
+        return all_logits(clean.output)[:, -1], acts
+
+    @eqx.filter_jit
+    def masked_only(placed, prepared, tokens_all, idx, acts):  # noqa: ANN001, ANN202
+        batch = gather_batch(tokens_all, idx)
+        out = placed.masked_forward(prepared, batch, masking=placed.model.prepare_masking(
+            masks_of(acts)), routes=None, remat=False)  # fmt: skip
+        return all_logits(out.output)[:, -1]
+
+    @eqx.filter_jit
+    def inner_only(placed, prepared, tokens_all, idx, acts):  # noqa: ANN001, ANN202
+        batch = gather_batch(tokens_all, idx)
+        return component_activation_model(placed).masked_component_activations(
+            prepared, batch, masks_of(acts), placement=placed.placement
+        )
+
+    idx = jnp.arange(bs, dtype=jnp.int32)
+    _, acts = clean_only(placed, prepared, tokens_all, idx)
+    pieces = {
+        "clean_forward": lambda: clean_only(placed, prepared, tokens_all, idx),
+        "masked_forward": lambda: masked_only(placed, prepared, tokens_all, idx, acts),
+        "masked_inner": lambda: inner_only(placed, prepared, tokens_all, idx, acts),
+        "collect": lambda: collect(placed, prepared, on, cols, tokens_all, idx),
+        "collect+host": lambda: [
+            np.asarray(a) for a in collect(placed, prepared, on, cols, tokens_all, idx)[0]
+        ],  # fmt: skip
+    }
+    for name, fn in pieces.items():
+        jax.block_until_ready(fn())
+        t0 = time.time()
+        for _ in range(3):
+            jax.block_until_ready(fn())
+        print(f"profile {name}: {(time.time() - t0) / 3:.2f} s per {bs}-prompt batch", flush=True)
 
 
 if __name__ == "__main__":

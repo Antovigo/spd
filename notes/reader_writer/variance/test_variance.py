@@ -14,6 +14,7 @@ from variance import (  # noqa: E402
     Weights,
     analyse_in_memory,
     finalize,
+    run_position,
     secant,
     silu,
     writer_activation,
@@ -125,6 +126,28 @@ def test_excluded_writer() -> None:
                    np.ones(2))  # fmt: skip
     assert res["excluded"].tolist() == [True, False]
     assert np.isnan(res["phi_Mu"][0, 0])
+
+
+def test_driver_matches_in_memory(tmp_path) -> None:  # noqa: ANN001
+    """run_position (float32 device data, chunked scans, padding) reproduces analyse_in_memory:
+    the per-reader shares on all rows and the routing shares on the subsample."""
+    W, tg, tu = random_block(6)
+    n = tg.shape[0]
+    t_d = writer_activation(tg, tu, W)
+    inner = np.zeros((n, 4, 4 + 5 + 5), np.float32)
+    inner[:, 3] = np.concatenate([tg, tu, t_d], 1)
+    cols = {"gate": np.arange(4), "up": np.arange(4, 9), "down": np.arange(9, 14)}
+    sub = np.arange(0, n, 3)
+    W32 = jax.tree.map(lambda a: a.astype(jnp.float32), W)  # the production dtype
+    info = run_position(0, 3, W32, inner, cols, tmp_path, n, sub, B=8, jB=4, wc=3, K=5)
+    assert info["checks_failed"] == [], info["checks_failed"]
+    full, _, refs = analyse_in_memory(tg, tu, W, wc=3)
+    part = analyse_in_memory(tg[sub], tu[sub], W, wc=2, refs=refs)[0]  # whole-pool references
+    got = np.load(tmp_path / "variance_pos4.npz")
+    gotJ = np.load(tmp_path / "J_pos4.npz")
+    for k in ("phi_Mu", "phi_Mu0", "phi_Mg", "var_t"):
+        np.testing.assert_allclose(got[k], full[k], rtol=1e-4, atol=1e-5)
+    np.testing.assert_allclose(gotJ["phi_J"], part["phi_J"], rtol=1e-4, atol=1e-5)
 
 
 if __name__ == "__main__":

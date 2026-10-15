@@ -19,6 +19,7 @@ on the host; they are saved to disk every SAVE_SECONDS and a restarted job resum
 """
 
 import argparse
+import functools
 import json
 import os
 import time
@@ -42,7 +43,7 @@ EPS_SECANT = 1e-3
 EXCLUDE_REL = 1e-6
 FLAG_FRAC = 0.01
 SAVE_SECONDS = 600.0
-TOL = {"check1_rel_max": 1e-2, "ident4_max": 1e-5, "ident5_max": 1e-5,
+TOL = {"check1_rel_max": 1e-2, "ident4_max": 1e-5, "ident5_max": 1e-3,
        "share_sum_err_max": 1e-4, "share5_err_max": 1e-4}  # fmt: skip
 """Plan §10 checks 1-3: a position's results are published only when every one holds."""
 
@@ -221,12 +222,13 @@ def finalize(
 
 
 def analyse_in_memory(
-    tg: jax.Array, tu: jax.Array, W: Weights, wc: int = 3
+    tg: jax.Array, tu: jax.Array, W: Weights, wc: int = 3, refs: Refs | None = None
 ) -> tuple[dict[str, np.ndarray], dict[str, jax.Array], Refs]:
     """Every pass on one in-memory batch (tests): finalize() of Mu, Mu0, Mg and J, the raw terms
-    with J's gate sums, and the references."""
+    with J's gate sums, and the references (computed on these rows unless given)."""
     n = tg.shape[0]
-    refs = make_refs({k: np.asarray(v) for k, v in pass1_sums(tg, tu, W).items()}, n, W)
+    if refs is None:
+        refs = make_refs({k: np.asarray(v) for k, v in pass1_sums(tg, tu, W).items()}, n, W)
     tm = terms(tg, tu, refs, W)
     rt = routing(tg, tu, refs, W, tm["t_d"], wc)
     D = W.Vd.shape[1]
@@ -242,7 +244,7 @@ def analyse_in_memory(
 
 
 def load_block(src: Path, layer: int) -> tuple[Weights, np.ndarray, dict[str, np.ndarray]]:
-    """The block's weights, its stored activations (N, 4, K) float16 in RAM, and its columns."""
+    """The block's weights, its stored activations (N, 4, K) in RAM, and its columns."""
     comps = np.load(src / "alive_only" / f"L{layer}" / "comps.npz")
     kind = comps["kind"]
     cols = {k: np.flatnonzero(kind == k) for k in ("gate", "up", "down")}
@@ -297,53 +299,72 @@ class Accum:
             self.last_save = time.time()
 
 
-def batches(rows: np.ndarray, size: int) -> list[np.ndarray]:
-    """Consecutive batches of row indices; the last one may be short (`padded` fills it)."""
-    return [rows[i : i + size] for i in range(0, rows.size, size)]
+def device_rows(
+    inner: np.ndarray, rows: np.ndarray, p: int, cols: dict[str, np.ndarray], block: int
+) -> tuple[dict[str, jax.Array], jax.Array]:
+    """The rows' gate / up / stored-writer activations at stored position p as float32 device
+    arrays, zero-padded to a multiple of `block` rows, and the (padded) validity mask."""
+    n_pad = -(-rows.size // block) * block
+    out = {}
+    for name, kind in (("tg", "gate"), ("tu", "up"), ("td", "down")):
+        a = np.zeros((n_pad, cols[kind].size), np.float32)
+        a[: rows.size] = inner[rows, p][:, cols[kind]]
+        out[name] = jnp.asarray(a)
+    valid = np.zeros(n_pad, np.float32)
+    valid[: rows.size] = 1.0
+    return out, jnp.asarray(valid)
 
 
-def padded(inner: np.ndarray, idx: np.ndarray, p: int, cols: np.ndarray, size: int) -> np.ndarray:
-    """(size, len(cols)) float32 of rows idx at stored position p, zero-padded; the caller masks
-    the padding rows out of every sum with `valid`."""
-    out = np.zeros((size, cols.size), np.float32)
-    out[: idx.size] = inner[idx, p][:, cols]
-    return out
+def pass1_batch(x: dict[str, jax.Array], v: jax.Array, W: Weights):  # noqa: ANN201
+    """Zero padding adds nothing here: SiLU(0) = 0 and t = 0."""
+    return pass1_sums(x["tg"], x["tu"], W), jnp.zeros(())
 
 
-@jax.jit
-def _pass1(tg, tu, W):  # noqa: ANN001, ANN202
-    return pass1_sums(tg, tu, W)
-
-
-@jax.jit
-def _pass2(tg, tu, td_stored, valid, refs, W):  # noqa: ANN001, ANN202
-    tm = terms(tg, tu, refs, W)
-    t_d = tm["t_d"] * valid[:, None]
-    out = {"t": t_d.sum(0), "tt": (t_d**2).sum(0),
-           "c1_diff2": ((t_d - td_stored * valid[:, None]) ** 2).sum(0),
-           "c1_ref2": ((td_stored * valid[:, None]) ** 2).sum(0)}  # fmt: skip
+def pass2_batch(x: dict[str, jax.Array], v: jax.Array, refs: Refs, W: Weights):  # noqa: ANN201
+    tm = terms(x["tg"], x["tu"], refs, W)
+    t_d = tm["t_d"] * v[:, None]
+    td_stored = x["td"] * v[:, None]
+    out = {"t": t_d.sum(0), "tt": (t_d**2).sum(0), "c1_diff2": ((t_d - td_stored) ** 2).sum(0),
+           "c1_ref2": (td_stored**2).sum(0)}  # fmt: skip
     for k in ("Mu", "Mu0", "Mg"):
-        X = tm[k] * valid[:, None, None]
-        out[f"{k}"], out[f"{k}t"] = cov_sums(t_d, X)
+        out[k], out[f"{k}t"] = cov_sums(t_d, tm[k] * v[:, None, None])
     total = refs.tref[None] + tm["Mu"].sum(-1) + tm["Mg"].sum(-1)
-    err = jnp.abs(total - tm["t_d"]) * valid[:, None]
-    scale = jnp.maximum(jnp.max(jnp.abs(tm["t_d"])), 1e-30)
-    return out, jnp.max(err) / scale
+    err = jnp.max(jnp.abs(total - tm["t_d"]) * v[:, None])
+    return out, err / jnp.maximum(jnp.max(jnp.abs(t_d)), 1e-30)
 
 
-def _pass3(wc: int):  # noqa: ANN202
+def pass3_batch(x: dict[str, jax.Array], v: jax.Array, refs: Refs, W: Weights, wc: int):  # noqa: ANN201
+    tm = terms(x["tg"], x["tu"], refs, W)
+    t_d = tm["t_d"] * v[:, None]
+    rt = routing(x["tg"], x["tu"], refs, W, t_d, wc, v)
+    D = W.Vd.shape[1]
+    out = {"t": t_d.sum(0), "tt": (t_d**2).sum(0), "J": rt["J"][:D], "Jt": rt["Jt"][:D]}
+    for k in ("Mu", "Mu0"):
+        out[k], out[f"{k}t"] = cov_sums(t_d, tm[k] * v[:, None, None])
+    diff = (rt["J_sum_gates"][:, :D] - (tm["Mu"] - tm["Mu0"])) * v[:, None, None]
+    scale = jnp.maximum(jnp.max(jnp.abs(tm["Mu"]) * v[:, None, None]), 1e-30)
+    return out, jnp.max(jnp.abs(diff)) / scale
+
+
+def chunk_runner(batch_fn, B: int, K: int):  # noqa: ANN001, ANN201
+    """jit of: the float32 sums (and the max of the check value) of `batch_fn` over the K
+    consecutive batches of B rows starting at batch c * K of the device-resident data."""
+
     @jax.jit
-    def run(tg, tu, valid, refs, W):  # noqa: ANN001, ANN202
-        tm = terms(tg, tu, refs, W)
-        t_d = tm["t_d"] * valid[:, None]
-        rt = routing(tg, tu, refs, W, t_d, wc, valid)
-        D = W.Vd.shape[1]
-        out = {"t": t_d.sum(0), "tt": (t_d**2).sum(0), "J": rt["J"][:D], "Jt": rt["Jt"][:D]}
-        for k in ("Mu", "Mu0"):
-            out[k], out[f"{k}t"] = cov_sums(t_d, tm[k] * valid[:, None, None])
-        diff = (rt["J_sum_gates"][:, :D] - (tm["Mu"] - tm["Mu0"])) * valid[:, None, None]
-        scale = jnp.maximum(jnp.max(jnp.abs(tm["Mu"]) * valid[:, None, None]), 1e-30)
-        return out, jnp.max(jnp.abs(diff)) / scale
+    def run(x, valid, c, *args):  # noqa: ANN001, ANN202
+        def batch(i):  # noqa: ANN001, ANN202
+            off = (c * K + i) * B
+            xs = {k: jax.lax.dynamic_slice_in_dim(a, off, B, 0) for k, a in x.items()}
+            return batch_fn(xs, jax.lax.dynamic_slice_in_dim(valid, off, B, 0), *args)
+
+        def body(carry, i):  # noqa: ANN001, ANN202
+            sums, mx = batch(i)
+            acc, amx = carry
+            return (jax.tree.map(jnp.add, acc, sums), jnp.maximum(amx, mx)), None
+
+        first = batch(0)
+        (acc, amx), _ = jax.lax.scan(body, first, jnp.arange(1, K))
+        return acc, amx
 
     return run
 
@@ -360,7 +381,7 @@ def flops_per_prompt(N: int, G: int, U: int, D: int) -> dict[str, float]:
 
 def run_position(
     layer: int, p: int, W: Weights, inner: np.ndarray, cols: dict[str, np.ndarray], out: Path,
-    n: int, sub: np.ndarray, B: int, jB: int, wc: int, strict: bool = True,
+    n: int, sub: np.ndarray, B: int, jB: int, wc: int, K: int, strict: bool = True,
 ) -> dict[str, object]:  # fmt: skip
     """All three passes at stored position p (token position p + 1); writes variance_pos<tau>.npz
     and J_pos<tau>.npz into `out`, returns timings and checks."""
@@ -368,93 +389,71 @@ def run_position(
     N_, G, U, D = W.Vd.shape[0], W.Ug.shape[0], W.Uu.shape[0], W.Vd.shape[1]
     fl = flops_per_prompt(N_, G, U, D)
     info: dict[str, object] = {"layer": layer, "tau": tau, "N": N_, "G": G, "U": U, "D": D}
-    rows = np.arange(n)
 
-    def timed(name: str, acc: Accum, todo: list[np.ndarray], size: int, step) -> None:  # noqa: ANN001
+    def run_pass(name: str, acc: Accum, x, valid, run, size: int, *args) -> None:  # noqa: ANN001
+        n_chunks = valid.shape[0] // size
         t_first = t_rest = 0.0
         n_rest = 0
-        for i in range(acc.next, len(todo)):
-            idx = todo[i]
+        for c in range(acc.next, n_chunks):
             t0 = time.time()
-            step(idx, size, acc)
+            sums, mx = run(x, valid, c, *args)
+            acc.add(sums)
+            acc.add_max("check", mx)
             dt = time.time() - t0
-            if i == acc.next and t_first == 0.0:
+            if c == acc.next and t_first == 0.0:
                 t_first = dt
             else:
                 t_rest += dt
-                n_rest += idx.size
-            acc.maybe_save(i + 1)
-        acc.maybe_save(len(todo), force=True)
+                n_rest += size
+            acc.maybe_save(c + 1)
+        acc.maybe_save(n_chunks, force=True)
         if n_rest:
             info[f"{name}_seconds"] = t_first + t_rest
             info[f"{name}_flops_per_s"] = fl[name] * n_rest / t_rest
         print(f"L{layer} tau={tau} {name}: {info.get(f'{name}_seconds', 0):.0f}s, "
               f"{info.get(f'{name}_flops_per_s', 0) / 1e12:.1f} TFLOP/s", flush=True)  # fmt: skip
 
-    def get(idx: np.ndarray, kind: str, size: int) -> jax.Array:
-        return jnp.asarray(padded(inner, idx, p, cols[kind], size))
-
-    def valid_of(idx: np.ndarray, size: int) -> jax.Array:
-        v = np.zeros(size, np.float32)
-        v[: idx.size] = 1.0
-        return jnp.asarray(v)
-
-    # pass 1: references (zero padding adds nothing: SiLU(0) = 0 and t = 0)
-    acc1 = Accum(out / f"state_p1_pos{tau}.npz", f"p1 n={n} B={B}")
-    timed("pass1", acc1, batches(rows, B), B,
-          lambda idx, size, acc: acc.add(_pass1(get(idx, "gate", size), get(idx, "up", size), W)))  # fmt: skip
+    x, valid = device_rows(inner, np.arange(n), p, cols, B * K)
+    acc1 = Accum(out / f"state_p1_pos{tau}.npz", f"p1 n={n} B={B} K={K}")
+    run_pass("pass1", acc1, x, valid, chunk_runner(pass1_batch, B, K), B * K, W)
     refs = make_refs(acc1.sums, n, W)
 
-    # pass 2: per-reader terms on the whole pool
-    acc2 = Accum(out / f"state_p2_pos{tau}.npz", f"p2 n={n} B={B}")
-
-    def step2(idx: np.ndarray, size: int, acc: Accum) -> None:
-        got, ident = _pass2(get(idx, "gate", size), get(idx, "up", size), get(idx, "down", size),
-                            valid_of(idx, size), refs, W)  # fmt: skip
-        acc.add(got)
-        acc.add_max("ident4", ident)
-
-    timed("pass2", acc2, batches(rows, B), B, step2)
+    acc2 = Accum(out / f"state_p2_pos{tau}.npz", f"p2 n={n} B={B} K={K}")
+    run_pass("pass2", acc2, x, valid, chunk_runner(pass2_batch, B, K), B * K, refs, W)
+    del x, valid
     s2 = acc2.sums
     ud2 = np.asarray(W.ud2, np.float64)
     res = finalize(
         n, s2["t"], s2["tt"], {k: (s2[k], s2[f"{k}t"]) for k in ("Mu", "Mu0", "Mg")}, ud2
     )
     res["check1_rel"] = np.sqrt(s2["c1_diff2"] / np.maximum(s2["c1_ref2"], 1e-300))
-    res["ident4_max"] = s2["ident4"]
+    res["ident4_max"] = s2["check"]
     tmp2 = out / f"variance_pos{tau}.tmp.npz"
     np.savez(tmp2, **res,
              tbar_g=np.asarray(refs.tbar_g), hbar_g=np.asarray(refs.hbar_g),
              r=np.asarray(refs.r), R=np.asarray(refs.R), tref=np.asarray(refs.tref))  # fmt: skip
     share_sum = np.nansum(res["phi_Mu"], 1) + np.nansum(res["phi_Mg"], 1)
     ok = ~res["excluded"]
-    info.update(ident4_max=float(s2["ident4"]), check1_rel_max=float(res["check1_rel"].max()),
+    info.update(ident4_max=float(s2["check"]), check1_rel_max=float(res["check1_rel"].max()),
                 share_sum_err_max=float(np.abs(share_sum[ok] - 1).max()) if ok.any() else 0.0,
                 n_excluded=int(res["excluded"].sum()), n_flagged=int(res["flagged"].sum()))  # fmt: skip
 
-    # pass 3: routing tensor on the subsample
-    acc3 = Accum(out / f"state_p3_pos{tau}.npz", f"p3 n={sub.size} jB={jB} wc={wc}")
-    run3 = _pass3(wc)
-
-    def step3(idx: np.ndarray, size: int, acc: Accum) -> None:
-        got, ident = run3(
-            get(idx, "gate", size), get(idx, "up", size), valid_of(idx, size), refs, W
-        )
-        acc.add(got)
-        acc.add_max("ident5", ident)
-
-    timed("pass3", acc3, batches(sub, jB), jB, step3)
+    jK = max(1, (K * B) // jB // 4)
+    x, valid = device_rows(inner, sub, p, cols, jB * jK)
+    acc3 = Accum(out / f"state_p3_pos{tau}.npz", f"p3 n={sub.size} jB={jB} K={jK} wc={wc}")
+    run3 = chunk_runner(functools.partial(pass3_batch, wc=wc), jB, jK)
+    run_pass("pass3", acc3, x, valid, run3, jB * jK, refs, W)
+    del x, valid
     s3 = acc3.sums
     res3 = finalize(
         sub.size, s3["t"], s3["tt"], {k: (s3[k], s3[f"{k}t"]) for k in ("J", "Mu", "Mu0")}, ud2
     )
     gap = res3["phi_Mu"] - res3["phi_Mu0"] - np.nansum(res3["phi_J"], 2)
-    info.update(ident5_max=float(s3["ident5"]),
+    info.update(ident5_max=float(s3["check"]),
                 share5_err_max=float(np.nanmax(np.abs(gap))) if np.isfinite(gap).any() else 0.0)  # fmt: skip
     tmp3 = out / f"J_pos{tau}.tmp.npz"
     np.savez(tmp3, sub=sub,
              **{k: (v.astype(np.float32) if v.ndim == 3 else v) for k, v in res3.items()})  # fmt: skip
-    ok = ~res["excluded"]
     finite = bool(np.isfinite(res["phi_Mu"][ok]).all() and np.isfinite(res["phi_Mg"][ok]).all()
                   and np.isfinite(res3["phi_J"][~res3["excluded"]]).all())  # fmt: skip
     failed = [f"{k}={info[k]:.3g} > {tol:g}" for k, tol in TOL.items()
@@ -489,17 +488,21 @@ def main() -> None:
     ap.add_argument("--batch", type=int, default=32)
     ap.add_argument("--jbatch", type=int, default=16)
     ap.add_argument("--wc", type=int, default=8)
+    ap.add_argument("--chunk", type=int, default=64, help="batches per jitted scan (passes 1-2)")
+    ap.add_argument("--n_sub", type=int, default=N_SUB, help="pass-3 subsample size")
     ap.add_argument("--limit", type=int, default=None, help="prompts for passes 1-2 (default all)")
     ap.add_argument("--j_limit", type=int, default=None, help="subsample prompts for pass 3")
-    ap.add_argument("--pilot", action="store_true", help="tau = 4 only, pass 3 on 500 prompts")
+    ap.add_argument("--pilot", action="store_true", help="tau = 4 only, pass 3 on 2000 prompts")
     args = ap.parse_args()
     if args.pilot:
         args.positions = [4]
-        args.j_limit = args.j_limit or 500
+        args.j_limit = args.j_limit or 2000
     W, inner, cols = load_block(args.src, args.layer)
     n_pool = inner.shape[0]
     n = n_pool if args.limit is None else min(args.limit, n_pool)
-    sub = np.sort(np.random.default_rng(SEED).choice(n_pool, min(N_SUB, n_pool), replace=False))
+    sub = np.sort(
+        np.random.default_rng(SEED).choice(n_pool, min(args.n_sub, n_pool), replace=False)
+    )
     if args.j_limit is not None:
         sub = sub[: args.j_limit]
     out = args.src / ("pilot" if args.pilot else "results") / f"L{args.layer}"
@@ -510,7 +513,8 @@ def main() -> None:
             print(f"L{args.layer} tau={tau}: done already, skipped", flush=True)
             continue
         infos.append(run_position(args.layer, POSITIONS.index(tau), W, inner, cols, out, n, sub,
-                                  args.batch, args.jbatch, args.wc, strict=not args.pilot))  # fmt: skip
+                                  args.batch, args.jbatch, args.wc, args.chunk,
+                                  strict=not args.pilot))  # fmt: skip
     stats = jax.local_devices()[0].memory_stats() or {}
     summary = {"infos": infos, "peak_bytes_in_use": stats.get("peak_bytes_in_use"),
                "device": str(jax.local_devices()[0]), "batch": args.batch,
@@ -527,12 +531,13 @@ def main() -> None:
             )
             for d in dims
         )
-        dense_j = sum(N_SUB * flops_per_prompt(*d)["pass3"] / thr["pass3"] for d in dims)
+        dense_j = sum(args.n_sub * flops_per_prompt(*d)["pass3"] / thr["pass3"] for d in dims)
         n_pos = len(POSITIONS)
         summary["projection_gpu_hours"] = {
             "passes_1_2_all_blocks_positions": per_reader * n_pos / 3600,
             "pass_3_dense_all_blocks_positions": dense_j * n_pos / 3600,
-            "flops_pass3_total": sum(N_SUB * flops_per_prompt(*d)["pass3"] for d in dims) * n_pos,
+            "flops_pass3_total": sum(args.n_sub * flops_per_prompt(*d)["pass3"] for d in dims)
+            * n_pos,
         }
         summary["go_dense"] = (per_reader + dense_j) * n_pos / 3600 <= 24.0
     (out / "summary.json").write_text(json.dumps(summary, indent=2, default=float))

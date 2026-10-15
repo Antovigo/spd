@@ -26,4 +26,4 @@ done
 [ -n "$FREE_IDS" ] || { echo "no free card"; exit 1; }
 export CUDA_VISIBLE_DEVICES=$FREE_IDS
 cd "$FRESH"
-"$W/.venv/bin/python" -u extract_alive_only.py ${LIMIT:+--limit $LIMIT} ${OUT:+--out $OUT}
+"$W/.venv/bin/python" -u extract_alive_only.py ${LIMIT:+--limit $LIMIT} ${OUT:+--out $OUT} ${PROFILE:+--profile}
