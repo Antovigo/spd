@@ -3,21 +3,28 @@
 # launch_config.yaml, ONLY the `decomposition` item of checkpoint 40000 (10 GB), the CI filter's
 # config, alive set and trained CI fn (3.4 GB), and the Llama-3.1-8B snapshot (15 GB; the pod
 # runs with HF_HUB_OFFLINE=1, so no HF token is needed there).
+# One rsync per file, 8 at a time: a single ssh stream from the cluster runs at ~15 MB/s, eight
+# reach ~105 MB/s (2026-10-15). -rltR, not -a: the pod volume (MooseFS) refuses chown.
 #     POD_HOST=<ip> POD_PORT=<port> KEY=~/.ssh/runpod ./push_data.sh
 set -euo pipefail
 : "${POD_HOST:?}" "${POD_PORT:?}" "${KEY:?}"
 RUN=p-ba8b0c08
 SRC="$HOME/out/pod-backup/$RUN"
 FILTER=addsub-08-last-pos-40000
-DST="root@$POD_HOST:/workspace/data/runs/$RUN"
-SSH="ssh -p $POD_PORT -i $KEY -o StrictHostKeyChecking=accept-new"
-rsync -a --mkpath -e "$SSH" "$SRC/launch_config.yaml" "$DST/"
-rsync -a --mkpath -e "$SSH" "$SRC/ckpts/40000/_CHECKPOINT_METADATA" "$SRC/ckpts/40000/decomposition" "$DST/ckpts/40000/"
-rsync -a --mkpath -e "$SSH" "$SRC/$FILTER/config.yaml" "$SRC/$FILTER/alive" "$DST/$FILTER/"
-rsync -a --mkpath -e "$SSH" "$SRC/$FILTER/training/ci_fn" "$DST/$FILTER/training/"
 HUB="$HOME/.cache/huggingface/hub/models--meta-llama--Llama-3.1-8B"
 SNAP=$(basename "$(ls -d "$HUB"/snapshots/* | tail -1)")
-rsync -aL --mkpath -e "$SSH" "$HUB/snapshots/$SNAP/" \
-  "root@$POD_HOST:/workspace/hf/hub/models--meta-llama--Llama-3.1-8B/snapshots/$SNAP/"
-rsync -a --mkpath -e "$SSH" "$HUB/refs" "root@$POD_HOST:/workspace/hf/hub/models--meta-llama--Llama-3.1-8B/"
+export SSH="ssh -p $POD_PORT -i $KEY -o StrictHostKeyChecking=accept-new -c aes128-gcm@openssh.com"
+push() {  # push <root> <dest>: every file under <root>/./ listed on stdin, relative paths kept
+  xargs -P 8 -I{} rsync -rLtR -e "$SSH" "{}" "root@$POD_HOST:$1"
+}
+{
+  echo "$SRC/./launch_config.yaml"
+  echo "$SRC/./ckpts/40000/_CHECKPOINT_METADATA"
+  (cd "$SRC" && find ckpts/40000/decomposition "$FILTER/alive" "$FILTER/training/ci_fn" -type f \
+     | sed "s|^|$SRC/./|")
+  echo "$SRC/./$FILTER/config.yaml"
+} | push "/workspace/data/runs/$RUN/"
+{
+  (cd "$HUB" && find "snapshots/$SNAP" refs | sed "s|^|$HUB/./|")
+} | grep -v "/\.$" | push "/workspace/hf/hub/models--meta-llama--Llama-3.1-8B/"
 echo "pushed run data and Llama snapshot $SNAP"
