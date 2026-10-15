@@ -254,4 +254,4 @@ An interactive page shows the result for one block:
   divergence of the last-position prediction 0.070 on average over the pool). Statements are
   about this model.
 
-Code: `notes/arith_representations/reader_writer/` on branch `experiment/arith_representations`.
+Code: `notes/reader_writer/` on branch `experiment/arith_representations`.

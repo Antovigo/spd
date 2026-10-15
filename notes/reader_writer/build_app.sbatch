@@ -8,7 +8,7 @@
 set -euo pipefail
 LAYER="${LAYER:-${SLURM_ARRAY_TASK_ID:-18}}"
 FRESH=$(mktemp -d); trap 'rm -rf "$FRESH"' EXIT
-D=/mnt/nw/home/a.vigouroux/Code/param-decomp/arith_representations/notes/arith_representations/reader_writer
+D=/mnt/nw/home/a.vigouroux/Code/param-decomp/arith_representations/notes/reader_writer
 cp "$D/build_app.py" "$D/app.html" "$FRESH/"
 cd "$FRESH"
 /mnt/nw/home/a.vigouroux/Code/param-decomp/dual_obj_jax/.venv/bin/python -u build_app.py --layer "$LAYER" --positions ${POSITIONS:-4 3}

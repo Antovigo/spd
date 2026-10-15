@@ -11,7 +11,7 @@
 set -euo pipefail
 FRESH=$(mktemp -d); trap 'rm -rf "$FRESH"' EXIT
 rsync -a --exclude __pycache__ /mnt/nw/home/a.vigouroux/Code/param-decomp/dual_obj_jax/param_decomp "$FRESH/"
-cp /mnt/nw/home/a.vigouroux/Code/param-decomp/arith_representations/notes/arith_representations/reader_writer/attribute.py "$FRESH/"
+cp /mnt/nw/home/a.vigouroux/Code/param-decomp/arith_representations/notes/reader_writer/attribute.py "$FRESH/"
 export PYTHONPATH=$FRESH PYTHONDONTWRITEBYTECODE=1 WANDB_MODE=disabled XLA_PYTHON_CLIENT_PREALLOCATE=false
 export TMPDIR=$(mktemp -d)
 FREE_IDS=$(nvidia-smi -i "${CUDA_VISIBLE_DEVICES:?}" --query-gpu=index,memory.free --format=csv,noheader,nounits \

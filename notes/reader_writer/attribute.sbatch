@@ -12,7 +12,7 @@ set -euo pipefail
 LAYER="${LAYER:-${SLURM_ARRAY_TASK_ID:-18}}"
 FRESH=$(mktemp -d); trap 'rm -rf "$FRESH"' EXIT
 rsync -a --exclude __pycache__ /mnt/nw/home/a.vigouroux/Code/param-decomp/dual_obj_jax/param_decomp "$FRESH/"
-cp /mnt/nw/home/a.vigouroux/Code/param-decomp/arith_representations/notes/arith_representations/reader_writer/attribute.py "$FRESH/"
+cp /mnt/nw/home/a.vigouroux/Code/param-decomp/arith_representations/notes/reader_writer/attribute.py "$FRESH/"
 export PYTHONPATH=$FRESH PYTHONDONTWRITEBYTECODE=1 WANDB_MODE=disabled XLA_PYTHON_CLIENT_PREALLOCATE=false
 export TMPDIR=$(mktemp -d)
 # the allocated card can hold another user's orphan process: wait for >= 20000 MiB free

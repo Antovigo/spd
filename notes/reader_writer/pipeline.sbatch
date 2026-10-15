@@ -11,7 +11,7 @@
 #   BUILD="3 14"  build_app.py on these layers (default: = ATTR)
 # e.g. ATTR="$(seq -s ' ' 0 31)" EXTRACT=1 sbatch pipeline.sbatch
 set -euo pipefail
-D=/mnt/nw/home/a.vigouroux/Code/param-decomp/arith_representations/notes/arith_representations/reader_writer
+D=/mnt/nw/home/a.vigouroux/Code/param-decomp/arith_representations/notes/reader_writer
 PY=/mnt/nw/home/a.vigouroux/Code/param-decomp/dual_obj_jax/.venv/bin/python
 FRESH=$(mktemp -d); trap 'rm -rf "$FRESH"' EXIT
 rsync -a --exclude __pycache__ /mnt/nw/home/a.vigouroux/Code/param-decomp/dual_obj_jax/param_decomp "$FRESH/"

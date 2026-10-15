@@ -229,11 +229,14 @@ What each term means:
   together: what $c$ writes, passed or blocked by what $c'$ does to the same neurons.
 
 The example of section 5 now comes out right: reader 1 has $\delta_{g,1,1} = 0$ on every prompt,
-so it appears in no term. Everything is credited to reader 2 (through $M^{g}$ and $I$).
+so it appears in no term. Among the gate readers, everything is credited to reader 2 (through
+$M^{g}_{w,2}$ and the $I_{w,c,2}$).
 
-Equation (3) has the form of a functional ANOVA (main effects plus pairwise interactions), but
-it needs no independence between the readers and has no higher-order terms: SwiGLU is bilinear
-apart from the gate factor, and the secant absorbs the gate factor exactly.
+Equation (3) is indexed like a functional ANOVA (main effects plus pairwise interactions, no
+higher-order terms), and it needs no independence between the readers. It is not a functional
+ANOVA: $\rho_n$ depends on every gate reader that writes to neuron $n$, so $M^{g}_{w,c'}$ and
+$I_{w,c,c'}$ are not functions of their own readers alone. Only $M^{u}_{w,c}$ is (it is linear in
+$t_{u,c}$).
 
 ## 7. From the exact sum to a variance decomposition
 
@@ -334,8 +337,8 @@ prompt: $1.4 \times 10^{11}$ at block 18 ($4.9 \times 10^{6}$ triples), $1.3 \ti
 block 31 ($4.6 \times 10^{7}$ triples). On a random 20,000-prompt subsample that is
 $2.8 \times 10^{15}$ and $2.6 \times 10^{16}$ per position. Only the running sums
 $\sum_x I_{w,c,c'}\, t_{d,w}$ and $\sum_x I_{w,c,c'}$ are kept (one array of the tensor's size each),
-from which $\mathrm{Cov}_x(I_{w,c,c'}, t_{d,w})$ follows. Contract over $n$ as one matrix product
-per prompt batch: reshape $(V_{d,w,n}\, \rho_n\, \delta_{u,c,n})$ to
+from which $\mathrm{Cov}_x(I_{w,c,c'}, t_{d,w})$ follows. Contract over $n$ as a batched matrix
+product, one matrix product per prompt: reshape $(V_{d,w,n}\, \rho_n\, \delta_{u,c,n})$ to
 $(\lvert \mathcal D \rvert \lvert \mathcal U \rvert) \times N$ and multiply by
 $(\delta_{g,c',n})_{n,c'}$.
 

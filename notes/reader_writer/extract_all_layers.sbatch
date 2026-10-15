@@ -1,17 +1,17 @@
 #!/bin/bash
-#SBATCH -J rw-extract
+#SBATCH -J rw-extract-all
 #SBATCH --gres=gpu:l40:2
 #SBATCH -c 8
-#SBATCH --mem=64G
-#SBATCH -t 06:00:00
+#SBATCH --mem=96G
+#SBATCH -t 12:00:00
 #SBATCH -o /mnt/nw/home/a.vigouroux/out/pod-backup/p-ba8b0c08/analysis/reader_writer/logs/%x-%j.out
-# LAYER=18 sbatch extract_layer.sbatch — runs extract_layer.py against the dual_obj_jax package
+# sbatch extract_all_layers.sbatch — runs extract_all_layers.py against the dual_obj_jax package
 # (node-local copy: NFS can serve a stale .py).
 set -euo pipefail
 LAYER="${LAYER:-18}"
 FRESH=$(mktemp -d); trap 'rm -rf "$FRESH"' EXIT
 rsync -a --exclude __pycache__ /mnt/nw/home/a.vigouroux/Code/param-decomp/dual_obj_jax/param_decomp "$FRESH/"
-cp /mnt/nw/home/a.vigouroux/Code/param-decomp/arith_representations/notes/arith_representations/reader_writer/extract_layer.py "$FRESH/"
+cp /mnt/nw/home/a.vigouroux/Code/param-decomp/arith_representations/notes/reader_writer/extract_layer.py /mnt/nw/home/a.vigouroux/Code/param-decomp/arith_representations/notes/reader_writer/extract_all_layers.py "$FRESH/"
 export PYTHONPATH=$FRESH PYTHONDONTWRITEBYTECODE=1 WANDB_MODE=disabled XLA_PYTHON_CLIENT_MEM_FRACTION=0.95
 export TMPDIR=$(mktemp -d)
 # --gres reserves cards but does not make them idle (2026-10-14: an orphan vLLM worker of another
@@ -27,4 +27,4 @@ done
 [ -n "$FREE_IDS" ] || { echo "no free card"; exit 1; }
 export CUDA_VISIBLE_DEVICES=$FREE_IDS
 cd "$FRESH"
-/mnt/nw/home/a.vigouroux/Code/param-decomp/dual_obj_jax/.venv/bin/python -u extract_layer.py --layer "$LAYER" ${LIMIT:+--limit $LIMIT}
+/mnt/nw/home/a.vigouroux/Code/param-decomp/dual_obj_jax/.venv/bin/python -u extract_all_layers.py ${LIMIT:+--limit $LIMIT}
