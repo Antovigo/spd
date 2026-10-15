@@ -24,14 +24,13 @@ from jaxtyping import Array, Int
 
 from param_decomp.ci_filter.config import ArithmeticPoolConfig
 from param_decomp.ci_filter.pool import build_pool, load_tokenizer
-from param_decomp.ci_filter.step import gather_rows, index_batches
+from param_decomp.ci_filter.step import gather_batch, index_batches
 from param_decomp.core.log import logger, setup_console_logger
-from param_decomp.core.model import PlacedModel
 from param_decomp.core.sharding import hsdp_mesh
 from param_decomp.experiments.lm.deliverable import load_deliverable
-from param_decomp.experiments.lm.load_run import build_target
+from param_decomp.experiments.lm.load_run import PlacedLM, build_target
 from param_decomp.experiments.lm.resolved import TargetConfig
-from param_decomp.targets.glu_transformer import GLUDecomposedModel
+from param_decomp.targets.transformer import TransformerDecomposedModel
 from param_decomp.targets.transformer_taps import post_attention_tap_key, resid_tap_key
 
 
@@ -48,7 +47,9 @@ def main() -> None:
     target = deliverable.target
     assert isinstance(target, TargetConfig)
     mesh = hsdp_mesh(1, jax.device_count(), 1)
-    placed = build_target(target, mesh, args.data_root, "ddp" if mesh.size == 1 else "zero1")
+    placed = build_target(
+        target, mesh, args.data_root, "ddp" if mesh.size == 1 else "zero1", "replicate"
+    )
     n_layer = len({int(s.split(".")[1]) for s in placed.site_names})
     logger.info(f"target {target.model_name}: {n_layer} layers, {mesh.size} device(s)")
 
@@ -76,7 +77,7 @@ def main() -> None:
         + [post_attention_tap_key(layer) for layer in range(n_layer)]
     )
     model = placed.model
-    assert isinstance(model, GLUDecomposedModel), type(model)
+    assert isinstance(model, TransformerDecomposedModel), type(model)
     np.savez(
         args.out_dir / "norms.npz",
         ln1=np.stack([np.asarray(model.frozen_block(i).ln1, np.float32) for i in range(n_layer)]),
@@ -87,10 +88,9 @@ def main() -> None:
 
     @eqx.filter_jit
     def captures(
-        placed: PlacedModel, tokens_all: Int[Array, "N T"], idx: Int[Array, " B"]
+        placed: PlacedLM, tokens_all: Int[Array, "N T"], idx: Int[Array, " B"]
     ) -> dict[str, Array]:
-        tokens = gather_rows(tokens_all, idx)
-        result = placed.clean_forward(tokens, capture_keys=keys)
+        result = placed.clean_forward(gather_batch(tokens_all, idx), capture_keys=keys)
         return {
             key: jax.sharding.reshard(value.astype(jnp.bfloat16), P())
             for key, value in result.captures.items()

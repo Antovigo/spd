@@ -22,7 +22,7 @@ from jax.sharding import PartitionSpec as P
 from param_decomp.arith_repr.isa.components_model import KINDS
 from param_decomp.arith_repr.rmsnorm.run import OUT, savez
 from param_decomp.arith_repr.vectors.common import RUN
-from param_decomp.ci_filter.step import UNCONSTRAINED, output_ci
+from param_decomp.ci_filter.step import UNCONSTRAINED, lm_batch, output_ci, prepare_components
 from param_decomp.experiments.lm.load_run import restore_jax_run
 
 DATA_ROOT = Path("/mnt/nw/home/a.vigouroux/out")
@@ -60,19 +60,20 @@ def main(n_rows: int, batch: int) -> None:
                 uv[f"{k}.U"] = np.asarray(jax.sharding.reshard(sc.U.astype(jnp.float32), P()))
             savez(out / f"uv_L{li}.npz", **uv)
             print("saved uv", li, {k: v.shape for k, v in uv.items()}, flush=True)
+        prepared, _ = prepare_components(placed, restored.components)
         del restored
 
         @eqx.filter_jit
-        def ci_of(placed: Any, ci_fn: Any, toks: jax.Array) -> dict[int, jax.Array]:  # noqa: ANN401
-            captures = placed.clean_forward(toks, capture_keys=ci_fn.capture_keys).captures
-            lower = output_ci(placed, ci_fn, UNCONSTRAINED, captures, remat=False).lower
+        def ci_of(placed: Any, prepared: Any, ci_fn: Any, toks: jax.Array) -> dict[int, jax.Array]:  # noqa: ANN401
+            clean = placed.clean_forward(lm_batch(toks), ci_fn.capture_keys)
+            lower = output_ci(placed, prepared, ci_fn, UNCONSTRAINED, clean, remat=False).lower
             return {li: jax.sharding.reshard(jnp.concatenate([lower[s] for s in sites[li]], -1).astype(jnp.float16), P())
                     for li in LAYERS}  # fmt: skip
 
         cis: dict[int, list[np.ndarray]] = {li: [] for li in LAYERS}
         t0 = time.time()
         for s in range(0, n_rows, batch):
-            got = ci_of(placed, ci_fn, jnp.asarray(tokens[s : s + batch]))
+            got = ci_of(placed, prepared, ci_fn, jnp.asarray(tokens[s : s + batch]))
             for li in LAYERS:
                 cis[li].append(np.asarray(got[li]))
             print(f"ci {s + batch}/{n_rows} ({time.time() - t0:.0f}s)", flush=True)

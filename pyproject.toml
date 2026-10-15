@@ -81,6 +81,7 @@ dev = [
     "basedpyright<1.32.0", # pyright and wandb issues, see https://github.com/goodfire-ai/param-decomp/pull/232
     "pre-commit",
     "ipykernel",
+    "scikit-learn>=1.9.1",
 ]
 
 [build-system]
