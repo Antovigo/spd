@@ -345,9 +345,9 @@ variance $\mathrm{Var}_x(t_{d,w}) \lVert U_{d,w} \rVert^2$ (section 8) next to i
 
 * A writer is **excluded** from the shares when
   $\mathrm{Var}_x(t_{d,w}) \leq 10^{-6}\, \mathbb E_x[t_{d,w}^2]$: its variation is then at the
-  level of float16 rounding of a constant (float16 has a relative precision of about
-  $5 \times 10^{-4}$, whose square is $2.4 \times 10^{-7}$). Only its weights (section 8) are
-  reported.
+  level of the model's bf16 rounding of a constant (bf16 has a relative precision of about
+  $4 \times 10^{-3}$ per stored value, much less once averaged over the pool). Only its weights
+  (section 8) are reported.
 * A writer is **flagged** when its residual-stream variance is below 1 % of the median over the
   writers of the same block and position. Its shares are reported with the flag, so that a share
   of 1 from a leaking neuron is not read as a strong link.
@@ -436,8 +436,9 @@ next to the same sum without magnitudes (the signed total).
 change every reader's input. Required: a forward of the alive-only model (all alive components on
 at every site of every block, dead components and delta off) over the 320,000-prompt pool, saving
 for every block and position the up, gate and writer activations $t_{u,c}$, $t_{g,c'}$, $t_{d,w}$
-(at block 18: $171 + 149 + 194 = 514$ numbers per prompt and position, 1.6 GB in float16 for all
-five positions). Float16 storage is enough. The analysis recomputes $t_{d,w}$ from the stored
+(at block 18: $171 + 149 + 194 = 514$ numbers per prompt and position). They are stored in
+float32 (70 GB for all blocks and positions 1 to 4): the pilot showed float16 is not enough, because
+block 0's writer activations are around $10^{-4}$, in float16's subnormal range. The analysis recomputes $t_{d,w}$ from the stored
 $t_{u,c}$ and $t_{g,c'}$ by equation (1) in float32 and uses that value throughout, so the
 identities of section 6 hold to float32 precision on the stored inputs; the stored $t_{d,w}$ only
 serves check 1. Also save KL(original ‖ alive-only) at the last position, to document how far the
@@ -528,3 +529,32 @@ the float32 error of identity (5), and the projected cost of the full routing te
 5. Comparison with the mean-ablation scores of [`report_method.md`](report_method.md) at block 18,
    position `=`. The two are computed on different models (rounded-CI there, alive-only here), so
    the comparison is of rankings, not values.
+
+### As run (2026-10-15)
+
+The pilot (on a 6,000-prompt extraction) changed four things before the full run.
+
+* **Check 1's scale.** The model's forward runs in bf16, so its stored $t_{d,w}$ carries bf16
+  rounding, which is large relative to $t_{d,w}$ itself for writers whose neuron contributions
+  nearly cancel (relative errors up to 43 % at block 0). Check 1 therefore measures the
+  difference against $A_{d,w} = \sum_n \lvert V_{d,w,n}\, o_n \rvert$, the size of the neuron
+  contributions, which is the scale bf16 rounding lives on: $\sqrt{\mathbb E_x[(t^{\mathrm{rec}}_{d,w}
+  - t^{\mathrm{stored}}_{d,w})^2] / \mathbb E_x[A_{d,w}^2]} \leq 10^{-2}$, where
+  $t^{\mathrm{rec}}_{d,w}$ is the float32 recomputation and $t^{\mathrm{stored}}_{d,w}$ the model's.
+  Measured: $3.0 \times 10^{-3}$ at block 0, $2.4 \times 10^{-3}$ at block 31.
+* **Centred sums.** All sums over prompts use $t_{d,w} - \bar t_{d,w}$, with $\bar t_{d,w}$ the
+  writer's mean from pass 1, so the float32 batch sums do not cancel. Shares then add up to 1
+  within $2 \times 10^{-5}$ (block 0) and $10^{-6}$ (block 31).
+* **Identity (5) tolerance $10^{-3}$**, not $10^{-5}$. Measured $1.8 \times 10^{-4}$ at block 0
+  and $3$ to $6 \times 10^{-5}$ at block 31, relative to $\max \lvert M^{u} \rvert$. It is float32
+  rounding of $\sum_{c'} \delta_{g,c',n}$ against $h_{g,n} - \bar h_{g,n}$ when several gate
+  readers write large, opposite amounts. The share-level identity holds within $10^{-5}$.
+* **Hardware and subsample.** The cluster had no room (7 of 8 L40s and 440 of 458 GB of RAM
+  allocated), so the run is on one A40 RunPod pod (48 GB, of which 46 GB is visible with ECC on;
+  float32 peak $3.74 \times 10^{13}$ operations per second). Measured throughput is about
+  $1.05 \times 10^{13}$ per second for passes 2 and 3 at block 31, the same for every batch size
+  tried ($b_x$ from 16 to 32, $b_w$ from 8 to 32), which projects to 3.0 hours for passes 1 and 2
+  and 13.5 hours for the routing tensor on 20,000 prompts. The routing subsample is therefore
+  **8,000 prompts** (5.4 hours); passes 1 and 2 keep the whole pool. The extraction takes about
+  17 minutes there.
+
