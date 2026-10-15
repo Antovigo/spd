@@ -200,13 +200,16 @@ def cov_sums(t_d: jax.Array, X: jax.Array) -> tuple[jax.Array, jax.Array]:
 
 def finalize(
     n: int, S_t: np.ndarray, S_tt: np.ndarray, sums: dict[str, tuple[np.ndarray, np.ndarray]],
-    ud2: np.ndarray,
+    ud2: np.ndarray, offset: np.ndarray | float = 0.0,
 ) -> dict[str, np.ndarray]:  # fmt: skip
     """Shares phi = Cov(Q, t) / Var(t) (NaN for excluded writers), weights a = Cov(Q, t) ||U_d||^2,
-    and the writer statistics of plan §7-8. `sums[name] = (sum Q, sum Q t)`, float64."""
-    mean_t = S_t / n
-    e_t2 = S_tt / n
-    var_t = e_t2 - mean_t**2
+    and the writer statistics of plan §7-8. `sums[name] = (sum Q, sum Q t)`, float64, where t is
+    the writer activation minus `offset` (a per-writer constant near its mean, which keeps the
+    float32 batch sums free of cancellation; covariances do not depend on it)."""
+    tc_mean = S_t / n
+    var_t = S_tt / n - tc_mean**2
+    mean_t = tc_mean + offset
+    e_t2 = var_t + mean_t**2
     excluded = var_t <= EXCLUDE_REL * e_t2
     resid_var = var_t * ud2
     med = np.median(resid_var[~excluded]) if (~excluded).any() else 0.0
@@ -215,7 +218,7 @@ def finalize(
            "flagged": (resid_var < FLAG_FRAC * med) & ~excluded}  # fmt: skip
     shape_ext = (slice(None),) + (None,) * 2
     for name, (S, St) in sums.items():
-        cov = St / n - (S / n) * mean_t[shape_ext[: S.ndim]]
+        cov = St / n - (S / n) * tc_mean[shape_ext[: S.ndim]]
         denom = np.where(excluded, np.nan, var_t)
         out[f"phi_{name}"] = cov / denom[shape_ext[: S.ndim]]
         out[f"a_{name}"] = cov * ud2[shape_ext[: S.ndim]]
@@ -317,31 +320,42 @@ def device_rows(
 
 
 def pass1_batch(x: dict[str, jax.Array], v: jax.Array, W: Weights):  # noqa: ANN201
-    """Zero padding adds nothing here: SiLU(0) = 0 and t = 0."""
-    return pass1_sums(x["tg"], x["tu"], W), jnp.zeros(())
+    """Zero padding adds nothing here: SiLU(0) = 0 and t = 0. Also sums t_d, whose mean is the
+    offset of the later passes."""
+    sums = pass1_sums(x["tg"], x["tu"], W)
+    sums["td"] = writer_activation(x["tg"], x["tu"], W).sum(0)
+    return sums, jnp.zeros(())
 
 
-def pass2_batch(x: dict[str, jax.Array], v: jax.Array, refs: Refs, W: Weights):  # noqa: ANN201
+def pass2_batch(  # noqa: ANN201
+    x: dict[str, jax.Array], v: jax.Array, refs: Refs, W: Weights, c: jax.Array
+):  # fmt: skip
+    """Batch sums with t centred by the offset `c` (D,). Check 1 compares the recomputed t_d with
+    the stored one relative to sum_n |V_{d,w,n} o_n|, the scale of the model's bf16 rounding."""
     tm = terms(x["tg"], x["tu"], refs, W)
-    t_d = tm["t_d"] * v[:, None]
-    td_stored = x["td"] * v[:, None]
-    out = {"t": t_d.sum(0), "tt": (t_d**2).sum(0), "c1_diff2": ((t_d - td_stored) ** 2).sum(0),
-           "c1_ref2": (td_stored**2).sum(0)}  # fmt: skip
+    tc = (tm["t_d"] - c[None]) * v[:, None]
+    o = silu(x["tg"] @ W.Ug) * (x["tu"] @ W.Uu)
+    absum = (jnp.abs(o) @ jnp.abs(W.Vd)) * v[:, None]
+    diff = (tm["t_d"] - x["td"]) * v[:, None]
+    out = {"t": tc.sum(0), "tt": (tc**2).sum(0), "c1_diff2": (diff**2).sum(0),
+           "c1_abs2": (absum**2).sum(0), "c1_ref2": ((x["td"] * v[:, None]) ** 2).sum(0)}  # fmt: skip
     for k in ("Mu", "Mu0", "Mg"):
-        out[k], out[f"{k}t"] = cov_sums(t_d, tm[k] * v[:, None, None])
+        out[k], out[f"{k}t"] = cov_sums(tc, tm[k] * v[:, None, None])
     total = refs.tref[None] + tm["Mu"].sum(-1) + tm["Mg"].sum(-1)
     err = jnp.max(jnp.abs(total - tm["t_d"]) * v[:, None])
-    return out, err / jnp.maximum(jnp.max(jnp.abs(t_d)), 1e-30)
+    return out, err / jnp.maximum(jnp.max(jnp.abs(tm["t_d"]) * v[:, None]), 1e-30)
 
 
-def pass3_batch(x: dict[str, jax.Array], v: jax.Array, refs: Refs, W: Weights, wc: int):  # noqa: ANN201
+def pass3_batch(  # noqa: ANN201
+    x: dict[str, jax.Array], v: jax.Array, refs: Refs, W: Weights, c: jax.Array, wc: int
+):  # fmt: skip
     tm = terms(x["tg"], x["tu"], refs, W)
-    t_d = tm["t_d"] * v[:, None]
-    rt = routing(x["tg"], x["tu"], refs, W, t_d, wc, v)
+    tc = (tm["t_d"] - c[None]) * v[:, None]
+    rt = routing(x["tg"], x["tu"], refs, W, tc, wc, v)
     D = W.Vd.shape[1]
-    out = {"t": t_d.sum(0), "tt": (t_d**2).sum(0), "J": rt["J"][:D], "Jt": rt["Jt"][:D]}
+    out = {"t": tc.sum(0), "tt": (tc**2).sum(0), "J": rt["J"][:D], "Jt": rt["Jt"][:D]}
     for k in ("Mu", "Mu0"):
-        out[k], out[f"{k}t"] = cov_sums(t_d, tm[k] * v[:, None, None])
+        out[k], out[f"{k}t"] = cov_sums(tc, tm[k] * v[:, None, None])
     diff = (rt["J_sum_gates"][:, :D] - (tm["Mu"] - tm["Mu0"])) * v[:, None, None]
     scale = jnp.maximum(jnp.max(jnp.abs(tm["Mu"]) * v[:, None, None]), 1e-30)
     return out, jnp.max(jnp.abs(diff)) / scale
@@ -418,16 +432,19 @@ def run_position(
     acc1 = Accum(out / f"state_p1_pos{tau}.npz", f"p1 n={n} B={B} K={K}")
     run_pass("pass1", acc1, x, valid, chunk_runner(pass1_batch, B, K), B * K, W)
     refs = make_refs(acc1.sums, n, W)
+    c = jnp.asarray(acc1.sums["td"] / n, jnp.float32)
 
     acc2 = Accum(out / f"state_p2_pos{tau}.npz", f"p2 n={n} B={B} K={K}")
-    run_pass("pass2", acc2, x, valid, chunk_runner(pass2_batch, B, K), B * K, refs, W)
+    run_pass("pass2", acc2, x, valid, chunk_runner(pass2_batch, B, K), B * K, refs, W, c)
     del x, valid
     s2 = acc2.sums
     ud2 = np.asarray(W.ud2, np.float64)
+    c64 = acc1.sums["td"] / n
     res = finalize(
-        n, s2["t"], s2["tt"], {k: (s2[k], s2[f"{k}t"]) for k in ("Mu", "Mu0", "Mg")}, ud2
+        n, s2["t"], s2["tt"], {k: (s2[k], s2[f"{k}t"]) for k in ("Mu", "Mu0", "Mg")}, ud2, c64
     )
-    res["check1_rel"] = np.sqrt(s2["c1_diff2"] / np.maximum(s2["c1_ref2"], 1e-300))
+    res["check1_rel"] = np.sqrt(s2["c1_diff2"] / np.maximum(s2["c1_abs2"], 1e-300))
+    res["check1_rel_t"] = np.sqrt(s2["c1_diff2"] / np.maximum(s2["c1_ref2"], 1e-300))
     res["ident4_max"] = s2["check"]
     tmp2 = out / f"variance_pos{tau}.tmp.npz"
     np.savez(tmp2, **res,
@@ -443,11 +460,16 @@ def run_position(
     x, valid = device_rows(inner, sub, p, cols, jB * jK)
     acc3 = Accum(out / f"state_p3_pos{tau}.npz", f"p3 n={sub.size} jB={jB} K={jK} wc={wc}")
     run3 = chunk_runner(functools.partial(pass3_batch, wc=wc), jB, jK)
-    run_pass("pass3", acc3, x, valid, run3, jB * jK, refs, W)
+    run_pass("pass3", acc3, x, valid, run3, jB * jK, refs, W, c)
     del x, valid
     s3 = acc3.sums
     res3 = finalize(
-        sub.size, s3["t"], s3["tt"], {k: (s3[k], s3[f"{k}t"]) for k in ("J", "Mu", "Mu0")}, ud2
+        sub.size,
+        s3["t"],
+        s3["tt"],
+        {k: (s3[k], s3[f"{k}t"]) for k in ("J", "Mu", "Mu0")},
+        ud2,
+        c64,
     )
     gap = res3["phi_Mu"] - res3["phi_Mu0"] - np.nansum(res3["phi_J"], 2)
     info.update(ident5_max=float(s3["check"]),
