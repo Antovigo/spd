@@ -14,8 +14,12 @@ FILTER=addsub-08-last-pos-40000
 HUB="$HOME/.cache/huggingface/hub/models--meta-llama--Llama-3.1-8B"
 SNAP=$(basename "$(ls -d "$HUB"/snapshots/* | tail -1)")
 export SSH="ssh -p $POD_PORT -i $KEY -o StrictHostKeyChecking=accept-new -c aes128-gcm@openssh.com"
-push() {  # push <root> <dest>: every file under <root>/./ listed on stdin, relative paths kept
-  xargs -P 8 -I{} rsync -rLtR -e "$SSH" "{}" "root@$POD_HOST:$1"
+push() {  # push <dest>: every file under <root>/./ listed on stdin, relative paths kept
+  local files; files=$(cat)
+  # create the directory tree first: parallel rsyncs racing on one mkdir fail with EEXIST
+  sed 's|.*/\./||' <<<"$files" | xargs -d "\n" dirname | sort -u | sed "s|^|$1|" \
+    | $SSH "root@$POD_HOST" 'xargs -d "\n" mkdir -p'
+  xargs -P 8 -I{} rsync -rLtR -e "$SSH" "{}" "root@$POD_HOST:$1" <<<"$files"
 }
 {
   echo "$SRC/./launch_config.yaml"
@@ -25,6 +29,6 @@ push() {  # push <root> <dest>: every file under <root>/./ listed on stdin, rela
   echo "$SRC/./$FILTER/config.yaml"
 } | push "/workspace/data/runs/$RUN/"
 {
-  (cd "$HUB" && find "snapshots/$SNAP" refs | sed "s|^|$HUB/./|")
-} | grep -v "/\.$" | push "/workspace/hf/hub/models--meta-llama--Llama-3.1-8B/"
+  (cd "$HUB" && find "snapshots/$SNAP" refs -not -type d | sed "s|^|$HUB/./|")
+} | push "/workspace/hf/hub/models--meta-llama--Llama-3.1-8B/"
 echo "pushed run data and Llama snapshot $SNAP"
