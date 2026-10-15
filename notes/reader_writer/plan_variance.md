@@ -69,7 +69,7 @@ $\tau$ depends on another position's MLP.
 * **What a reader writes to a neuron** (a real number per prompt and neuron):
 
 $$
-y_{u,c,n}(x) = t_{u,c}(x)\, U_{u,c,n}, \qquad y_{g,c',n}(x) = t_{g,c'}(x)\, U_{g,c',n} .
+y_{u,c,n}(x) = t_{u,c}(x) U_{u,c,n}, \qquad y_{g,c',n}(x) = t_{g,c'}(x) U_{g,c',n} .
 $$
 
 * **Neuron pre-activations**, the sums over all alive readers of the same kind:
@@ -79,8 +79,8 @@ h_{u,n}(x) = \sum_{c \in \mathcal U} y_{u,c,n}(x), \qquad h_{g,n}(x) = \sum_{c' 
 $$
 
 * $\sigma(\xi) = 1 / (1 + e^{-\xi})$, the logistic sigmoid of a real number $\xi$, and
-  $\mathrm{SiLU}(\xi) = \xi\, \sigma(\xi)$.
-* $o_n(x) = \mathrm{SiLU}(h_{g,n}(x))\, h_{u,n}(x)$: the output of neuron $n$.
+  $\mathrm{SiLU}(\xi) = \xi \sigma(\xi)$.
+* $o_n(x) = \mathrm{SiLU}(h_{g,n}(x)) h_{u,n}(x)$: the output of neuron $n$.
 
 Two remarks on the notation.
 
@@ -89,7 +89,7 @@ Two remarks on the notation.
   $t_{u,c}$ changes under this, but $y_{u,c,n}$ does not. Everything below is built from the
   $y$'s, so the reader side is gauge-free. The writer side is handled in section 8.
 * **Means.** A bar denotes the mean over prompts, e.g.
-  $\bar y_{u,c,n} = \mathbb E_x[y_{u,c,n}(x)] = \bar t_{u,c}\, U_{u,c,n}$. Because $h_{u,n}$ and
+  $\bar y_{u,c,n} = \mathbb E_x[y_{u,c,n}(x)] = \bar t_{u,c} U_{u,c,n}$. Because $h_{u,n}$ and
   $h_{g,n}$ are linear in the $y$'s, $\bar h_{u,n} = \sum_c \bar y_{u,c,n}$ and
   $\bar h_{g,n} = \sum_{c'} \bar y_{g,c',n}$.
 
@@ -98,38 +98,38 @@ Two remarks on the notation.
 The writer reads the neurons through its read vector:
 
 $$
-t_{d,w}(x) = \sum_{n=1}^{N} V_{d,w,n}\, o_n(x) = \sum_{n=1}^{N} V_{d,w,n}\, \mathrm{SiLU}\big(h_{g,n}(x)\big)\, h_{u,n}(x) . \tag{1}
+t_{d,w}(x) = \sum_{n=1}^{N} V_{d,w,n} o_n(x) = \sum_{n=1}^{N} V_{d,w,n} \mathrm{SiLU}\big(h_{g,n}(x)\big) h_{u,n}(x) . \tag{1}
 $$
 
 Drop the argument $x$ from here on; every quantity except $U$, $V$ and the means depends on it.
 
-**Step 1: factor SiLU.** By definition $\mathrm{SiLU}(h_{g,n}) = \sigma(h_{g,n})\, h_{g,n}$. Write
+**Step 1: factor SiLU.** By definition $\mathrm{SiLU}(h_{g,n}) = \sigma(h_{g,n}) h_{g,n}$. Write
 $\gamma_n = \sigma(h_{g,n}) \in (0, 1)$, the neuron's **gate factor**. Then
 
 $$
-o_n = \gamma_n\, h_{g,n}\, h_{u,n} .
+o_n = \gamma_n h_{g,n} h_{u,n} .
 $$
 
 **Step 2: expand the two pre-activations.** Substitute the sums that define $h_{g,n}$ and
 $h_{u,n}$, and multiply out the product of two finite sums (distributivity):
 
 $$
-h_{g,n}\, h_{u,n} = \Big( \sum_{c' \in \mathcal G} y_{g,c',n} \Big) \Big( \sum_{c \in \mathcal U} y_{u,c,n} \Big) = \sum_{c \in \mathcal U} \sum_{c' \in \mathcal G} y_{u,c,n}\, y_{g,c',n} .
+h_{g,n} h_{u,n} = \Big( \sum_{c' \in \mathcal G} y_{g,c',n} \Big) \Big( \sum_{c \in \mathcal U} y_{u,c,n} \Big) = \sum_{c \in \mathcal U} \sum_{c' \in \mathcal G} y_{u,c,n} y_{g,c',n} .
 $$
 
-So $o_n = \sum_{c, c'} \gamma_n\, y_{u,c,n}\, y_{g,c',n}$.
+So $o_n = \sum_{c, c'} \gamma_n y_{u,c,n} y_{g,c',n}$.
 
 **Step 3: put this into (1) and swap the order of the finite sums:**
 
 $$
-t_{d,w} = \sum_{n} V_{d,w,n} \sum_{c, c'} \gamma_n\, y_{u,c,n}\, y_{g,c',n} = \sum_{c \in \mathcal U} \sum_{c' \in \mathcal G} \underbrace{\sum_{n} V_{d,w,n}\, \gamma_n\, y_{u,c,n}\, y_{g,c',n}}_{P_{w,c,c'}} .
+t_{d,w} = \sum_{n} V_{d,w,n} \sum_{c, c'} \gamma_n y_{u,c,n} y_{g,c',n} = \sum_{c \in \mathcal U} \sum_{c' \in \mathcal G} \underbrace{\sum_{n} V_{d,w,n} \gamma_n y_{u,c,n} y_{g,c',n}}_{P_{w,c,c'}} .
 $$
 
 **Step 4: pull the activations out.** Since $y_{u,c,n} = t_{u,c} U_{u,c,n}$ and
 $y_{g,c',n} = t_{g,c'} U_{g,c',n}$, and $t_{u,c}$, $t_{g,c'}$ do not depend on $n$:
 
 $$
-P_{w,c,c'} = t_{u,c}\, t_{g,c'}\, B_{w,c,c'}, \qquad B_{w,c,c'} = \sum_n V_{d,w,n}\, U_{u,c,n}\, U_{g,c',n}\, \gamma_n . \tag{2}
+P_{w,c,c'} = t_{u,c} t_{g,c'} B_{w,c,c'}, \qquad B_{w,c,c'} = \sum_n V_{d,w,n} U_{u,c,n} U_{g,c',n} \gamma_n . \tag{2}
 $$
 
 This is a **bilinear** form in the readers' activations. The coupling tensor $B$ would be a fixed
@@ -145,7 +145,7 @@ $\mathrm{SiLU}(h_{g,n})$ along the straight line from the reference $h_{g,n} = 0
 parameter $\alpha \in [0, 1]$, gate reader $c'$ receives
 
 $$
-y_{g,c',n} \int_0^1 \mathrm{SiLU}'(\alpha\, h_{g,n})\, d\alpha = y_{g,c',n}\, \frac{\mathrm{SiLU}(h_{g,n}) - \mathrm{SiLU}(0)}{h_{g,n}} = y_{g,c',n}\, \sigma(h_{g,n}),
+y_{g,c',n} \int_0^1 \mathrm{SiLU}'(\alpha h_{g,n}) d\alpha = y_{g,c',n} \frac{\mathrm{SiLU}(h_{g,n}) - \mathrm{SiLU}(0)}{h_{g,n}} = y_{g,c',n} \sigma(h_{g,n}),
 $$
 
 where $\mathrm{SiLU}'$ is the derivative of SiLU. The shares add up exactly to
@@ -199,7 +199,7 @@ $$
 $h_{u,n} = \bar h_{u,n} + \sum_c \delta_{u,c,n}$:
 
 $$
-o_n = \underbrace{\mathrm{SiLU}(\bar h_{g,n})\, \bar h_{u,n}}_{\text{reference}} + \sum_{c} \mathrm{SiLU}(\bar h_{g,n})\, \delta_{u,c,n} + \sum_{c'} \rho_n\, \bar h_{u,n}\, \delta_{g,c',n} + \sum_{c, c'} \rho_n\, \delta_{u,c,n}\, \delta_{g,c',n} .
+o_n = \underbrace{\mathrm{SiLU}(\bar h_{g,n}) \bar h_{u,n}}_{\text{reference}} + \sum_{c} \mathrm{SiLU}(\bar h_{g,n}) \delta_{u,c,n} + \sum_{c'} \rho_n \bar h_{u,n} \delta_{g,c',n} + \sum_{c, c'} \rho_n \delta_{u,c,n} \delta_{g,c',n} .
 $$
 
 **Step 3': read out through the writer and swap sums**, as in section 4:
@@ -212,10 +212,10 @@ with
 
 $$
 \begin{aligned}
-t^{\mathrm{ref}}_{d,w} &= \sum_n V_{d,w,n}\, \mathrm{SiLU}(\bar h_{g,n})\, \bar h_{u,n} && \text{(a constant)},\\
-M^{u}_{w,c} &= \sum_n V_{d,w,n}\, \mathrm{SiLU}(\bar h_{g,n})\, \delta_{u,c,n} = (t_{u,c} - \bar t_{u,c}) \sum_n V_{d,w,n}\, U_{u,c,n}\, \mathrm{SiLU}(\bar h_{g,n}) && \text{(up main effect)},\\
-M^{g}_{w,c'} &= \sum_n V_{d,w,n}\, \rho_n\, \bar h_{u,n}\, \delta_{g,c',n} && \text{(gate main effect)},\\
-I_{w,c,c'} &= \sum_n V_{d,w,n}\, \rho_n\, \delta_{u,c,n}\, \delta_{g,c',n} && \text{(up × gate interaction)}.
+t^{\mathrm{ref}}_{d,w} &= \sum_n V_{d,w,n} \mathrm{SiLU}(\bar h_{g,n}) \bar h_{u,n} && \text{(a constant)},\\
+M^{u}_{w,c} &= \sum_n V_{d,w,n} \mathrm{SiLU}(\bar h_{g,n}) \delta_{u,c,n} = (t_{u,c} - \bar t_{u,c}) \sum_n V_{d,w,n} U_{u,c,n} \mathrm{SiLU}(\bar h_{g,n}) && \text{(up main effect)},\\
+M^{g}_{w,c'} &= \sum_n V_{d,w,n} \rho_n \bar h_{u,n} \delta_{g,c',n} && \text{(gate main effect)},\\
+I_{w,c,c'} &= \sum_n V_{d,w,n} \rho_n \delta_{u,c,n} \delta_{g,c',n} && \text{(up × gate interaction)}.
 \end{aligned}
 $$
 
@@ -283,9 +283,9 @@ as its own pair edge (section 9), so the convention only affects the per-reader 
 
 Shares are ratios, so they do not depend on the writer's gauge. To compare or merge writers we
 use the variance each writer puts into the residual stream: writer $w$ adds $t_{d,w} U_{d,w}$,
-whose total variance over prompts is $\mathrm{Var}_x(t_{d,w})\, \lVert U_{d,w} \rVert^2$, where
+whose total variance over prompts is $\mathrm{Var}_x(t_{d,w}) \lVert U_{d,w} \rVert^2$, where
 $\lVert \cdot \rVert$ is the Euclidean norm. This is gauge-free. The **absolute** weight of term
-$k$ is $\phi_{w,k}\, \mathrm{Var}_x(t_{d,w})\, \lVert U_{d,w} \rVert^2$, in units of squared
+$k$ is $\phi_{w,k} \mathrm{Var}_x(t_{d,w}) \lVert U_{d,w} \rVert^2$, in units of squared
 residual-stream norm.
 
 ## 9. From shares to groups
@@ -323,11 +323,11 @@ five positions). Also save KL(original ‖ alive-only) at the last position, to 
 alive-only model is from Llama.
 
 **Main effects and per-reader totals (whole pool).** Per prompt, the up main effects of all
-writers form the matrix $(V_{d,w,n}\, \mathrm{SiLU}(\bar h_{g,n}))_{w,n}$ times
+writers form the matrix $(V_{d,w,n} \mathrm{SiLU}(\bar h_{g,n}))_{w,n}$ times
 $(\delta_{u,c,n})_{n,c}$, i.e. $2 \lvert \mathcal D \rvert \lvert \mathcal U \rvert N$
 floating-point operations; at block 18 that is $9.5 \times 10^{8}$ per prompt, $3.0 \times 10^{14}$
 for the pool at one position. The gate main effects cost the same with $\lvert \mathcal G \rvert$.
-The interaction summed over gates, $\sum_{c'} I_{w,c,c'} = \sum_n V_{d,w,n}\, \rho_n\, \delta_{u,c,n} \sum_{c'} \delta_{g,c',n}$,
+The interaction summed over gates, $\sum_{c'} I_{w,c,c'} = \sum_n V_{d,w,n} \rho_n \delta_{u,c,n} \sum_{c'} \delta_{g,c',n}$,
 has the same cost, and likewise the sum over up readers. So all per-reader totals of section 7
 cost three or four such products.
 
@@ -336,9 +336,9 @@ $2 \lvert \mathcal D \rvert \lvert \mathcal U \rvert \lvert \mathcal G \rvert N$
 prompt: $1.4 \times 10^{11}$ at block 18 ($4.9 \times 10^{6}$ triples), $1.3 \times 10^{12}$ at
 block 31 ($4.6 \times 10^{7}$ triples). On a random 20,000-prompt subsample that is
 $2.8 \times 10^{15}$ and $2.6 \times 10^{16}$ per position. Only the running sums
-$\sum_x I_{w,c,c'}\, t_{d,w}$ and $\sum_x I_{w,c,c'}$ are kept (one array of the tensor's size each),
+$\sum_x I_{w,c,c'} t_{d,w}$ and $\sum_x I_{w,c,c'}$ are kept (one array of the tensor's size each),
 from which $\mathrm{Cov}_x(I_{w,c,c'}, t_{d,w})$ follows. Contract over $n$ as a batched matrix
-product, one matrix product per prompt: reshape $(V_{d,w,n}\, \rho_n\, \delta_{u,c,n})$ to
+product, one matrix product per prompt: reshape $(V_{d,w,n} \rho_n \delta_{u,c,n})$ to
 $(\lvert \mathcal D \rvert \lvert \mathcal U \rvert) \times N$ and multiply by
 $(\delta_{g,c',n})_{n,c'}$.
 
