@@ -150,6 +150,7 @@ LAB_LM_EVAL_TEST_PATHS = \
 LAB_LM_TEST_PATHS = param_decomp/tests/experiments/lm/
 LAB_EXPERIMENTS_TEST_PATHS = \
 	param_decomp/tests/ci_filter/ \
+	param_decomp/tests/pruning/ \
 	param_decomp/tests/experiments/ \
 	param_decomp/tests/infra/ \
 	param_decomp/tests/migrations/ \
