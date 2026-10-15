@@ -7,9 +7,11 @@ without any training state or optimizer."""
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 import equinox as eqx
 import jax
+import orbax.checkpoint as ocp
 from jax.sharding import NamedSharding, SingleDeviceSharding
 from jaxtyping import PRNGKeyArray
 
@@ -21,6 +23,7 @@ from param_decomp.core.checkpoint import (
     restore_decomposition,
 )
 from param_decomp.core.ci_fn.architecture import CIFnArchitecture
+from param_decomp.core.ci_fn.implementations.transformer.backbone import BackboneCIFn, CIFnBackbone
 from param_decomp.core.ci_fn.interface import CIFn
 from param_decomp.core.components import ComponentStacks, init_component_stacks
 from param_decomp.core.configs import (
@@ -380,7 +383,42 @@ def _restore_decomposition[
     manager = make_read_only_checkpoint_manager(checkpoint_root)
     resolved_step = manager.latest_step() if step is None else step
     assert resolved_step is not None, f"no checkpoints under {checkpoint_root}"
-    return restore_decomposition(manager, resolved_step, abstract), resolved_step
+    wrapped = abstract.ci_fn
+    if not isinstance(wrapped, BackboneCIFn) or not _stores_pre_backbone_ci_fn(
+        checkpoint_root, resolved_step
+    ):
+        return restore_decomposition(manager, resolved_step, abstract), resolved_step
+    # A pre-2026-10 fork checkpoint stored the transformer CI fn's arrays directly under
+    # `ci_fn`; upstream 017a17af4 nested the same arrays one level down, under
+    # `ci_fn.backbone`, leaf for leaf. Restore onto the backbone, then re-wrap.
+    legacy = _PreBackboneDecomposition(components=abstract.components, ci_fn=wrapped.backbone)
+    restored = restore_decomposition(manager, resolved_step, legacy)
+    restored_ci_fn = cast(
+        CIFn[Conditioning], eqx.tree_at(lambda f: f.backbone, wrapped, restored.ci_fn)
+    )
+    return Decomposition(components=restored.components, ci_fn=restored_ci_fn), resolved_step
+
+
+@jax.tree_util.register_dataclass
+@dataclass(frozen=True)
+class _PreBackboneDecomposition:
+    """A pre-2026-10 checkpoint's decomposition item: the CI fn's arrays are the backbone's,
+    with no wrapper level. Field names match `Decomposition`'s, which orbax keys on."""
+
+    components: ComponentStacks
+    ci_fn: CIFnBackbone
+
+
+def _stores_pre_backbone_ci_fn(checkpoint_root: Path, step: int) -> bool:
+    """Whether checkpoint `step` predates the `ci_fn.backbone` nesting: its stored `ci_fn`
+    tree has no such key."""
+    metadata = ocp.StandardCheckpointer().metadata(checkpoint_root / str(step) / "decomposition")
+    assert metadata.item_metadata is not None, f"no item metadata at {checkpoint_root}/{step}"
+    tree = metadata.item_metadata.tree
+    assert isinstance(tree, dict) and isinstance(tree.get("ci_fn"), dict), (
+        f"unexpected decomposition metadata layout at {checkpoint_root}/{step}"
+    )
+    return "backbone" not in tree["ci_fn"]
 
 
 def open_run(

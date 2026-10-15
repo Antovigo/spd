@@ -83,6 +83,7 @@ from param_decomp.lm.batch_data import (
     global_lm_batch,
     global_token_batch,
 )
+from param_decomp.migrations.fork_2026_10 import read_stored_config
 from param_decomp.targets.lm_output import LMOutput
 from param_decomp.targets.qwen36_moe import Qwen36MoeDecomposedModel
 from param_decomp.targets.transformer import TransformerDecomposedModel, hf_snapshot_dir
@@ -155,7 +156,7 @@ def assert_targeted_finetune_structural_compat(
     be a TARGETED run — its pinned config is parsed under `LMTargetedExperimentConfig`, so a
     plain parent fails the parse loudly instead of loading a decomposition trained under a
     different objective shape."""
-    raw = yaml.safe_load((prov.parent_run_dir / LAUNCH_CONFIG_FILENAME).read_text())
+    raw = read_stored_config(prov.parent_run_dir / LAUNCH_CONFIG_FILENAME)
     parent_cfg = LMTargetedExperimentConfig.model_validate(raw)
     parent = build_targeted_experiment_config(parent_cfg, prov.parent_run_dir.name, data_root)
     parent_sites = tuple((s.name, s.C) for s in parent.target.sites)

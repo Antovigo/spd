@@ -2,11 +2,10 @@
 
 from pathlib import Path
 
-import yaml
-
 from param_decomp.core.base_config import BaseConfig
 from param_decomp.core.run_files import LAUNCH_CONFIG_FILENAME
 from param_decomp.infra.dataset_store import DatasetRef
+from param_decomp.migrations.fork_2026_10 import read_stored_config
 
 DELIVERABLE_FILENAME = "deliverable.yaml"
 
@@ -27,6 +26,5 @@ def product_document(run_dir: Path) -> Path:
 
 def load_data_config(run_dir: Path) -> LMDataConfig:
     """The datasets a finished run trained on and held out, as its product names them."""
-    raw = yaml.safe_load(product_document(run_dir).read_text())
-    assert isinstance(raw, dict), f"stored run config must be a mapping: {run_dir}"
+    raw = read_stored_config(product_document(run_dir))
     return LMDataConfig.model_validate(raw["data"])
