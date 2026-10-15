@@ -44,8 +44,10 @@ block 31 has the most, with 259, 310 and 572.
 ## 3. Notation
 
 Everything is for one block $l \in \{0, \dots, 31\}$ and one token position
-$\tau \in \{0, \dots, 4\}$, held fixed. The MLP is applied token by token, so nothing at position
-$\tau$ depends on another position's MLP.
+$\tau \in \{1, \dots, 4\}$ (the tokens $a$, operator, $b$, `=`), held fixed. The MLP is applied
+token by token, so nothing at position $\tau$ depends on another position's MLP. Position 0, the
+beginning-of-sequence token, is excluded: its causal prefix is the same on every prompt, so every
+activation there is the same on every prompt and has zero variance.
 
 * $x$: a prompt, from the pool $\mathcal X$ of the $2 \times 400 \times 400 = 320{,}000$ prompts.
   $\mathbb E_x$, $\mathrm{Var}_x$ and $\mathrm{Cov}_x$ are the mean, variance and covariance
@@ -174,7 +176,10 @@ neuron $n$ read by the writer with $V_{d,w,n} = 1$:
 "Off" has to mean below about $-5$: SiLU is not flat between $-5$ and $0$ (its minimum is
 $-0.278$ at $-1.28$). Below $-5$, SiLU is under $0.034$ in absolute value and its slope under
 $0.03$. Properties 1 and 2 then hold up to this small leak, and the credit given equals the small
-variance that really gets through.
+variance that really gets through. They are statements about a term's weight in units of
+residual-stream variance (section 8), not about its share. A writer whose only input is a leaking
+neuron has a tiny variance, all of it from the leak, so the leak's share of that writer is 1.
+Such writers are flagged rather than excluded (section 7).
 
 **The zero reference fails on the gate side.** One neuron, $V_{d,w,1} = 1$. Gate reader 1 writes
 the constant $y_{g,1,1} = 5$ on every prompt. Gate reader 2 writes $y_{g,2,1} \in \{-10, 0\}$,
@@ -298,10 +303,10 @@ reader, and the gate readers' own credit stays $M^{g}_{w,c'}$.
 
 1. Gate always off at $h_{g,n} = -10$: $\mathrm{SiLU}(-10) \approx -4.5 \times 10^{-4}$ on every
    prompt, so the up reader's term carries $\mathrm{SiLU}(-10)^2$ times its variance, the variance
-   that actually leaks through. Holds up to that leak.
+   that actually leaks through. Holds for the weight (section 8), up to that leak.
 2. Gate always off, gate reader varying between $-12$ and $-8$: $\rho_n$ is the slope of a chord
-   of SiLU in that range, below $2.5 \times 10^{-3}$ in absolute value, so $M^{g}$ is equally small. Holds up to the
-   leak.
+   of SiLU in that range, below $2.5 \times 10^{-3}$ in absolute value, so $M^{g}$ is equally small. Holds for the
+   weight, up to the leak.
 3. With $q$, $A$ and $B$ as in section 5: the off prompts have
    $\omega_n = \mathrm{SiLU}(-10)^2 \approx 2 \times 10^{-7}$ against
    $\mathrm{SiLU}(h_{g,n})^2$ on the on prompts, so $r_n \approx A$. The up reader's term is then
@@ -333,6 +338,19 @@ $$
 Define the **share** of term $k$ as $\phi_{w,k} = \mathrm{Cov}_x(Q_k, t_{d,w}) / \mathrm{Var}_x(t_{d,w})$.
 The shares of each writer add up to exactly 1. A share can be negative: that term moves against
 the rest and cancels part of them.
+
+**Small-variance writers.** A share is a fraction of the writer's own variance, so it says nothing
+about whether that variance is large. Both are recorded: for every writer, its residual-stream
+variance $\mathrm{Var}_x(t_{d,w}) \lVert U_{d,w} \rVert^2$ (section 8) next to its shares.
+
+* A writer is **excluded** from the shares when
+  $\mathrm{Var}_x(t_{d,w}) \leq 10^{-6}\, \mathbb E_x[t_{d,w}^2]$: its variation is then at the
+  level of float16 rounding of a constant (float16 has a relative precision of about
+  $5 \times 10^{-4}$, whose square is $2.4 \times 10^{-7}$). Only its weights (section 8) are
+  reported.
+* A writer is **flagged** when its residual-stream variance is below 1 % of the median over the
+  writers of the same block and position. Its shares are reported with the flag, so that a share
+  of 1 from a leaking neuron is not read as a strong link.
 
 **Why this is the right split: it is the Shapley value of the variance.** Treat the terms as
 players in a cooperative game. The worth of a subset $S \subseteq K_w$ is
@@ -367,36 +385,49 @@ are therefore consistent.
 Shares are ratios, so they do not depend on the writer's gauge. To compare or merge writers we
 use the variance each writer puts into the residual stream: writer $w$ adds $t_{d,w} U_{d,w}$,
 whose total variance over prompts is $\mathrm{Var}_x(t_{d,w}) \lVert U_{d,w} \rVert^2$, where
-$\lVert \cdot \rVert$ is the Euclidean norm. This is gauge-free. The **absolute** weight of term
-$k$ is $\phi_{w,k} \mathrm{Var}_x(t_{d,w}) \lVert U_{d,w} \rVert^2$, in units of squared
-residual-stream norm.
+$\lVert \cdot \rVert$ is the Euclidean norm. This is gauge-free. The **weight** of term $k$ of
+writer $w$ is the signed real number
+
+$$
+a_{w,k} = \phi_{w,k} \mathrm{Var}_x(t_{d,w}) \lVert U_{d,w} \rVert^2 = \mathrm{Cov}_x(Q_k, t_{d,w}) \lVert U_{d,w} \rVert^2,
+$$
+
+in units of squared residual-stream norm. Its positive part is $a^{+}_{w,k} = \max(a_{w,k}, 0)$,
+its negative part $a^{-}_{w,k} = \max(-a_{w,k}, 0)$, and its magnitude
+$\lvert a_{w,k} \rvert = a^{+}_{w,k} + a^{-}_{w,k}$. The second form of $a_{w,k}$ is defined for
+excluded writers too. The weights of the terms $M^{u}_{w,c}$, $M^{g}_{w,c'}$, $M^{u,0}_{w,c}$ and
+$J_{w,c,c'}$ are written $a^{u}_{w,c}$, $a^{g}_{w,c'}$, $a^{u,0}_{w,c}$ and $a^{J}_{w,c,c'}$.
 
 ## 9. From shares to groups
+
+Groups are built from the magnitudes $\lvert a \rvert$. A term that cancels part of the others
+still connects its reader to the writer: both act on the same writer, which is what a group
+should capture. The sign is kept next to each edge for interpretation; near-total cancellations
+between two terms are expected to be rare and are not treated specially.
 
 For each block and position, build a weighted structure:
 
 * nodes: the alive up readers, gate readers and writers;
-* a writer–up edge for each $(w, c)$, weighted by the absolute weight of $M^{u}_{w,c}$, and a
-  writer–gate edge for each $(w, c')$, weighted by the absolute weight of $M^{g}_{w,c'}$
-  (section 8);
-* a hyperedge for each triple $(w, c, c')$, weighted by the absolute weight of $J_{w,c,c'}$: the
+* a writer–up edge for each $(w, c)$, weighted by $\lvert a^{u}_{w,c} \rvert$, and a writer–gate
+  edge for each $(w, c')$, weighted by $\lvert a^{g}_{w,c'} \rvert$;
+* a hyperedge for each triple $(w, c, c')$, weighted by $\lvert a^{J}_{w,c,c'} \rvert$: the
   part of up reader $c$'s effect on writer $w$ that gate reader $c'$ passes or blocks.
 
 The hyperedge weights are part of the writer–up weights (equation 5), not added to them. Groups
 are then a clustering of this structure. Two concrete routes:
 
 * **Pairwise graph.** Keep the writer–up and writer–gate edges, add an up–gate edge for each
-  $(c, c')$ weighted by $\sum_w$ (absolute weight of $J_{w,c,c'}$), keep the positive weights, and
-  run community detection (Leiden with a scanned resolution). Negative weights are reported
-  separately as cancellations.
-* **Tensor route.** Collect the positive parts of the absolute weights of $J_{w,c,c'}$ into a
-  tensor indexed by $(w, c, c')$, with one extra "mean gate" slice on the gate axis holding
-  $M^{u,0}_{w,c}$, and fit a nonnegative CP (PARAFAC) decomposition. Each rank-one factor is a
-  candidate group: a set of writers, up readers and gate readers with weights. The gate terms
-  $M^{g}_{w,c'}$ enter as an extra "reference up" slice on the up axis.
+  $(c, c')$ weighted by $\sum_w \lvert a^{J}_{w,c,c'} \rvert$, and run community detection
+  (Leiden with a scanned resolution).
+* **Tensor route.** Collect $\lvert a^{J}_{w,c,c'} \rvert$ into a tensor indexed by
+  $(w, c, c')$, with one extra "mean gate" slice on the gate axis holding
+  $\lvert a^{u,0}_{w,c} \rvert$, and fit a nonnegative CP (PARAFAC) decomposition. Each rank-one
+  factor is a candidate group: a set of writers, up readers and gate readers with weights. The
+  gate terms $\lvert a^{g}_{w,c'} \rvert$ enter as an extra "reference up" slice on the up axis.
 
 A group is supported when its members carry a large fraction of the members' writers' variance.
-The number reported per group is the sum of its shares over its writers.
+The number reported per group is the sum over its writers of $\lvert a \rvert$ for its members,
+next to the same sum without magnitudes (the signed total).
 
 ## 10. What to compute
 
@@ -406,7 +437,10 @@ change every reader's input. Required: a forward of the alive-only model (all al
 at every site of every block, dead components and delta off) over the 320,000-prompt pool, saving
 for every block and position the up, gate and writer activations $t_{u,c}$, $t_{g,c'}$, $t_{d,w}$
 (at block 18: $171 + 149 + 194 = 514$ numbers per prompt and position, 1.6 GB in float16 for all
-five positions). Also save KL(original ‖ alive-only) at the last position, to document how far the
+five positions). Float16 storage is enough. The analysis recomputes $t_{d,w}$ from the stored
+$t_{u,c}$ and $t_{g,c'}$ by equation (1) in float32 and uses that value throughout, so the
+identities of section 6 hold to float32 precision on the stored inputs; the stored $t_{d,w}$ only
+serves check 1. Also save KL(original ‖ alive-only) at the last position, to document how far the
 alive-only model is from Llama.
 
 **Two passes per block and position.** The references need statistics over prompts before any
@@ -421,35 +455,76 @@ term can be formed.
   $\sum_x Q_k$ for every term, from which $\mathrm{Cov}_x(Q_k, t_{d,w})$ follows. The terms are
   never stored.
 
+**Secant slope in floating point.** With $\Delta_n = h_{g,n} - \bar h_{g,n}$ (a real number), the
+quotient defining $\rho_n$ loses precision when $\Delta_n$ is small. For
+$\lvert \Delta_n \rvert < 10^{-3}$ use the second-order Taylor expansion
+$\rho_n \approx \mathrm{SiLU}'(\bar h_{g,n}) + \tfrac12 \mathrm{SiLU}''(\bar h_{g,n}) \Delta_n$, with
+$\mathrm{SiLU}'(\xi) = \sigma(\xi)\big(1 + \xi(1 - \sigma(\xi))\big)$ and
+$\mathrm{SiLU}''(\xi) = \sigma(\xi)(1 - \sigma(\xi))\big(2 + \xi(1 - 2\sigma(\xi))\big)$; its error
+is of order $\Delta_n^2 < 10^{-6}$.
+
 **Per-reader terms (whole pool).** Per prompt, the up terms of all writers are the matrix
 $(V_{d,w,n} \mathrm{SiLU}(h_{g,n}))_{w,n}$ times $(\varepsilon_{u,c,n})_{n,c}$, i.e.
 $2 \lvert \mathcal D \rvert \lvert \mathcal U \rvert N$ floating-point operations; at block 18
 that is $9.5 \times 10^{8}$ per prompt, $3.0 \times 10^{14}$ for the pool at one position. The
 gate terms are $(V_{d,w,n} \rho_n r_n)_{w,n}$ times $(\delta_{g,c',n})_{n,c'}$, the same cost with
 $\lvert \mathcal G \rvert$. The mean-gate parts $M^{u,0}_{w,c}$ cost the same as the up terms.
+Summed over all 32 blocks and positions 1 to 4, the per-reader terms on the whole pool cost
+$1.1 \times 10^{17}$ operations.
 
-**Routing tensor (subsample).** $J_{w,c,c'}$ for all triples costs
+**Routing tensor.** $J_{w,c,c'}$ for all triples costs
 $2 \lvert \mathcal D \rvert \lvert \mathcal U \rvert \lvert \mathcal G \rvert N$ operations per
 prompt: $1.4 \times 10^{11}$ at block 18 ($4.9 \times 10^{6}$ triples), $1.3 \times 10^{12}$ at
-block 31 ($4.6 \times 10^{7}$ triples). On a random 20,000-prompt subsample that is
-$2.8 \times 10^{15}$ and $2.6 \times 10^{16}$ per position. Only the running sums
-$\sum_x J_{w,c,c'} t_{d,w}$ and $\sum_x J_{w,c,c'}$ are kept (one array of the tensor's size each).
-Contract over $n$ as a batched matrix product, one matrix product per prompt: reshape
-$(V_{d,w,n} \rho_n \varepsilon_{u,c,n})$ to $(\lvert \mathcal D \rvert \lvert \mathcal U \rvert)
-\times N$ and multiply by $(\delta_{g,c',n})_{n,c'}$. The references stay those of pass 1 on the
-whole pool.
+block 31 ($4.6 \times 10^{7}$ triples). On a random 20,000-prompt subsample (fixed seed, fixed
+order) that is $2.8 \times 10^{15}$ and $2.6 \times 10^{16}$ per position, and
+$5.2 \times 10^{17}$ over all blocks and positions 1 to 4. The references stay those of pass 1 on
+the whole pool. Only the running sums $\sum_x J_{w,c,c'} t_{d,w}$ and $\sum_x J_{w,c,c'}$ are
+kept (one float32 array of the tensor's size each: 0.4 GB at block 31).
+
+*Batching.* The operand $(V_{d,w,n} \rho_n \varepsilon_{u,c,n})$ for all writers at once is
+$(\lvert \mathcal D \rvert \lvert \mathcal U \rvert) \times N$, $2.1 \times 10^{9}$ entries
+(8.5 GB in float32) per prompt at block 31, so it is never formed whole. The computation loops over
+chunks of $b_w$ writers and batches of $b_x$ prompts: for each chunk and batch, form the
+$b_x \times b_w \times \lvert \mathcal U \rvert \times N$ operand, contract it over $n$ with
+$(\delta_{g,c',n})$ as a batched matrix product, multiply by $t_{d,w}$, and add into the
+accumulators. $b_w$ and $b_x$ are set by the pilot to fit in memory; with $b_x = 16$ and
+$b_w = 8$ at block 31 the operand is $4.8 \times 10^{8}$ entries (1.9 GB in float32).
+
+*Precision.* Operands in float32, contraction in float32 with TF32 disabled, accumulators in
+float32.
+
+*Hardware and restarts.* One L40 per job (48 GB; jobs request 44,000 MiB free, as for the other
+L40 jobs on this cluster), submitted through SLURM, one job per block. Each job writes its
+accumulators and the index of the last finished prompt batch to disk every 50 batches; a restarted
+job loads them and continues from the next batch.
+
+*Pilot and go/no-go.* Before the full run, a pilot on block 31 (the largest), position `=`, on
+the first 500 prompts of the subsample measures peak GPU memory, achieved operations per second,
+the float32 error of identity (5), and the projected cost of the full routing tensor. Decision:
+
+* if the projection for all blocks and positions is at most 24 L40 GPU-hours, compute the dense
+  tensor. (The L40's specified float32 peak is $9.05 \times 10^{13}$ operations per second, at
+  which the $5.2 \times 10^{17}$ operations take 1.6 hours.)
+* otherwise compute $J$ only for **candidate pairs**: for each writer $w$, the smallest set of up
+  readers whose $\lvert a^{u}_{w,c} \rvert$ add up to 99 % of $\sum_c \lvert a^{u}_{w,c} \rvert$,
+  each paired with every gate reader. This costs $2 P \lvert \mathcal G \rvert N$ operations per
+  prompt, where $P$ is the number of kept $(w, c)$ pairs.
 
 **Checks, in order.**
 
-1. The forward: $t_{d,w}$ recomputed from the saved $t_{u,c}$, $t_{g,c'}$ and the alive $U$, $V$
-   by equation (1) matches the saved $t_{d,w}$.
-2. The identities (4) and (5): reference plus all terms equals $t_{d,w}$ on every prompt, and
-   $M^{u,0}_{w,c} + \sum_{c'} J_{w,c,c'} = M^{u}_{w,c}$, to float32 precision. The case
-   $h_{g,n} \approx \bar h_{g,n}$ uses $\mathrm{SiLU}'(\bar h_{g,n})$ to avoid 0/0.
-3. The shares of each writer add up to 1 (equation 6), on the subsample and on the pool.
-4. Synthetic one-neuron tests of the four properties of section 5 and of the zero-reference
-   example: the up reader of property 3 and the constant gate reader get shares below the leak
-   bound, the gate of property 4 gets share 1.
+1. The forward: $t_{d,w}$ recomputed from the stored $t_{u,c}$, $t_{g,c'}$ and the alive $U$, $V$
+   by equation (1) matches the stored $t_{d,w}$ to float16 precision (relative error per writer
+   at most $10^{-2}$, the threshold of `notes/arith_representations/virtual_weights/collect_alive_only.py`).
+2. The identities (4) and (5): reference plus all terms equals the recomputed $t_{d,w}$ on every
+   prompt, and $M^{u,0}_{w,c} + \sum_{c'} J_{w,c,c'} = M^{u}_{w,c}$, to float32 precision
+   (relative error below $10^{-5}$).
+3. The shares of each non-excluded writer add up to 1 (equation 6), on the subsample and on the
+   pool.
+4. Synthetic tests of the four properties of section 5 and of the zero-reference example, each
+   with a second neuron of order-1 variance read by the same writer: the up reader of property 3,
+   the up reader of property 1, the gate reader of property 2 and the constant gate reader get
+   weights below the leak bound and shares below $10^{-3}$; the gate of property 4 gets the whole
+   weight of its neuron.
 5. Comparison with the mean-ablation scores of [`report_method.md`](report_method.md) at block 18,
    position `=`. The two are computed on different models (rounded-CI there, alive-only here), so
    the comparison is of rankings, not values.
