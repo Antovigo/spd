@@ -90,6 +90,7 @@ _LAYER_ALLOWED: dict[str, tuple[str, ...]] = {
     "autointerp": _ANY,
     "ci_filter": _ANY,  # fork: the CI-fn fine-tune lab (composition-shaped)
     "pruning": _ANY,  # fork: component pruning over a restored run (composition-shaped)
+    "arith_repr": _ANY,  # fork: offline analysis of arithmetic representations
     "clustering": (),  # removal marker only; see its docstring
     "experiments": _ANY,
     "harvest": _ANY,

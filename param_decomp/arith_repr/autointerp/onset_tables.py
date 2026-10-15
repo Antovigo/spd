@@ -133,7 +133,7 @@ def main() -> None:
                     desc = ""
                 rows.append((int(c), pos, ("add", "sub")[o], float(rate[c]), label, r2, desc))
             print("pos", pos, "op", o, "components", cols.size, flush=True)
-    t = pd.DataFrame(rows, columns=["col", "pos", "op", "on_rate", "label", "r2", "desc"])
+    t = pd.DataFrame(rows, columns=pd.Index(["col", "pos", "op", "on_rate", "label", "r2", "desc"]))
     t.to_parquet(args.run / "analysis/arith_repr/autointerp/onsets_all.parquet")
     print(t.groupby(["pos", "op"]).size())
 

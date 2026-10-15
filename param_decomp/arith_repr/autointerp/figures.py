@@ -66,7 +66,7 @@ def fig_pos1_onsets(ctx: Ctx) -> None:
         else:
             cls = f"residue mod {d['tau']}"
         rows.append((c, df.layer[c], cls, d))
-    t = pd.DataFrame(rows, columns=["col", "layer", "cls", "d"])
+    t = pd.DataFrame(rows, columns=pd.Index(["col", "layer", "cls", "d"]))
     t["cls"] = t.cls.replace(
         {"residue mod 20": "residue mod 20/25", "residue mod 25": "residue mod 20/25"}
     )
