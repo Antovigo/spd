@@ -23,6 +23,9 @@ class PruneConfig(BaseConfig):
 
     sample_size: PositiveInt = 4096
     """`|R|`, the shared uniform sample of `P`."""
+    check_size: PositiveInt = 32768
+    """`|Q|`, the fixed random check set of the rounds' exact `CE` checks and mask gradients (an
+    all-`P` pass is ~14 min on one A100, dominated by the full-vocabulary unembedding)."""
     top_ci: PositiveInt = 256
     """`|H_c|`, each component's highest-CI prompts."""
     batch_size: PositiveInt = 4096
@@ -57,6 +60,6 @@ class PruneConfig(BaseConfig):
     max_fresh_screens: NonNegativeInt = 3
 
     noise_check_components: NonNegativeInt = 100
-    estimator_check_components: NonNegativeInt = 30
+    estimator_check_components: NonNegativeInt = 20
     validation_prompts: PositiveInt = 1024
     compilation_cache_dir: Path | None = None
