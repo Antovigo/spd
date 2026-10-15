@@ -42,6 +42,9 @@ EPS_SECANT = 1e-3
 EXCLUDE_REL = 1e-6
 FLAG_FRAC = 0.01
 SAVE_SECONDS = 600.0
+TOL = {"check1_rel_max": 1e-2, "ident4_max": 1e-5, "ident5_max": 1e-5,
+       "share_sum_err_max": 1e-4, "share5_err_max": 1e-4}  # fmt: skip
+"""Plan §10 checks 1-3: a position's results are published only when every one holds."""
 
 
 # ---------------------------------------------------------------- the math (pure, dtype-agnostic)
@@ -357,7 +360,7 @@ def flops_per_prompt(N: int, G: int, U: int, D: int) -> dict[str, float]:
 
 def run_position(
     layer: int, p: int, W: Weights, inner: np.ndarray, cols: dict[str, np.ndarray], out: Path,
-    n: int, sub: np.ndarray, B: int, jB: int, wc: int,
+    n: int, sub: np.ndarray, B: int, jB: int, wc: int, strict: bool = True,
 ) -> dict[str, object]:  # fmt: skip
     """All three passes at stored position p (token position p + 1); writes variance_pos<tau>.npz
     and J_pos<tau>.npz into `out`, returns timings and checks."""
@@ -419,7 +422,8 @@ def run_position(
     )
     res["check1_rel"] = np.sqrt(s2["c1_diff2"] / np.maximum(s2["c1_ref2"], 1e-300))
     res["ident4_max"] = s2["ident4"]
-    np.savez(out / f"variance_pos{tau}.npz", **res,
+    tmp2 = out / f"variance_pos{tau}.tmp.npz"
+    np.savez(tmp2, **res,
              tbar_g=np.asarray(refs.tbar_g), hbar_g=np.asarray(refs.hbar_g),
              r=np.asarray(refs.r), R=np.asarray(refs.R), tref=np.asarray(refs.tref))  # fmt: skip
     share_sum = np.nansum(res["phi_Mu"], 1) + np.nansum(res["phi_Mg"], 1)
@@ -447,8 +451,22 @@ def run_position(
     gap = res3["phi_Mu"] - res3["phi_Mu0"] - np.nansum(res3["phi_J"], 2)
     info.update(ident5_max=float(s3["ident5"]),
                 share5_err_max=float(np.nanmax(np.abs(gap))) if np.isfinite(gap).any() else 0.0)  # fmt: skip
-    np.savez(out / f"J_pos{tau}.npz", sub=sub,
+    tmp3 = out / f"J_pos{tau}.tmp.npz"
+    np.savez(tmp3, sub=sub,
              **{k: (v.astype(np.float32) if v.ndim == 3 else v) for k, v in res3.items()})  # fmt: skip
+    ok = ~res["excluded"]
+    finite = bool(np.isfinite(res["phi_Mu"][ok]).all() and np.isfinite(res["phi_Mg"][ok]).all()
+                  and np.isfinite(res3["phi_J"][~res3["excluded"]]).all())  # fmt: skip
+    failed = [f"{k}={info[k]:.3g} > {tol:g}" for k, tol in TOL.items()
+              if not float(info[k]) <= tol]  # fmt: skip
+    if not finite:
+        failed.append("non-finite shares on non-excluded writers")
+    info["checks_failed"] = failed
+    if failed and strict:
+        raise AssertionError(f"L{layer} tau={tau}: checks failed {failed}; results left in "
+                             f"{tmp2.name}, {tmp3.name} (not published)")  # fmt: skip
+    os.replace(tmp2, out / f"variance_pos{tau}.npz")
+    os.replace(tmp3, out / f"J_pos{tau}.npz")  # published last: marks the position done
     for acc in (acc1, acc2, acc3):
         acc.path.unlink(missing_ok=True)
     return info
@@ -492,7 +510,7 @@ def main() -> None:
             print(f"L{args.layer} tau={tau}: done already, skipped", flush=True)
             continue
         infos.append(run_position(args.layer, POSITIONS.index(tau), W, inner, cols, out, n, sub,
-                                  args.batch, args.jbatch, args.wc))  # fmt: skip
+                                  args.batch, args.jbatch, args.wc, strict=not args.pilot))  # fmt: skip
     stats = jax.local_devices()[0].memory_stats() or {}
     summary = {"infos": infos, "peak_bytes_in_use": stats.get("peak_bytes_in_use"),
                "device": str(jax.local_devices()[0]), "batch": args.batch,
