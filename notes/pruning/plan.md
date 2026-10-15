@@ -49,7 +49,10 @@ subset is not required.
    different rows can ablate different components). The residual stream, norms, attention and
    softmax are fp32; matmul precision is a config knob (default fp32 for the screen; the full-`P`
    passes of §4 use bf16 inputs with fp32 accumulation, whose noise is far below the 0.01-nat
-   round tolerance). Factored, the 15,768 components cost ~0.4 GFLOP per token, against 16 for
+   round tolerance). This fp32 evaluation is the DEFINITION of `M_S` here: the same weights as the
+   decomposition, which trained in bf16, without its rounding noise. Its agreement with the native
+   bf16 masked forward is measured (item 3), and `S_final` is also scored with the native forward
+   (§5). Factored, the 15,768 components cost ~0.4 GFLOP per token, against 16 for
    dense Llama; the unembedding at the last position (1 GFLOP per prompt) dominates.
 2. **Partial forward.** The same forward started at block `l` (integer, 0..31) from a cached
    block-input residual, so ablating a component of block `l` only reruns blocks `l..31`.
@@ -57,7 +60,9 @@ subset is not required.
    - our `M_{S₀}` against the decomposition's own masked forward with the `alive_union` global mask,
      delta off (`ci_filter/ablation.py`): last-position KL ≈ 0 up to bf16 noise;
    - our dense Llama against `placed.clean_forward`: same;
-   - partial forward from cached residuals = full forward, bit for bit;
+   - partial forward from cached residuals = full forward, at every restart block `l`, for the
+     per-component masks and every precision path (exact where the arithmetic order is the same,
+     otherwise a measured tolerance well below the `SE_c` floor);
    - **bf16 / TF32 noise floor.** For 100 random components of `S₀`, compute `δ_p` on `R` (§3) with
      the fp32 path and with the fast path; the fast path is allowed for the screen only if
      `|ΔCE_fast − ΔCE_fp32| < 0.1 · SE_c` for ≥ 99% of them.
@@ -107,6 +112,10 @@ minus the sum over `R ∩ H_c` (phase B knows which of its prompts are in `R`), 
   shows a positive entry at `(τ, k) = (20, 5)`.
 - Per-prompt `δ_p` on `R` and on `H_c` (fp16, ~140 MB in all), for later analysis.
 
+**Estimator check.** For 30 components spread over the `ΔĈE_c / SE_c` range, measure `ΔCE_c(S₀)`
+exactly over all of `P` (one factored forward over `P` each) and report `(ΔCE − ΔĈE)/SE`; its spread
+should be close to 1.
+
 ## 4. Stage 2: pruning rounds
 
 Round `j` (from `S_j`):
@@ -115,9 +124,11 @@ Round `j` (from `S_j`):
    first, at most 10% of `|S_j|`. `z = 1` (dimensionless); `ε` is a per-component negligible effect
    in nats, set after stage 1 from the distribution of `SE_c` (recorded in the run config). Noisy
    components with mean near 0 are protected; quiet null components still go.
-2. **Remove and check.** `S' = S_j ∖ batch`; compute `CE(S')` exactly over all of `P`. If it rose by
-   more than `0.01` nats over `CE(S_j)`, put back the less-negative half of the batch and recheck
-   (repeat until it passes or the batch is empty). `S_{j+1}` = the accepted `S'`.
+2. **Remove and check.** `S' = S_j ∖ batch`; compute `CE(S')` exactly over all of `P`. The batch is
+   accepted if `CE(S') − CE(S_j) ≤ 0.01` nats (per round) AND `CE(S') − CE(S₀) ≤ 0.03` nats (global
+   budget, so the per-round allowance cannot accumulate). Otherwise put back the less-negative half
+   of the batch and recheck (repeat until it passes or the batch is empty). `S_{j+1}` = the accepted
+   `S'`.
 3. **Gradient pass** on `S_{j+1}`: `g_c` for every `c ∈ S₀` (on and off), in one forward and
    backward over all of `P` (microbatched, accumulated). With the factored forward this is `jax.grad`
    with respect to the mask vectors.
@@ -127,12 +138,15 @@ Round `j` (from `S_j`):
    2,000 per round, largest disagreements first.
 5. **Re-addition.** Each pruned `c` with `g_c < −θ` (`θ = 10⁻³` nats) is a candidate; it is re-added
    if direct ablation-in (the stage-1 estimator with `S_{j+1} ∪ {c}` as the base and `c` removed)
-   gives `ΔĈE_c − z · SE_c > θ`. A component can be re-added at most once; a second removal is
-   final.
+   gives `ΔĈE_c − z · SE_c > θ`. Removal needs the upper bound below `ε` and re-addition the lower
+   bound above `θ > ε`, so the same estimate cannot both remove and re-add a component; a component
+   re-added in round `j` is not a removal candidate in round `j`. There is no permanent exclusion.
 
-**Stopping.** When step 1 yields no candidate and step 5 re-adds nothing, run a fresh full stage-1
-screen of the current `S` (not just of the disagreements) and continue the rounds from it if it
-yields candidates. Stop when a fresh screen yields none. Hard caps: 30 rounds, 3 fresh screens.
+**Stopping.** When step 1 yields no candidate and step 5 re-adds nothing, run a fresh full screen of
+the current `S`: the stage-1 ablation of every survivor AND the ablation-in of every excluded
+component (not only those with an adverse gradient). Continue the rounds from it if it yields
+removals or re-additions. Stop when a fresh screen yields neither. Hard caps: 30 rounds, 3 fresh
+screens.
 
 **Logged per round** (JSONL): `|S_j|`, the batch, rollbacks, `CE`, `CEint`, accuracy and KL to Llama
 on all of `P`, the number of disagreements and re-additions.
@@ -140,7 +154,8 @@ on all of `P`, the number of disagreements and re-additions.
 ## 5. Final report
 
 For `S_final`, `S₀` and Llama on all of `P`: `CE`, `CEint`, accuracy, `P(V_int)`, KL to Llama, split
-by `op` and by `r` in bins of 100; the final per-component screen of `S_final`; the composition of
+by `op` and by `r` in bins of 100, in the fp32 evaluation and in the decomposition's native bf16
+masked forward; the final per-component screen of `S_final`; the composition of
 `S_final` by layer and site kind; the removal round of every pruned component.
 
 ## 6. Code and outputs
