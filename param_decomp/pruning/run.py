@@ -6,7 +6,7 @@
 Writes `<run_dir>/analysis/pruning/step_<step>/<name>/` (layout in `notes/pruning/plan.md` §6):
 `config.yaml`, `hc.npz`, `strata.npz`, `validation.json`, `references.json` (+ `.npz`),
 `screen/{a,b}_*.npz`, `components.tsv`, `vectors.npz`, `estimator_check.json`, `rounds.jsonl`,
-`sets/S_<j>.npz`, `report.json`. A stage whose output exists is skipped, except `prune`, which
+`sets/S_<j>.npz`, `report.json`, `learn/` (the learned-mask λ sweep, `learn.py`). A stage whose output exists is skipped, except `prune`, which
 resumes from the newest `sets/S_<j>.npz`."""
 
 import argparse
@@ -73,6 +73,7 @@ STAGES = (
     "estimator_check",
     "prune",
     "report",
+    "learn",
 )
 PERIODS = (2, 5, 10, 20, 50, 100)
 ROUND_KNOBS = (
@@ -117,6 +118,7 @@ def run(config: PruneConfig, data_root: Path, name: str, stages: tuple[str, ...]
         mutable = set(ROUND_KNOBS) | {"batch_size", "hc_components_per_batch", "select_batch_size",
                                       "grad_batch_size", "compilation_cache_dir",
                                       "temperature_prompts"}  # fmt: skip
+        mutable.update(k for k in PruneConfig.model_fields if k.startswith("learn_"))
         if not (out / "screen").exists():
             mutable.update({"site_precision", "head_precision"})
         for key in PruneConfig.model_fields:
@@ -242,6 +244,11 @@ def run(config: PruneConfig, data_root: Path, name: str, stages: tuple[str, ...]
                     run_rounds(config, ctx, state, check, ce_s0, out)
                 case "blockwise":
                     run_blockwise(config, ctx, state, check, ce_s0, out)
+
+        if "learn" in stages:
+            from param_decomp.pruning.learn import run_learn
+
+            run_learn(config, ctx, check, out)
 
         if "temperature" in stages and not (out / "temperature.npz").exists():
             temperature(config, ctx, mask0, out)

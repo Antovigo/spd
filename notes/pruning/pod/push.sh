@@ -4,7 +4,9 @@
 #   - the run: launch_config.yaml + checkpoint 40000's `decomposition` item (~10 GB);
 #   - the ceiling CI filter: config.yaml, alive/ and training/ci_fn/ (~3.4 GB);
 #   - the Llama-3.1-8B HF snapshot from the cluster cache (~15 GB; no HF token on the pod);
-#   - the pruning config (CONFIG, default ~/pd_scratch/pruning/addsub-08-prune.yaml).
+#   - the pruning config (CONFIG, default ~/pd_scratch/pruning/addsub-08-prune.yaml);
+#   - with PRUNE=<name>: that finished pruning run's small outputs (config, hc, strata,
+#     references, components.tsv, sets/), so later stages (`learn`, `temperature`) reuse its Q.
 #     POD_HOST=<ip> POD_PORT=<port> KEY=~/.ssh/runpod ./push.sh
 set -euo pipefail
 : "${POD_HOST:?}" "${POD_PORT:?}" "${KEY:?}"
@@ -27,4 +29,9 @@ rsync -rtl --mkpath -e "$SSH" "$SRC/ckpts/$STEP/_CHECKPOINT_METADATA" "$SRC/ckpt
 F="$SRC/$FILTER-$STEP"
 rsync -rtl --mkpath -e "$SSH" "$F/config.yaml" "$F/alive" "$F/training" "$DST/$FILTER-$STEP/"
 rsync -rtl --mkpath -e "$SSH" "$HOME/.cache/huggingface/hub/models--meta-llama--Llama-3.1-8B" "$POD:/workspace/hf/hub/"
+if [ -n "${PRUNE:-}" ]; then
+  PS="$SRC/analysis/pruning/step_$STEP/$PRUNE"
+  rsync -rtl --mkpath -e "$SSH" "$PS/config.yaml" "$PS/hc.npz" "$PS/strata.npz" "$PS/references.json" \
+    "$PS/references.npz" "$PS/components.tsv" "$PS/sets" "$DST/analysis/pruning/step_$STEP/$PRUNE/"
+fi
 echo "pushed"

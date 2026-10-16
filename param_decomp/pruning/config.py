@@ -73,3 +73,17 @@ class PruneConfig(BaseConfig):
     temperature_prompts: PositiveInt = 1024
     """Prompts of `R` (its first ones) the `temperature` stage fits each component on."""
     compilation_cache_dir: Path | None = None
+
+    learn_lambdas: tuple[PositiveFloat, ...] = (1e-6, 3e-6, 1e-5, 3e-5, 1e-4)
+    """The `learn` stage's sparsity weights `λ` (nats per component), one mask each (`learn.py`)."""
+    learn_steps: PositiveInt = 600
+    learn_batch: PositiveInt = 512
+    """Prompts of `P \\ Q` per Adam step (in `grad_batch_size` microbatches)."""
+    learn_lr: PositiveFloat = 0.02
+    learn_init: float = 1.0
+    """Initial logit of every component (`S₀` all on)."""
+    learn_temperature: PositiveFloat = 1.0
+    """`T` of the straight-through surrogate `σ(ℓ / T)`."""
+    learn_eval_every: PositiveInt = 50
+    learn_eval_size: PositiveInt = 4096
+    """Prompts of `Q` (its first ones) of the periodic `ce_int` probe."""

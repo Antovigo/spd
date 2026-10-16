@@ -531,3 +531,37 @@ def test_temperature_fit() -> None:
     assert float(jnp.min(fit.kl)) > 0
     other = temperature_fit(logp_b, log_softmax32(logits + rng.normal(0, 2, size=(3, 50))))
     assert float(jnp.max(other.r2)) < 0.5
+
+
+def test_learned_mask(setup: Setup, tmp_path: Path) -> None:
+    """A large λ prunes components, the run resumes from `state.npz`, and `final.json` scores
+    the last mask on the check set."""
+    from param_decomp.pruning.learn import learn_mask, run_learn
+
+    ctx = _context(setup, sample_all=True)
+    check = np.arange(0, ctx.problem.n, 2)
+    config = PruneConfig.model_validate(
+        {
+            "run": {"kind": "id", "id": "p-test"},
+            "step": 0,
+            "filter_id": "cf-test",
+            "pool": {},
+            "full_precision": "fp32",
+            "grad_batch_size": 8,
+            "learn_lambdas": [1.0],
+            "learn_steps": 4,
+            "learn_batch": 8,
+            "learn_lr": 0.5,
+            "learn_eval_every": 2,
+            "learn_eval_size": 8,
+        }
+    )
+    run_learn(config, ctx, check, tmp_path)
+    d = tmp_path / "learn" / "lam_1"
+    final = json.loads((d / "final.json").read_text())
+    assert final["size"] < ctx.slots.n
+    assert final["prompts"] == check.size
+    assert [json.loads(r)["step"] for r in (d / "log.jsonl").read_text().splitlines()] == [2, 4]
+    assert (tmp_path / "learn" / "baseline.json").exists()
+    on = learn_mask(config, ctx, check, 1.0, tmp_path)
+    assert int(on.sum()) == final["size"]
