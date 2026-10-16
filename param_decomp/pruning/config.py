@@ -74,7 +74,7 @@ class PruneConfig(BaseConfig):
     """Prompts of `R` (its first ones) the `temperature` stage fits each component on."""
     compilation_cache_dir: Path | None = None
 
-    learn_lambdas: tuple[PositiveFloat, ...] = (1e-6, 3e-6, 1e-5, 3e-5, 1e-4)
+    learn_lambdas: tuple[NonNegativeFloat, ...] = (1e-6, 3e-6, 1e-5, 3e-5, 1e-4)
     """The `learn` stage's sparsity weights `λ` (nats per component), one mask each (`learn.py`)."""
     learn_steps: PositiveInt = 600
     learn_batch: PositiveInt = 512
