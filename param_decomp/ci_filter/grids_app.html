@@ -48,7 +48,7 @@
   .matrix-strip .tile { flex: 0 0 auto; }
   .tile { border: 1px solid var(--line); border-radius: 6px; background: var(--card);
           cursor: pointer; text-align: center; position: relative; }
-  /* Components a pruning run removed (`pruned.js`, written by param_decomp.pruning.marks on experiment/comp_pruning). */
+  /* Components a learned pruning mask removed (`pruned.js`, written by param_decomp.pruning.marks on experiment/comp_pruning). */
   .tile .pruned { position: absolute; top: 3px; right: 3px; width: 13px; height: 13px;
                   background: #fff; border: 1px solid #c0392b; border-radius: 2px;
                   color: #c0392b; font: bold 11px/13px sans-serif; text-align: center;
@@ -139,7 +139,7 @@ function showTip(ev, text) {
 const hideTip = () => { tip().style.display = "none"; };
 function pruneTooltip(info) {
   const lines = [
-    info.pruned ? `PRUNED in block ${info.block}` : "kept",
+    info.pruned ? "PRUNED" : "kept",
     `screen on S0 (all alive, delta off); ablating this component:`,
     `  KL(alive-only || ablated): ${fmt(info.kl)}`,
     `  dCE: ${fmt(info.d_ce)} ± ${fmt(info.se_ce)} nats (among integers: ${fmt(info.d_ce_int)})`,
@@ -428,7 +428,7 @@ function renderDetail() {
   const pi = 0, oi = 0;
   const info = pruneInfo(selected.name, selected.c), pruned = info?.pruned ? info : null;
   $("dtitle").textContent = `${selected.name} · component ${selected.c} · op ${cur.ops[oi]} · position ${positionLabel(cur.positions[pi])}`
-    + (pruned ? ` · ✕ pruned in block ${pruned.block}` : "");
+    + (pruned ? " · ✕ pruned" : "");
   // A split slice draws the pooled thumbnail until the module's full grids arrive.
   const fullGrids = fullData(selected.mi), loading = !fullGrids;
   const drawers = tileDrawers(selected.mi, selected.si, pi, oi, fullGrids || moduleData(selected.mi));
