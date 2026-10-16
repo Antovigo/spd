@@ -304,3 +304,59 @@ def mask_gradient(
         return jnp.sum(weight * ce)
 
     return jax.grad(loss)(mask)
+
+
+class TemperatureFit(eqx.Module):
+    """How much of one component's ablation a pure temperature change explains, per prompt."""
+
+    kl: Float[Array, " B"]
+    """`KL(p_base ‖ p_ablated)` at the last position."""
+    r2: Float[Array, " B"]
+    """Temperature R²: the fit `log p_base − log p_ablated ≈ c + (1 − β) z_base` over the
+    vocabulary, weighted by `(p_base + p_ablated) / 2`, as an explained fraction of the
+    weighted variance (`notes/rmsnorm/entropy-components.md`, regression version)."""
+    beta: Float[Array, " B"]
+    """The fitted inverse-temperature factor `β` (> 1 sharpens)."""
+
+
+@eqx.filter_jit
+def flip_temperature(
+    arch: Arch,
+    shared: Shared,
+    factors: Factors,
+    mask: Mask,
+    cache: SampleCache,
+    kind: Int[Array, ""],
+    layer: Int[Array, ""],
+    slot: Int[Array, ""],
+    sign: Float[Array, ""],
+    site_precision: Precision,
+    head_precision: Precision,
+) -> TemperatureFit:
+    """Flip one component on a sample chunk and fit a temperature change to its effect. The base
+    logits enter as `logp_base` (a per-prompt constant shift, absorbed by `c`)."""
+    batch = cache.y.shape[0]
+    flips = Flips.same(batch, kind, layer, slot, sign)
+    start = jax.lax.dynamic_index_in_dim(cache.inputs, layer, keepdims=False)
+    resid = run_blocks(arch, shared, factors, mask, flips, start, layer, site_precision)
+    logp_a = log_softmax32(last_logits(arch, shared, resid, head_precision))
+    return temperature_fit(cache.logp_base, logp_a)
+
+
+def temperature_fit(
+    logp_b: Float[Array, "B vocab"], logp_a: Float[Array, "B vocab"]
+) -> TemperatureFit:
+    """`TemperatureFit` of the change from `logp_b` (base) to `logp_a` (ablated)."""
+    w = 0.5 * (jnp.exp(logp_b) + jnp.exp(logp_a))
+    w = w / jnp.sum(w, axis=-1, keepdims=True)
+    d = logp_b - logp_a
+    mz = jnp.sum(w * logp_b, axis=-1, keepdims=True)
+    md = jnp.sum(w * d, axis=-1, keepdims=True)
+    cov = jnp.sum(w * (logp_b - mz) * (d - md), axis=-1)
+    var_z = jnp.sum(w * (logp_b - mz) ** 2, axis=-1)
+    var_d = jnp.sum(w * (d - md) ** 2, axis=-1)
+    return TemperatureFit(
+        kl=jnp.sum(jnp.exp(logp_b) * d, axis=-1),
+        r2=cov**2 / jnp.maximum(var_z * var_d, 1e-30),
+        beta=1.0 - cov / jnp.maximum(var_z, 1e-30),
+    )

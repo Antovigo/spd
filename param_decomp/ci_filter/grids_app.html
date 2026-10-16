@@ -116,8 +116,23 @@ let selected = null;       // {mi, si} selected component
 
 const selectedKey = () => `${SLICES.ops[+$("op").value]}:${SLICES.positions[+$("pos").value]}`;
 const positionLabel = p => `${p} (${SLICES.position_labels[p]})`;
-// `{block, set}` of a component the pruning run removed, else null.
-const prunedInfo = (name, c) => window.PRUNED?.sites?.[name]?.[c] ?? null;
+// A pruning run's per-component record (`pruned.js`), else null.
+const pruneInfo = (name, c) => window.PRUNED?.sites?.[name]?.[c] ?? null;
+const fmt = (x, d = 4) => (Math.abs(x) >= 1e-3 || x === 0 ? x.toFixed(d) : x.toExponential(1));
+function pruneTooltip(info) {
+  const lines = [
+    info.pruned ? `PRUNED in block ${info.block}` : "kept",
+    `screen on S0 (all alive, delta off); ablating this component:`,
+    `  KL(alive-only || ablated): ${fmt(info.kl)}`,
+    `  dCE: ${fmt(info.d_ce)} ± ${fmt(info.se_ce)} nats (among integers: ${fmt(info.d_ce_int)})`,
+    `  P(integer): ${info.p_int_before.toFixed(4)} -> ${info.p_int_after.toFixed(4)}`,
+  ];
+  if (info.temp_r2 !== undefined)
+    lines.push(`  temperature R2 ${info.temp_r2.toFixed(2)}, beta ${info.beta.toFixed(3)}: `
+      + (info.temp_r2 >= window.PRUNED.temperature_r2_cut ? "temperature-like" : "not temperature-like"));
+  lines.push(`(${window.PRUNED.source}; dCE > 0 = the component helps)`);
+  return lines.join("\n");
+}
 
 // Render only if this payload is still the selected slice (script tags load async, so an
 // older request can land after a newer one).
@@ -355,13 +370,15 @@ function renderGallery() {
       lbl.className = "lbl";
       lbl.textContent = `#${comp.c}`;
       tile.append(cv, lbl);
-      const pruned = prunedInfo(comp.name, comp.c);
-      if (pruned) {
-        const mark = document.createElement("span");
-        mark.className = "pruned";
-        mark.textContent = "✕";
-        tile.title = `pruned in block ${pruned.block} (${window.PRUNED.source})`;
-        tile.append(mark);
+      const info = pruneInfo(comp.name, comp.c);
+      if (info) {
+        tile.title = pruneTooltip(info);
+        if (info.pruned) {
+          const mark = document.createElement("span");
+          mark.className = "pruned";
+          mark.textContent = "✕";
+          tile.append(mark);
+        }
       }
       tile.onclick = () => { selected = { mi: comp.mi, si: comp.si, c: comp.c, name: comp.name }; render(); };
       if (selected && selected.mi === comp.mi && selected.si === comp.si) tile.classList.add("sel");
@@ -383,7 +400,7 @@ function renderDetail() {
   detail.style.display = "block";
   document.body.classList.add("drawer-open");
   const pi = 0, oi = 0;
-  const pruned = prunedInfo(selected.name, selected.c);
+  const info = pruneInfo(selected.name, selected.c), pruned = info?.pruned ? info : null;
   $("dtitle").textContent = `${selected.name} · component ${selected.c} · op ${cur.ops[oi]} · position ${positionLabel(cur.positions[pi])}`
     + (pruned ? ` · ✕ pruned in block ${pruned.block}` : "");
   // A split slice draws the pooled thumbnail until the module's full grids arrive.

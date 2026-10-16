@@ -40,7 +40,7 @@ from param_decomp.experiments.lm.resolved import TargetConfig
 from param_decomp.experiments.lm.training import enable_persistent_compilation_cache
 from param_decomp.pruning import model as pm
 from param_decomp.pruning.config import PruneConfig
-from param_decomp.pruning.engine import score_target
+from param_decomp.pruning.engine import flip_temperature, score_target
 from param_decomp.pruning.problem import Problem, build_problem
 from param_decomp.pruning.prune import PruneState, run_blockwise, run_rounds, score_set
 from param_decomp.pruning.screen import (
@@ -64,6 +64,7 @@ from param_decomp.pruning.stats import (
 from param_decomp.targets.transformer import KIND_ORDER, TransformerDecomposedModel
 
 STAGES = (
+    "temperature",
     "select",
     "validate",
     "references",
@@ -114,7 +115,8 @@ def run(config: PruneConfig, data_root: Path, name: str, stages: tuple[str, ...]
         # `prune`, which resumes) and the batch sizes; the screen precisions may still change
         # until the screen has started (the validation measures every precision path).
         mutable = set(ROUND_KNOBS) | {"batch_size", "hc_components_per_batch", "select_batch_size",
-                                      "grad_batch_size", "compilation_cache_dir"}  # fmt: skip
+                                      "grad_batch_size", "compilation_cache_dir",
+                                      "temperature_prompts"}  # fmt: skip
         if not (out / "screen").exists():
             mutable.update({"site_precision", "head_precision"})
         for key in PruneConfig.model_fields:
@@ -241,6 +243,9 @@ def run(config: PruneConfig, data_root: Path, name: str, stages: tuple[str, ...]
                 case "blockwise":
                     run_blockwise(config, ctx, state, check, ce_s0, out)
 
+        if "temperature" in stages and not (out / "temperature.npz").exists():
+            temperature(config, ctx, mask0, out)
+
         if "report" in stages:
             final = _resume(out, slots.n, config.objective)
             everything = np.arange(problem.n)
@@ -278,6 +283,31 @@ def run(config: PruneConfig, data_root: Path, name: str, stages: tuple[str, ...]
                 },
             )
     logger.info(f"done -> {out}")
+
+
+def temperature(config: PruneConfig, ctx: Context, mask0: pm.Mask, out: Path) -> None:
+    """`temperature.npz`: every `S₀` component's zero ablation from `S₀` on the first
+    `temperature_prompts` of `R`, with the KL-weighted temperature R² and β
+    (`engine.flip_temperature`) and the mean KL."""
+    comps = np.arange(ctx.slots.n)
+    sub = dataclasses.replace(ctx, sample=ctx.sample[: config.temperature_prompts])
+    (cache,) = sample_caches(sub, mask0, target_on_sample(sub))
+    s, p = ctx.slots, ctx.precisions
+    kl, r2, beta = (np.zeros(comps.size) for _ in range(3))
+    t0 = time.time()
+    for i, a in enumerate(comps):
+        fit = flip_temperature(
+            ctx.arch, ctx.shared, ctx.factors, mask0, cache,
+            jnp.asarray(s.kind[a], jnp.int32), jnp.asarray(s.layer[a], jnp.int32),
+            jnp.asarray(s.slot[a], jnp.int32), jnp.asarray(-1.0), p.site, p.head,
+        )  # fmt: skip
+        k, r, b = (np.asarray(v, np.float64) for v in (fit.kl, fit.r2, fit.beta))
+        weight = k / max(k.sum(), 1e-30)
+        kl[i], r2[i], beta[i] = k.mean(), float(weight @ r), float(weight @ b)
+        if i % 500 == 0:
+            logger.info(f"temperature: {i}/{comps.size} ({time.time() - t0:.0f}s)")
+    np.savez(out / "temperature.npz", comps=comps, kl=kl, r2=r2, beta=beta)
+    logger.info(f"temperature: {comps.size} components -> {out / 'temperature.npz'}")
 
 
 def _score_target(ctx: Context, prompts: np.ndarray, precision: pm.Precision) -> np.ndarray:

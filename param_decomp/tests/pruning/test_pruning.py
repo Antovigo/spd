@@ -516,3 +516,18 @@ def test_blockwise_pruning(setup: Setup, tmp_path: Path) -> None:
     on_mask = ctx.slots.mask(final.on, ctx.arch.n_layer)
     ce_final = float(np.mean(score_set(ctx, on_mask, check, "fp32", False)[CE_INT]))
     assert ce_final - ce_s0 <= config.global_budget + 1e-6
+
+
+def test_temperature_fit() -> None:
+    """A pure temperature change is fully explained (R² 1, the right β); a random change is not."""
+    from param_decomp.pruning.engine import temperature_fit
+
+    rng = np.random.default_rng(7)
+    logits = jnp.asarray(rng.normal(0, 2, size=(3, 50)), jnp.float32)
+    logp_b = log_softmax32(logits)
+    fit = temperature_fit(logp_b, log_softmax32(1.3 * logits))
+    np.testing.assert_allclose(np.asarray(fit.r2), 1.0, atol=1e-4)
+    np.testing.assert_allclose(np.asarray(fit.beta), 1.3, atol=1e-3)
+    assert float(jnp.min(fit.kl)) > 0
+    other = temperature_fit(logp_b, log_softmax32(logits + rng.normal(0, 2, size=(3, 50))))
+    assert float(jnp.max(other.r2)) < 0.5

@@ -70,4 +70,6 @@ class PruneConfig(BaseConfig):
     noise_check_components: NonNegativeInt = 100
     estimator_check_components: NonNegativeInt = 20
     validation_prompts: PositiveInt = 1024
+    temperature_prompts: PositiveInt = 1024
+    """Prompts of `R` (its first ones) the `temperature` stage fits each component on."""
     compilation_cache_dir: Path | None = None

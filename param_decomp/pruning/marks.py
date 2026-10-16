@@ -18,20 +18,50 @@ import numpy as np
 from param_decomp.ci_filter.grid import APPLET, alive_page
 from param_decomp.pruning.model import slots_of
 
+TEMPERATURE_R2 = 0.5
+"""Temperature-like above this KL-weighted temperature R² (the entropy-neuron cut of
+`notes/rmsnorm/entropy-components.md`)."""
+
 
 def pruned_payload(prune_dir: Path, alive: dict[str, np.ndarray]) -> dict[str, object]:
+    """Per `S₀` component: whether the latest set pruned it (and in which block), and its screen
+    on `S₀` — KL from the alive-only model when ablated, `ΔCE` (full vocabulary and among
+    integers, with SE), `P(integer)` before and after the ablation — plus its temperature fit
+    (`temperature.npz`) when that stage ran."""
     sets = sorted((prune_dir / "sets").glob("S_*.npz"))
     assert sets, f"no sets/S_*.npz under {prune_dir}"
     saved = np.load(sets[-1])
     slots = slots_of(alive)
     on, removed = saved["on"], saved["removed"]
     assert on.size == slots.n, (on.size, slots.n)
-    sites: dict[str, dict[str, dict[str, int]]] = {}
-    for a in np.nonzero(~on)[0]:
-        sites.setdefault(slots.sites[a], {})[str(int(slots.index[a]))] = {"block": int(removed[a])}
+    table = np.genfromtxt(
+        prune_dir / "components.tsv", delimiter="\t", names=True, dtype=None, encoding=None
+    )
+    assert table.shape == (slots.n,), table.shape
+    temp_path = prune_dir / "temperature.npz"
+    temp = dict(np.load(temp_path)) if temp_path.exists() else None
+    if temp is not None:
+        assert (temp["comps"] == np.arange(slots.n)).all()
+    sites: dict[str, dict[str, dict[str, object]]] = {}
+    for a in range(slots.n):
+        p_after = float(table["without_p_int"][a])
+        info: dict[str, object] = {
+            "pruned": bool(not on[a]),
+            "block": int(removed[a]),
+            "kl": float(table["without_kl_base"][a]),
+            "d_ce": float(table["d_ce"][a]),
+            "se_ce": float(table["se_ce"][a]),
+            "d_ce_int": float(table["d_ce_int"][a]),
+            "p_int_before": p_after - float(table["d_p_int"][a]),
+            "p_int_after": p_after,
+        }
+        if temp is not None:
+            info.update(temp_r2=float(temp["r2"][a]), beta=float(temp["beta"][a]))
+        sites.setdefault(slots.sites[a], {})[str(int(slots.index[a]))] = info
     return {
         "source": f"{prune_dir.name}/{sets[-1].name}",
         "n_pruned": int((~on).sum()),
+        "temperature_r2_cut": TEMPERATURE_R2,
         "sites": sites,
     }
 
