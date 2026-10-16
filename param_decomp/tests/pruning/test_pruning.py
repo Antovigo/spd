@@ -584,11 +584,20 @@ def test_learned_mask(setup: Setup, tmp_path: Path) -> None:
     )
     run_learn(cosine, ctx, check, tmp_path)
     assert (tmp_path / "learn" / "cos" / "lam_1" / "final.json").exists()
+    screen = {"d_ce_int": np.linspace(-1, 1, ctx.slots.n)}
+    with (tmp_path / "components.tsv").open("w") as f:
+        f.write("d_ce_int\n" + "\n".join(f"{v}" for v in screen["d_ce_int"]) + "\n")
+    gated = config.model_copy(
+        update={"learn_name": "gated", "learn_max_screen_d_ce_int": 0.0, "learn_sampling": True}
+    )
+    run_learn(gated, ctx, check, tmp_path)
+    kept = np.load(tmp_path / "learn" / "gated" / "lam_1" / "state.npz")["logit"] > 0
+    assert kept[screen["d_ce_int"] > 0].all()
     kl_table(config, ctx, check, tmp_path)
     table = json.loads((tmp_path / "learn" / "kl_table.json").read_text())
     assert table["s0"]["kl_int_s0"] == pytest.approx(0.0, abs=1e-6)
     assert table["s0"]["kl_full_s0"] == pytest.approx(0.0, abs=1e-6)
-    assert set(table) == {"s0", "lam_1", "cos/lam_1"}
+    assert set(table) == {"s0", "lam_1", "cos/lam_1", "gated/lam_1"}
     changed = config.model_copy(update={"learn_lr": 0.1})
     with pytest.raises(AssertionError, match="learn settings differ"):
         learn_mask(changed, ctx, check, 1.0, tmp_path)

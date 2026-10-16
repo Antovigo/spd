@@ -35,7 +35,7 @@ CE_INT = QUANTITIES.index("ce_int")
 TRAINING_FIELDS = (
     "seed", "full_precision", "learn_steps", "learn_batch", "learn_lr", "learn_init",
     "learn_temperature", "learn_eval_every", "learn_eval_size", "learn_schedule",
-    "learn_objective", "learn_sampling",
+    "learn_objective", "learn_sampling", "learn_max_screen_d_ce_int",
 )  # fmt: skip
 """Config fields that shape one λ's outputs: pinned per λ in `learn_config.json`."""
 BETA1, BETA2, ADAM_EPS = 0.9, 0.999, 1e-8
@@ -117,7 +117,8 @@ def learn_mask(
     if pin_path.exists():
         # Pins written before `learn_objective` / `learn_sampling` existed are hard-mask `ce_int`
         # sweeps.
-        old = {"learn_objective": "ce_int", "learn_sampling": False}
+        old = {"learn_objective": "ce_int", "learn_sampling": False,
+               "learn_max_screen_d_ce_int": None}  # fmt: skip
         old.update(json.loads(pin_path.read_text()))
         assert old == pinned, f"{d}: learn settings differ from {pin_path}: {old} vs {pinned}"
     else:
@@ -135,6 +136,15 @@ def learn_mask(
         logger.info(f"learn λ={lam:g}: resume at step {step0}")
     else:
         logit = np.full(n_comp, config.learn_init, np.float64)
+        if config.learn_max_screen_d_ce_int is not None:
+            # Non-candidates sit at ℓ = +∞: always on, zero surrogate gradient, no Adam step.
+            table = np.genfromtxt(
+                out / "components.tsv", delimiter="\t", names=True, dtype=None, encoding=None
+            )
+            frozen = table["d_ce_int"].astype(float) > config.learn_max_screen_d_ce_int
+            assert frozen.size == n_comp
+            logit[frozen] = np.inf
+            logger.info(f"learn λ={lam:g}: {int((~frozen).sum())} candidates of {n_comp}")
         m1, m2, step0 = np.zeros(n_comp), np.zeros(n_comp), 0
     reference = ctx.slots.mask(np.ones(n_comp, bool), ctx.arch.n_layer)
     t0 = time.time()

@@ -87,6 +87,10 @@ class PruneConfig(BaseConfig):
     """Train on a fresh random mask every step, `m_c ~ Bernoulli(σ(ℓ_c / T))` (one draw shared
     by the batch), instead of the hard mask `1[ℓ_c > 0]`; the result is still `1[ℓ_c > 0]`. With
     `learn_init = log(99)` about 1% of `S₀` is off at the first step."""
+    learn_max_screen_d_ce_int: float | None = None
+    """Only components whose initial-screen `d_ce_int` (`components.tsv`: `ce_int` of `S₀`
+    without the component minus `ce_int` of `S₀`, nats) is at most this are candidates; the
+    others stay on (`None`: every component is a candidate)."""
     learn_schedule: Literal["constant", "cosine"] = "constant"
     """`cosine`: the learning rate at step `k` (1-based) is `learn_lr · (1 + cos(π (k−1) /
     learn_steps)) / 2`, decaying to ~0 at the last step."""
