@@ -384,8 +384,11 @@ def factored_logits(
     site_precision: Precision,
     head_precision: Precision,
 ) -> Float[Array, "B vocab"]:
-    """`M_S`'s last-position logits from the tokens, differentiable in `mask` (a `scan`)."""
+    """`M_S`'s last-position logits from the tokens, differentiable in `mask` (a `scan`; each
+    block is rematerialized on the backward, which otherwise keeps every block's fp32 MLP
+    activations: 62 GB at 1024 prompts)."""
 
+    @jax.checkpoint
     def body(resid: Array, xs: LayerXs) -> tuple[Array, None]:
         layer, ln1, ln2, V, U, m = xs
         site = _factored_site(V, U, m, flips, layer, site_precision)
