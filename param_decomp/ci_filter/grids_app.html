@@ -75,6 +75,8 @@
   <span><label>position</label><select id="pos"></select></span>
   <span><label>op</label><select id="op"></select></span>
   <span><label>view</label><select id="view"></select></span>
+  <span id="sortbox" style="display:none"><label>sort</label><select id="sort">
+    <option value="d_ce">dCE (screen), high first</option><option value="ci">mean CI</option></select></span>
   <span><label>mean CI &ge;</label><input type="range" id="thr" min="0" max="1" step="0.001" style="width:180px">
     <span id="thrval"></span></span>
   <span><label>px/square</label><input type="number" id="px" min="1" max="16" step="1" value="1" style="width:52px"></span>
@@ -344,6 +346,11 @@ function visibleComponents() {
     });
   });
   out.sort((x, y) => y.meanCi - x.meanCi);
+  // Screen dCE from `pruned.js` when available; components without a record go last.
+  if (window.PRUNED && $("sort").value === "d_ce") {
+    const key = comp => pruneInfo(comp.name, comp.c)?.d_ce ?? -Infinity;
+    out.sort((x, y) => key(y) - key(x));
+  }
   return out;
 }
 
@@ -596,6 +603,8 @@ if (SLICES) {
   for (const id of ["pos", "op"]) $(id).onchange = loadSelected;
   $("view").onchange = render;
   $("thr").oninput = render;
+  $("sort").onchange = render;
+  if (window.PRUNED) $("sortbox").style.display = "";
   $("px").oninput = render;
   $("thr").value = 0;
   loadSelected();
