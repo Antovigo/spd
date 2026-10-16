@@ -80,6 +80,12 @@ class PruneConfig(BaseConfig):
     learn_batch: PositiveInt = 512
     """Prompts of `P \\ Q` per Adam step (in `grad_batch_size` microbatches)."""
     learn_lr: PositiveFloat = 0.02
+    learn_schedule: Literal["constant", "cosine"] = "constant"
+    """`cosine`: the learning rate at step `k` (1-based) is `learn_lr · (1 + cos(π (k−1) /
+    learn_steps)) / 2`, decaying to ~0 at the last step."""
+    learn_name: str = ""
+    """Subdirectory of `learn/` this sweep writes into (`""`: `learn/` itself), so sweeps with
+    other settings sit beside earlier ones."""
     learn_init: float = 1.0
     """Initial logit of every component (`S₀` all on)."""
     learn_temperature: PositiveFloat = 1.0

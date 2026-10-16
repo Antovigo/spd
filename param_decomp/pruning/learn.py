@@ -8,7 +8,7 @@ loss is `mean_B ce_int + λ · Σ_c σ(ℓ_c / T)` over a minibatch `B` of `P \\
 down when the first-order cost of dropping `c`, `−∂ ce_int / ∂ m_c`, is below `λ` (nats per
 component). Adam on `ℓ`; the mask at the last step is the result, scored on all of `Q`.
 
-Writes `<prune_dir>/learn/lam_<λ>/{learn_config.json, log.jsonl, state.npz, final.json}`
+Writes `<prune_dir>/learn/<learn_name>/lam_<λ>/{learn_config.json, log.jsonl, state.npz, final.json}`
 (`learn_config.json` pins the settings of `TRAINING_FIELDS`; a resume under other settings fails) and
 `<prune_dir>/learn/baseline.json` (`S₀` and the newest blockwise set on `Q`)."""
 
@@ -27,7 +27,7 @@ from param_decomp.pruning.stats import QUANTITIES
 CE_INT = QUANTITIES.index("ce_int")
 TRAINING_FIELDS = (
     "seed", "full_precision", "learn_steps", "learn_batch", "learn_lr", "learn_init",
-    "learn_temperature", "learn_eval_every", "learn_eval_size",
+    "learn_temperature", "learn_eval_every", "learn_eval_size", "learn_schedule",
 )  # fmt: skip
 """Config fields that shape one λ's outputs: pinned per λ in `learn_config.json`."""
 BETA1, BETA2, ADAM_EPS = 0.9, 0.999, 1e-8
@@ -73,7 +73,7 @@ def learn_mask(
     config: PruneConfig, ctx: Context, check: np.ndarray, lam: float, out: Path
 ) -> np.ndarray:
     """Train one mask at sparsity weight `lam`; returns `on` `(A,)`. Resumes from `state.npz`."""
-    d = out / "learn" / f"lam_{lam:g}"
+    d = out / "learn" / config.learn_name / f"lam_{lam:g}"
     d.mkdir(parents=True, exist_ok=True)
     pinned = {k: getattr(config, k) for k in TRAINING_FIELDS}
     pin_path = d / "learn_config.json"
@@ -109,9 +109,12 @@ def learn_mask(
             m1 = BETA1 * m1 + (1 - BETA1) * g
             m2 = BETA2 * m2 + (1 - BETA2) * g**2
             k = step + 1
-            logit = logit - config.learn_lr * (m1 / (1 - BETA1**k)) / (
-                np.sqrt(m2 / (1 - BETA2**k)) + ADAM_EPS
-            )
+            match config.learn_schedule:
+                case "constant":
+                    lr = config.learn_lr
+                case "cosine":
+                    lr = config.learn_lr * (1 + np.cos(np.pi * step / config.learn_steps)) / 2
+            logit = logit - lr * (m1 / (1 - BETA1**k)) / (np.sqrt(m2 / (1 - BETA2**k)) + ADAM_EPS)
             if k % config.learn_eval_every == 0 or k == config.learn_steps:
                 on = logit > 0
                 mask = ctx.slots.mask(on, ctx.arch.n_layer)
