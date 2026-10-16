@@ -28,13 +28,23 @@ TEMPERATURE_R2 = 0.5
 
 
 def mask_entry(prune_dir: Path, mask_dir: Path, slots: Slots) -> dict[str, object]:
-    """One learned mask: its name (path under `<prune_dir>/learn`), a menu label (λ, sweep,
-    size, accuracy from `final.json` when the run finished) and its pruned components."""
+    """One learned mask: its name (path under `<prune_dir>/learn`), a menu label (objective,
+    sampling, λ, sweep, size, accuracy from `final.json` when the run finished) and its pruned
+    components."""
     on = np.load(mask_dir / "state.npz")["logit"] > 0
     assert on.size == slots.n, (on.size, slots.n)
     name = str(mask_dir.relative_to(prune_dir / "learn"))
     sweep, lam = (str(Path(name).parent), mask_dir.name.removeprefix("lam_"))
-    label = f"λ={lam}" + ("" if sweep == "." else f" ({sweep})") + f": {int(on.sum())} kept"
+    # Settings pinned in `learn_config.json`; runs older than those keys used `ce_int`, no sampling.
+    config_path = mask_dir / "learn_config.json"
+    config = json.loads(config_path.read_text()) if config_path.exists() else {}
+    objective = config.get("learn_objective", "ce_int")
+    sampled = ", sampled mask" if config.get("learn_sampling", False) else ""
+    label = (
+        f"{objective}{sampled}, λ={lam}"
+        + ("" if sweep == "." else f" ({sweep})")
+        + f": {int(on.sum())} kept"
+    )
     final = mask_dir / "final.json"
     if final.exists():
         label += f", acc {100 * json.loads(final.read_text())['all']['correct']:.1f}%"
