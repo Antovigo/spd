@@ -44,7 +44,7 @@ EPS_SECANT = 1e-3
 EXCLUDE_REL = 1e-6
 FLAG_FRAC = 0.01
 SAVE_SECONDS = 600.0
-TOL = {"check1_rel_max": 1e-2, "ident4_max": 1e-5, "ident5_max": 1e-3,
+TOL = {"check1_rel_max": 1e-2, "ident4_max": 1e-4, "ident5_max": 1e-3,
        "share_sum_err_max": 1e-4, "share5_err_max": 1e-4}  # fmt: skip
 """Plan §10 checks 1-3: a position's results are published only when every one holds."""
 

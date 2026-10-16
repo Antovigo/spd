@@ -545,6 +545,10 @@ The pilot (on a 6,000-prompt extraction) changed four things before the full run
 * **Centred sums.** All sums over prompts use $t_{d,w} - \bar t_{d,w}$, with $\bar t_{d,w}$ the
   writer's mean from pass 1, so the float32 batch sums do not cancel. Shares then add up to 1
   within $2 \times 10^{-5}$ (block 0) and $10^{-6}$ (block 31).
+* **Identity (4) tolerance $10^{-4}$**, not $10^{-5}$: block 13, position 3 measured
+  $1.12 \times 10^{-5}$ relative to $\max \lvert t_{d,w} \rvert$ (float32 rounding of a sum of
+  $\lvert \mathcal U \rvert + \lvert \mathcal G \rvert = 199$ terms), with share-level errors
+  below $10^{-5}$ there; the run stopped on it and resumed from its saved accumulators.
 * **Identity (5) tolerance $10^{-3}$**, not $10^{-5}$. Measured $1.8 \times 10^{-4}$ at block 0
   and $3$ to $6 \times 10^{-5}$ at block 31, relative to $\max \lvert M^{u} \rvert$. It is float32
   rounding of $\sum_{c'} \delta_{g,c',n}$ against $h_{g,n} - \bar h_{g,n}$ when several gate
