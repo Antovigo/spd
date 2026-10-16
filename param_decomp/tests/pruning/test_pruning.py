@@ -579,7 +579,9 @@ def test_learned_mask(setup: Setup, tmp_path: Path) -> None:
     assert "kl_int" in final["all"]
     on = learn_mask(config, ctx, check, 1.0, tmp_path)
     assert int(on.sum()) == final["size"]
-    cosine = config.model_copy(update={"learn_schedule": "cosine", "learn_name": "cos"})
+    cosine = config.model_copy(
+        update={"learn_schedule": "cosine", "learn_name": "cos", "learn_sampling": True}
+    )
     run_learn(cosine, ctx, check, tmp_path)
     assert (tmp_path / "learn" / "cos" / "lam_1" / "final.json").exists()
     changed = config.model_copy(update={"learn_lr": 0.1})

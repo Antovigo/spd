@@ -83,6 +83,10 @@ class PruneConfig(BaseConfig):
     learn_objective: Literal["ce_int", "kl_int"] = "ce_int"
     """What the `learn` stage minimizes besides the sparsity term: `ce_int`, or `kl_int`, the KL
     from `S₀` (the alive-only model) to the masked model over the integer tokens."""
+    learn_sampling: bool = False
+    """Train on a fresh random mask every step, `m_c ~ Bernoulli(σ(ℓ_c / T))` (one draw shared
+    by the batch), instead of the hard mask `1[ℓ_c > 0]`; the result is still `1[ℓ_c > 0]`. With
+    `learn_init = log(99)` about 1% of `S₀` is off at the first step."""
     learn_schedule: Literal["constant", "cosine"] = "constant"
     """`cosine`: the learning rate at step `k` (1-based) is `learn_lr · (1 + cos(π (k−1) /
     learn_steps)) / 2`, decaying to ~0 at the last step."""

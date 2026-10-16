@@ -7,7 +7,9 @@ Each `S₀` component `c` has a real logit `ℓ_c`; the forward uses the hard ma
 loss is `mean_B f + λ · Σ_c σ(ℓ_c / T)` over a minibatch `B` of `P \\ Q`, `f` the
 `learn_objective` (`ce_int`, or `kl_int`, the KL from `S₀` over the integer tokens), so `ℓ_c`
 drifts down when the first-order cost of dropping `c`, `−∂ f / ∂ m_c`, is below `λ` (nats per
-component). Adam on `ℓ`; the mask at the last step is the result, scored on all of `Q`.
+component). With `learn_sampling` the forward mask of each step is instead a random draw
+`m_c ~ Bernoulli(σ(ℓ_c / T))`. Adam on `ℓ`; the hard mask `1[ℓ_c > 0]` at the last step is the
+result, scored on all of `Q`.
 
 Writes `<prune_dir>/learn/<learn_name>/lam_<λ>/{learn_config.json, log.jsonl, state.npz,
 final.json}` (`learn_config.json` pins the settings of `TRAINING_FIELDS`; a resume under other
@@ -33,7 +35,7 @@ CE_INT = QUANTITIES.index("ce_int")
 TRAINING_FIELDS = (
     "seed", "full_precision", "learn_steps", "learn_batch", "learn_lr", "learn_init",
     "learn_temperature", "learn_eval_every", "learn_eval_size", "learn_schedule",
-    "learn_objective",
+    "learn_objective", "learn_sampling",
 )  # fmt: skip
 """Config fields that shape one λ's outputs: pinned per λ in `learn_config.json`."""
 BETA1, BETA2, ADAM_EPS = 0.9, 0.999, 1e-8
@@ -113,8 +115,10 @@ def learn_mask(
     pinned = {k: getattr(config, k) for k in TRAINING_FIELDS}
     pin_path = d / "learn_config.json"
     if pin_path.exists():
-        # Pins written before `learn_objective` existed are `ce_int` sweeps.
-        old = {"learn_objective": "ce_int"} | json.loads(pin_path.read_text())
+        # Pins written before `learn_objective` / `learn_sampling` existed are hard-mask `ce_int`
+        # sweeps.
+        old = {"learn_objective": "ce_int", "learn_sampling": False}
+        old.update(json.loads(pin_path.read_text()))
         assert old == pinned, f"{d}: learn settings differ from {pin_path}: {old} vs {pinned}"
     else:
         assert not (d / "state.npz").exists(), f"{d}: state.npz without {pin_path}"
@@ -138,7 +142,11 @@ def learn_mask(
         for step in range(step0, config.learn_steps):
             rng = np.random.default_rng(np.random.SeedSequence((config.seed, 31, step)))
             batch = np.sort(rng.choice(train, config.learn_batch, replace=False))
-            on = logit > 0
+            if config.learn_sampling:
+                draw = np.random.default_rng(np.random.SeedSequence((config.seed, 37, step)))
+                on = draw.random(n_comp) < sigmoid(logit / temp)
+            else:
+                on = logit > 0
             mask = ctx.slots.mask(on, ctx.arch.n_layer)
             g_mask = gradient(
                 ctx, mask, batch, config.grad_batch_size, config.full_precision,
