@@ -75,6 +75,7 @@
   <span><label>position</label><select id="pos"></select></span>
   <span><label>op</label><select id="op"></select></span>
   <span><label>view</label><select id="view"></select></span>
+  <span id="maskbox" style="display:none"><label>pruning mask</label><select id="mask"></select></span>
   <span id="sortbox" style="display:none"><label>sort</label><select id="sort">
     <option value="d_ce">dCE (screen), high first</option><option value="ci">mean CI</option></select></span>
   <span><label>mean CI &ge;</label><input type="range" id="thr" min="0" max="1" step="0.001" style="width:180px">
@@ -123,8 +124,21 @@ let selected = null;       // {mi, si} selected component
 
 const selectedKey = () => `${SLICES.ops[+$("op").value]}:${SLICES.positions[+$("pos").value]}`;
 const positionLabel = p => `${p} (${SLICES.position_labels[p]})`;
-// A pruning run's per-component record (`pruned.js`), else null.
-const pruneInfo = (name, c) => window.PRUNED?.sites?.[name]?.[c] ?? null;
+// A pruning run's per-component screen record (`pruned.js`), else null, with `pruned` set
+// from the mask chosen in the "pruning mask" menu (`PRUNED.masks[i].pruned`: {site: [c]}).
+const pruneSets = (window.PRUNED?.masks ?? []).map(m =>
+  new Map(Object.entries(m.pruned).map(([site, cs]) => [site, new Set(cs)])));
+const currentMask = () => {
+  const v = $("mask").value, i = v === "" ? -1 : +v;
+  return i >= 0 && i < pruneSets.length ? i : null;
+};
+function pruneInfo(name, c) {
+  const rec = window.PRUNED?.sites?.[name]?.[c];
+  if (!rec) return null;
+  const i = currentMask();
+  return { ...rec, pruned: i !== null && !!pruneSets[i].get(name)?.has(+c),
+           source: i !== null ? window.PRUNED.masks[i].label : "no mask" };
+}
 const fmt = (x, d = 4) => (Math.abs(x) >= 1e-3 || x === 0 ? x.toFixed(d) : x.toExponential(1));
 const tip = () => document.getElementById("tip");
 function showTip(ev, text) {
@@ -148,7 +162,7 @@ function pruneTooltip(info) {
   if (info.temp_r2 !== undefined)
     lines.push(`  temperature R2 ${info.temp_r2.toFixed(2)}, beta ${info.beta.toFixed(3)}: `
       + (info.temp_r2 >= window.PRUNED.temperature_r2_cut ? "temperature-like" : "not temperature-like"));
-  lines.push(`(${window.PRUNED.source}; dCE > 0 = the component helps)`);
+  lines.push(`(mask: ${info.source}; dCE > 0 = the component helps)`);
   return lines.join("\n");
 }
 
@@ -604,7 +618,21 @@ if (SLICES) {
   $("view").onchange = render;
   $("thr").oninput = render;
   $("sort").onchange = render;
-  if (window.PRUNED) $("sortbox").style.display = "";
+  if (window.PRUNED) {
+    $("sortbox").style.display = "";
+    $("maskbox").style.display = "";
+    // λ = the learned mask's L0 penalty weight; "kept" = components the mask keeps (of S0).
+    $("mask").innerHTML = '<option value="-1">none</option>' + window.PRUNED.masks.map((m, i) =>
+      `<option value="${i}">${m.label}</option>`).join("");
+    const saved = localStorage.getItem("abgrid-mask");
+    const pick = window.PRUNED.masks.findIndex(m => m.name === saved);
+    $("mask").value = pick >= 0 ? pick : (window.PRUNED.default ?? 0);
+    $("mask").onchange = () => {
+      const i = currentMask();
+      localStorage.setItem("abgrid-mask", i === null ? "" : window.PRUNED.masks[i].name);
+      render();
+    };
+  }
   $("px").oninput = render;
   $("thr").value = 0;
   loadSelected();
