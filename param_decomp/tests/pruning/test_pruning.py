@@ -27,6 +27,7 @@ from param_decomp.pruning.config import PruneConfig
 from param_decomp.pruning.engine import (
     flip_on_groups,
     flip_on_sample,
+    kl_int_prompts,
     make_sample_cache,
     mask_gradient,
     score_prompts,
@@ -238,12 +239,14 @@ def test_mask_gradient_is_the_derivative(setup: Setup) -> None:
     int_ids = jnp.asarray(np.arange(1000) % 64, jnp.int32)
     r = jnp.asarray(rng.integers(0, 64, size=6), jnp.int32)
     h = 2e-2  # central difference: O(h²) bias, and fp32 sums need a step well above 1e-3
-    for integer, quantity in ((False, CE), (True, QUANTITIES.index("ce_int"))):
+    reference = slots.mask(np.ones(slots.n, bool), arch.n_layer)
+    for objective in ("ce", "ce_int", "kl_int"):
         grad = slots.gather(
             mask_gradient(
-                arch, shared, factors, mask, tokens, y, r, int_ids, weight, "fp32", integer
+                arch, shared, factors, mask, reference, tokens, y, r, int_ids, weight, "fp32",
+                objective,
             )
-        )
+        )  # fmt: skip
         for a in (0, int(np.nonzero(~on)[0][0]), slots.n - 1):
             kind = KIND_ORDER[slots.kind[a]]
             bumped = {k: v for k, v in mask.items()}
@@ -251,7 +254,16 @@ def test_mask_gradient_is_the_derivative(setup: Setup) -> None:
             bumped[kind] = mask[kind].at[slots.layer[a], slots.slot[a]].add(h)
             lo[kind] = mask[kind].at[slots.layer[a], slots.slot[a]].add(-h)
 
-            def f(m: pm.Mask, quantity: int = quantity) -> float:
+            def f(m: pm.Mask, objective: str = objective) -> float:
+                if objective == "kl_int":
+                    return float(
+                        jnp.sum(
+                            kl_int_prompts(
+                                arch, shared, factors, m, reference, tokens, int_ids, "fp32"
+                            )
+                        )
+                    )
+                quantity = QUANTITIES.index(objective)
                 return float(
                     jnp.sum(
                         score_prompts(
@@ -554,6 +566,7 @@ def test_learned_mask(setup: Setup, tmp_path: Path) -> None:
             "learn_lr": 0.5,
             "learn_eval_every": 2,
             "learn_eval_size": 8,
+            "learn_objective": "kl_int",
         }
     )
     run_learn(config, ctx, check, tmp_path)
@@ -563,6 +576,7 @@ def test_learned_mask(setup: Setup, tmp_path: Path) -> None:
     assert final["prompts"] == check.size
     assert [json.loads(r)["step"] for r in (d / "log.jsonl").read_text().splitlines()] == [2, 4]
     assert (tmp_path / "learn" / "baseline.json").exists()
+    assert "kl_int" in final["all"]
     on = learn_mask(config, ctx, check, 1.0, tmp_path)
     assert int(on.sum()) == final["size"]
     cosine = config.model_copy(update={"learn_schedule": "cosine", "learn_name": "cos"})

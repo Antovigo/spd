@@ -22,7 +22,7 @@ import numpy as np
 
 from param_decomp.core.log import logger
 from param_decomp.pruning.config import PruneConfig
-from param_decomp.pruning.engine import mask_gradient, score_prompts
+from param_decomp.pruning.engine import GradObjective, mask_gradient, score_prompts
 from param_decomp.pruning.model import Mask, Precision
 from param_decomp.pruning.screen import (
     Context,
@@ -59,9 +59,11 @@ def gradient(
     prompts: np.ndarray,
     batch: int,
     precision: Precision,
-    integer: bool,
+    objective: GradObjective,
+    reference: Mask | None = None,
 ) -> np.ndarray:
-    """`(A,)` `∂ mean_Q CE / ∂ m_c` at the current mask (`CE` among integers with `integer`)."""
+    """`(A,)` `∂ mean f / ∂ m_c` over `prompts` at `mask`, `f` the `objective` of
+    `engine.mask_gradient` (`reference`, the `kl_int` reference mask, defaults to `mask`)."""
     p = ctx.problem
     total: dict[str, np.ndarray] | None = None
     for s in range(0, prompts.size, batch):
@@ -70,9 +72,9 @@ def gradient(
         rows = np.concatenate([chunk, np.repeat(chunk[-1:], pad)])
         weight = np.concatenate([np.ones(chunk.size), np.zeros(pad)]).astype(np.float32)
         g = mask_gradient(
-            ctx.arch, ctx.shared, ctx.factors, mask, jnp.asarray(p.tokens[rows]),
-            jnp.asarray(p.y[rows]), jnp.asarray(p.r[rows]), ctx.int_ids, jnp.asarray(weight),
-            precision, integer,
+            ctx.arch, ctx.shared, ctx.factors, mask, mask if reference is None else reference,
+            jnp.asarray(p.tokens[rows]), jnp.asarray(p.y[rows]), jnp.asarray(p.r[rows]),
+            ctx.int_ids, jnp.asarray(weight), precision, objective,
         )  # fmt: skip
         g_np = {k: np.asarray(v, np.float64) for k, v in g.items()}
         total = g_np if total is None else {k: total[k] + g_np[k] for k in total}
@@ -107,7 +109,6 @@ def run_rounds(
     slots, n_layer = ctx.slots, ctx.arch.n_layer
     full = config.full_precision
     objective = QUANTITIES.index(config.objective)
-    integer = config.objective == "ce_int"
     targets = target_on_sample(ctx)
     (out_dir / "sets").mkdir(parents=True, exist_ok=True)
     log = (out_dir / "rounds.jsonl").open("a")
@@ -147,7 +148,7 @@ def run_rounds(
         mask = slots.mask(state.on, n_layer)
         caches = sample_caches(ctx, mask, targets)
         # 3. gradient pass on Q
-        g = gradient(ctx, mask, check, config.grad_batch_size, full, integer)
+        g = gradient(ctx, mask, check, config.grad_batch_size, full, config.objective)
         # 4. disagreement re-ablations of the on components
         lin = -g
         gap = np.abs(lin - state.est) - np.maximum(config.disagreement_sigma * state.se, eps)

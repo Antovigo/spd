@@ -80,6 +80,9 @@ class PruneConfig(BaseConfig):
     learn_batch: PositiveInt = 512
     """Prompts of `P \\ Q` per Adam step (in `grad_batch_size` microbatches)."""
     learn_lr: PositiveFloat = 0.02
+    learn_objective: Literal["ce_int", "kl_int"] = "ce_int"
+    """What the `learn` stage minimizes besides the sparsity term: `ce_int`, or `kl_int`, the KL
+    from `S₀` (the alive-only model) to the masked model over the integer tokens."""
     learn_schedule: Literal["constant", "cosine"] = "constant"
     """`cosine`: the learning rate at step `k` (1-based) is `learn_lr · (1 + cos(π (k−1) /
     learn_steps)) / 2`, decaying to ~0 at the last step."""

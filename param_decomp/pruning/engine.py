@@ -6,6 +6,8 @@ off one). Every returned difference is `δf = f(without c) − f(with c)`, i.e. 
 f_base)`, so `δ` of `ce` is positive when the component helps, whichever direction was flipped.
 `Δq` follows the same convention (`q_without − q_with`)."""
 
+from typing import Literal
+
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -273,35 +275,80 @@ def score_target(
     return rows(logp, logp, logp, y, r, int_ids).scalars
 
 
+type GradObjective = Literal["ce", "ce_int", "kl_int"]
+
+
+def int_log_q(
+    logp: Float[Array, "B vocab"], int_ids: Int[Array, " 1000"]
+) -> Float[Array, "B 1000"]:
+    """`log q`: the next-token distribution renormalized over the integer tokens."""
+    lp_int = jnp.take(logp, int_ids, axis=-1)
+    return lp_int - jax.nn.logsumexp(lp_int, axis=-1, keepdims=True)
+
+
+def kl_int(log_q_ref: Float[Array, "B 1000"], log_q: Float[Array, "B 1000"]) -> Float[Array, " B"]:
+    """`KL(q_ref ‖ q)` over the integer tokens, per prompt."""
+    return jnp.sum(jnp.exp(log_q_ref) * (log_q_ref - log_q), axis=-1)
+
+
+@eqx.filter_jit
+def kl_int_prompts(
+    arch: Arch,
+    shared: Shared,
+    factors: Factors,
+    mask: Mask,
+    reference: Mask,
+    tokens: Int[Array, "B T"],
+    int_ids: Int[Array, " 1000"],
+    precision: Precision,
+) -> Float[Array, " B"]:
+    """`KL(q_reference ‖ q_mask)` over the integer tokens, per prompt."""
+    none = Flips.none(tokens.shape[0])
+
+    def log_q(m: Mask) -> Array:
+        logits = factored_logits(arch, shared, factors, m, none, tokens, precision, precision)
+        return int_log_q(log_softmax32(logits), int_ids)
+
+    return kl_int(log_q(reference), log_q(mask))
+
+
 @eqx.filter_jit
 def mask_gradient(
     arch: Arch,
     shared: Shared,
     factors: Factors,
     mask: Mask,
+    reference: Mask,
     tokens: Int[Array, "B T"],
     y: Int[Array, " B"],
     r: Int[Array, " B"],
     int_ids: Int[Array, " 1000"],
     weight: Float[Array, " B"],
     precision: Precision,
-    integer: bool,
+    objective: GradObjective,
 ) -> Mask:
-    """`∂/∂m Σ_b weight_b · CE_b` (`weight` zero on padding rows); with `integer`, the `CE`
-    among the integer tokens (`-log q(r)`)."""
+    """`∂/∂m Σ_b weight_b · f_b` (`weight` zero on padding rows), `f` the full-vocabulary `CE`
+    of the answer (`ce`), the `CE` among the integer tokens (`ce_int`, `-log q(r)`), or
+    `KL(q_reference ‖ q_m)` over the integer tokens (`kl_int`; `reference` is read only by
+    it)."""
     none = Flips.none(tokens.shape[0])
 
-    def loss(m: Mask) -> Array:
-        logp = log_softmax32(
+    def logp_of(m: Mask) -> Array:
+        return log_softmax32(
             factored_logits(arch, shared, factors, m, none, tokens, precision, precision)
         )
-        if integer:
-            lp_int = jnp.take(logp, int_ids, axis=-1)
-            log_q = lp_int - jax.nn.logsumexp(lp_int, axis=-1, keepdims=True)
-            ce = -jnp.take_along_axis(log_q, r[:, None], axis=1)[:, 0]
-        else:
-            ce = -jnp.take_along_axis(logp, y[:, None], axis=1)[:, 0]
-        return jnp.sum(weight * ce)
+
+    def loss(m: Mask) -> Array:
+        logp = logp_of(m)
+        match objective:
+            case "ce":
+                f = -jnp.take_along_axis(logp, y[:, None], axis=1)[:, 0]
+            case "ce_int":
+                f = -jnp.take_along_axis(int_log_q(logp, int_ids), r[:, None], axis=1)[:, 0]
+            case "kl_int":
+                ref = jax.lax.stop_gradient(int_log_q(logp_of(reference), int_ids))
+                f = kl_int(ref, int_log_q(logp, int_ids))
+        return jnp.sum(weight * f)
 
     return jax.grad(loss)(mask)
 
