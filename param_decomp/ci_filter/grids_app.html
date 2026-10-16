@@ -53,6 +53,10 @@
                   background: #fff; border: 1px solid #c0392b; border-radius: 2px;
                   color: #c0392b; font: bold 11px/13px sans-serif; text-align: center;
                   pointer-events: none; }
+  /* Instant hover card (native `title` tooltips wait ~1 s). */
+  #tip { position: fixed; z-index: 50; display: none; pointer-events: none; max-width: 520px;
+         background: #222; color: #eee; border-radius: 4px; padding: 6px 8px;
+         font: 11px/1.4 ui-monospace, monospace; white-space: pre; }
   .tile.sel { outline: 2px solid #7b5cd6; }
   .tile .lbl { font-size: 11px; color: var(--muted); padding: 3px 4px; white-space: nowrap; }
   canvas { image-rendering: pixelated; display: block; margin: 0 auto; }
@@ -65,6 +69,7 @@
 </style>
 </head>
 <body>
+<div id="tip"></div>
 <header>
   <span id="title"></span>
   <span><label>position</label><select id="pos"></select></span>
@@ -119,6 +124,17 @@ const positionLabel = p => `${p} (${SLICES.position_labels[p]})`;
 // A pruning run's per-component record (`pruned.js`), else null.
 const pruneInfo = (name, c) => window.PRUNED?.sites?.[name]?.[c] ?? null;
 const fmt = (x, d = 4) => (Math.abs(x) >= 1e-3 || x === 0 ? x.toFixed(d) : x.toExponential(1));
+const tip = () => document.getElementById("tip");
+function showTip(ev, text) {
+  const el = tip();
+  el.textContent = text;
+  el.style.display = "block";
+  const x = Math.min(ev.clientX + 14, innerWidth - el.offsetWidth - 4);
+  const y = ev.clientY + 14 + el.offsetHeight > innerHeight ? ev.clientY - el.offsetHeight - 8 : ev.clientY + 14;
+  el.style.left = `${Math.max(4, x)}px`;
+  el.style.top = `${Math.max(4, y)}px`;
+}
+const hideTip = () => { tip().style.display = "none"; };
 function pruneTooltip(info) {
   const lines = [
     info.pruned ? `PRUNED in block ${info.block}` : "kept",
@@ -342,6 +358,7 @@ function renderGallery() {
   const pi = 0, oi = 0, view = $("view").value, px = pxValue();
   const comps = visibleComponents(), gallery = $("gallery");
   gallery.innerHTML = "";
+  hideTip();
   $("thrval").textContent = thrValue().toExponential(2);
   $("count").textContent = comps.length + " shown";
   $("empty").style.display = comps.length ? "none" : "block";
@@ -372,7 +389,9 @@ function renderGallery() {
       tile.append(cv, lbl);
       const info = pruneInfo(comp.name, comp.c);
       if (info) {
-        tile.title = pruneTooltip(info);
+        const text = pruneTooltip(info);
+        tile.onmouseenter = tile.onmousemove = ev => showTip(ev, text);
+        tile.onmouseleave = hideTip;
         if (info.pruned) {
           const mark = document.createElement("span");
           mark.className = "pruned";
