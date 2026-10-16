@@ -46,6 +46,9 @@ class PruneConfig(BaseConfig):
     target_precision: PrecisionName = "bf16"
     """The dense target (Llama) reference: its weights are bf16."""
 
+    objective: Literal["ce", "ce_int"] = "ce"
+    """The rounds' criterion: full-vocabulary `CE` of the answer, or `ce_int`, the `CE` among the
+    integer tokens (the answer's log-probability renormalized over `V_int`)."""
     z: NonNegativeFloat = 1.0
     epsilon: NonNegativeFloat | None = None
     """Per-component negligible effect (nats); required by the prune stage, set from the

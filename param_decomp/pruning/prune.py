@@ -26,8 +26,6 @@ from param_decomp.pruning.model import Mask, Precision
 from param_decomp.pruning.screen import Context, lean_screen, sample_caches, target_on_sample
 from param_decomp.pruning.stats import QUANTITIES
 
-CE = QUANTITIES.index("ce")
-
 
 def score_set(
     ctx: Context, mask: Mask, prompts: np.ndarray, precision: Precision, with_target: bool
@@ -49,9 +47,14 @@ def score_set(
 
 
 def gradient(
-    ctx: Context, mask: Mask, prompts: np.ndarray, batch: int, precision: Precision
+    ctx: Context,
+    mask: Mask,
+    prompts: np.ndarray,
+    batch: int,
+    precision: Precision,
+    integer: bool,
 ) -> np.ndarray:
-    """`(A,)` `∂ mean_Q CE / ∂ m_c` at the current mask."""
+    """`(A,)` `∂ mean_Q CE / ∂ m_c` at the current mask (`CE` among integers with `integer`)."""
     p = ctx.problem
     total: dict[str, np.ndarray] | None = None
     for s in range(0, prompts.size, batch):
@@ -61,7 +64,8 @@ def gradient(
         weight = np.concatenate([np.ones(chunk.size), np.zeros(pad)]).astype(np.float32)
         g = mask_gradient(
             ctx.arch, ctx.shared, ctx.factors, mask, jnp.asarray(p.tokens[rows]),
-            jnp.asarray(p.y[rows]), jnp.asarray(weight), precision,
+            jnp.asarray(p.y[rows]), jnp.asarray(p.r[rows]), ctx.int_ids, jnp.asarray(weight),
+            precision, integer,
         )  # fmt: skip
         g_np = {k: np.asarray(v, np.float64) for k, v in g.items()}
         total = g_np if total is None else {k: total[k] + g_np[k] for k in total}
@@ -95,12 +99,16 @@ def run_rounds(
     eps, z, theta = config.epsilon, config.z, config.theta
     slots, n_layer = ctx.slots, ctx.arch.n_layer
     full = config.full_precision
+    objective = QUANTITIES.index(config.objective)
+    integer = config.objective == "ce_int"
     targets = target_on_sample(ctx)
     (out_dir / "sets").mkdir(parents=True, exist_ok=True)
     log = (out_dir / "rounds.jsonl").open("a")
 
     def mean_ce(on: np.ndarray) -> float:
-        return float(np.mean(score_set(ctx, slots.mask(on, n_layer), check, full, False)[CE]))
+        return float(
+            np.mean(score_set(ctx, slots.mask(on, n_layer), check, full, False)[objective])
+        )
 
     ce_now = mean_ce(state.on)
     for j in range(state.next_round, config.max_rounds):
@@ -132,20 +140,20 @@ def run_rounds(
         mask = slots.mask(state.on, n_layer)
         caches = sample_caches(ctx, mask, targets)
         # 3. gradient pass on Q
-        g = gradient(ctx, mask, check, config.grad_batch_size, full)
+        g = gradient(ctx, mask, check, config.grad_batch_size, full, integer)
         # 4. disagreement re-ablations of the on components
         lin = -g
         gap = np.abs(lin - state.est) - np.maximum(config.disagreement_sigma * state.se, eps)
         dis = np.nonzero(state.on & (gap > 0))[0]
         dis = dis[np.argsort(-gap[dis])][: config.max_disagreements]
         if dis.size:
-            state.est[dis], state.se[dis] = lean_screen(ctx, mask, state.on, dis, caches)
+            state.est[dis], state.se[dis] = lean_screen(ctx, mask, state.on, dis, caches, objective)
         # 5. re-additions
         add = np.nonzero(~state.on & (g < -theta))[0]
         add = add[np.argsort(g[add])][: config.max_disagreements]
         readded = np.zeros(0, np.int64)
         if add.size:
-            est_add, se_add = lean_screen(ctx, mask, state.on, add, caches)
+            est_add, se_add = lean_screen(ctx, mask, state.on, add, caches, objective)
             state.est[add], state.se[add] = est_add, se_add
             readded = add[est_add - z * se_add > theta]
             state.on[readded] = True
@@ -171,7 +179,7 @@ def run_rounds(
             mask = slots.mask(state.on, n_layer)
             caches = sample_caches(ctx, mask, targets)
             everything = np.arange(slots.n)
-            state.est, state.se = lean_screen(ctx, mask, state.on, everything, caches)
+            state.est, state.se = lean_screen(ctx, mask, state.on, everything, caches, objective)
             back = np.nonzero(~state.on & (state.est - z * state.se > theta))[0]
             state.on[back] = True
             state.readded[back] = j

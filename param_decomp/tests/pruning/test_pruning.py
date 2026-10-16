@@ -61,6 +61,7 @@ from param_decomp.targets.transformer import (
 
 C = 8
 CE = QUANTITIES.index("ce")
+CE_INT = QUANTITIES.index("ce_int")
 
 type Setup = tuple[
     Mesh,
@@ -234,24 +235,32 @@ def test_mask_gradient_is_the_derivative(setup: Setup) -> None:
     mask = slots.mask(on, arch.n_layer)
     y = jnp.asarray(rng.integers(0, 64, size=6), jnp.int32)
     weight = jnp.ones((6,))
-    grad = slots.gather(mask_gradient(arch, shared, factors, mask, tokens, y, weight, "fp32"))
     int_ids = jnp.asarray(np.arange(1000) % 64, jnp.int32)
-    r = jnp.zeros((6,), jnp.int32)
+    r = jnp.asarray(rng.integers(0, 64, size=6), jnp.int32)
     h = 2e-2  # central difference: O(h²) bias, and fp32 sums need a step well above 1e-3
-    for a in (0, int(np.nonzero(~on)[0][0]), slots.n - 1):
-        kind = KIND_ORDER[slots.kind[a]]
-        bumped = {k: v for k, v in mask.items()}
-        lo = {k: v for k, v in mask.items()}
-        bumped[kind] = mask[kind].at[slots.layer[a], slots.slot[a]].add(h)
-        lo[kind] = mask[kind].at[slots.layer[a], slots.slot[a]].add(-h)
-        f = lambda m: float(  # noqa: E731
-            jnp.sum(
-                score_prompts(
-                    arch, shared, factors, m, None, tokens, y, r, int_ids, "fp32", "fp32"
-                )[CE]
+    for integer, quantity in ((False, CE), (True, QUANTITIES.index("ce_int"))):
+        grad = slots.gather(
+            mask_gradient(
+                arch, shared, factors, mask, tokens, y, r, int_ids, weight, "fp32", integer
             )
         )
-        np.testing.assert_allclose(grad[a], (f(bumped) - f(lo)) / (2 * h), rtol=2e-2, atol=1e-4)
+        for a in (0, int(np.nonzero(~on)[0][0]), slots.n - 1):
+            kind = KIND_ORDER[slots.kind[a]]
+            bumped = {k: v for k, v in mask.items()}
+            lo = {k: v for k, v in mask.items()}
+            bumped[kind] = mask[kind].at[slots.layer[a], slots.slot[a]].add(h)
+            lo[kind] = mask[kind].at[slots.layer[a], slots.slot[a]].add(-h)
+
+            def f(m: pm.Mask, quantity: int = quantity) -> float:
+                return float(
+                    jnp.sum(
+                        score_prompts(
+                            arch, shared, factors, m, None, tokens, y, r, int_ids, "fp32", "fp32"
+                        )[quantity]
+                    )
+                )
+
+            np.testing.assert_allclose(grad[a], (f(bumped) - f(lo)) / (2 * h), rtol=2e-2, atol=1e-4)
 
 
 def test_shift_sums_hand_case() -> None:
@@ -374,14 +383,15 @@ def test_rich_screen_combine_and_rounds(setup: Setup, tmp_path: Path) -> None:
             "max_rounds": 4,
             "max_fresh_screens": 1,
             "grad_batch_size": 16,
+            "objective": "ce_int",
         }
     )
     check = np.arange(ctx.problem.n)
-    ce_s0 = float(np.mean(score_set(ctx, mask0, check, "fp32", False)[CE]))
+    ce_s0 = float(np.mean(score_set(ctx, mask0, check, "fp32", False)[CE_INT]))
     state = PruneState(
         on=on0.copy(),
-        est=np.asarray(table["d_ce"], np.float64),
-        se=np.asarray(table["se_ce"], np.float64),
+        est=np.asarray(table["d_ce_int"], np.float64),
+        se=np.asarray(table["se_ce_int"], np.float64),
         readded=np.full(ctx.slots.n, -1),
         removed=np.full(ctx.slots.n, -1),
     )
@@ -390,7 +400,7 @@ def test_rich_screen_combine_and_rounds(setup: Setup, tmp_path: Path) -> None:
     assert rounds and (tmp_path / "sets").exists()
     ce_final = float(
         np.mean(
-            score_set(ctx, ctx.slots.mask(final.on, ctx.arch.n_layer), check, "fp32", False)[CE]
+            score_set(ctx, ctx.slots.mask(final.on, ctx.arch.n_layer), check, "fp32", False)[CE_INT]
         )
     )
     assert ce_final - ce_s0 <= config.global_budget + 1e-6

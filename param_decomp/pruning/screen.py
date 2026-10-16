@@ -174,7 +174,7 @@ def _powers(values: np.ndarray) -> np.ndarray:
 def ce_estimate(
     ctx: Context, a: int, delta_r: np.ndarray, delta_h: np.ndarray
 ) -> tuple[float, float]:
-    """`(ΔĈE_a, SE_a)` from the per-prompt `CE` deltas on `R` and on `H_a`."""
+    """`(ΔĈE_a, SE_a)` from the per-prompt deltas of one quantity on `R` and on `H_a`."""
     pos = ctx.position_in_sample[ctx.top[a]]
     in_r = pos[pos >= 0]
     mean, se = stratified(
@@ -189,14 +189,22 @@ def ce_estimate(
 
 
 def lean_screen(
-    ctx: Context, mask: Mask, on: np.ndarray, comps: np.ndarray, caches: list[SampleCache]
+    ctx: Context,
+    mask: Mask,
+    on: np.ndarray,
+    comps: np.ndarray,
+    caches: list[SampleCache],
+    quantity: int = CE,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """`(ΔĈE, SE)` of each component in `comps` against `mask` (removal if on, addition if off)."""
+    """`(Δ̂, SE)` of one quantity (default `CE`) for each component in `comps` against `mask`
+    (removal if on, addition if off)."""
     t0 = time.time()
-    delta_r = np.stack([phase_a(ctx, mask, on, caches, int(a))["delta"][CE] for a in comps])
+    delta_r = np.stack([phase_a(ctx, mask, on, caches, int(a))["delta"][quantity] for a in comps])
     delta_h = np.concatenate(
         [
-            phase_b(ctx, mask, on, comps[s : s + ctx.group_size], with_target=False)["delta"][:, CE]
+            phase_b(ctx, mask, on, comps[s : s + ctx.group_size], with_target=False)["delta"][
+                :, quantity
+            ]
             for s in range(0, comps.size, ctx.group_size)
         ]
     )

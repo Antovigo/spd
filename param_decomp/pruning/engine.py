@@ -281,17 +281,26 @@ def mask_gradient(
     mask: Mask,
     tokens: Int[Array, "B T"],
     y: Int[Array, " B"],
+    r: Int[Array, " B"],
+    int_ids: Int[Array, " 1000"],
     weight: Float[Array, " B"],
     precision: Precision,
+    integer: bool,
 ) -> Mask:
-    """`∂/∂m Σ_b weight_b · CE_b` (`weight` zero on padding rows)."""
+    """`∂/∂m Σ_b weight_b · CE_b` (`weight` zero on padding rows); with `integer`, the `CE`
+    among the integer tokens (`-log q(r)`)."""
     none = Flips.none(tokens.shape[0])
 
     def loss(m: Mask) -> Array:
         logp = log_softmax32(
             factored_logits(arch, shared, factors, m, none, tokens, precision, precision)
         )
-        ce = -jnp.take_along_axis(logp, y[:, None], axis=1)[:, 0]
+        if integer:
+            lp_int = jnp.take(logp, int_ids, axis=-1)
+            log_q = lp_int - jax.nn.logsumexp(lp_int, axis=-1, keepdims=True)
+            ce = -jnp.take_along_axis(log_q, r[:, None], axis=1)[:, 0]
+        else:
+            ce = -jnp.take_along_axis(logp, y[:, None], axis=1)[:, 0]
         return jnp.sum(weight * ce)
 
     return jax.grad(loss)(mask)

@@ -85,6 +85,7 @@ ROUND_KNOBS = (
     "max_disagreements",
     "max_rounds",
     "max_fresh_screens",
+    "objective",
 )
 R_BIN = 100
 
@@ -227,12 +228,15 @@ def run(config: PruneConfig, data_root: Path, name: str, stages: tuple[str, ...]
             )
 
         if "prune" in stages:
-            state = _resume(out, slots.n)
-            ce_s0 = float(np.mean(score_set(ctx, mask0, check, config.full_precision, False)[CE]))
+            state = _resume(out, slots.n, config.objective)
+            objective = QUANTITIES.index(config.objective)
+            ce_s0 = float(
+                np.mean(score_set(ctx, mask0, check, config.full_precision, False)[objective])
+            )
             run_rounds(config, ctx, state, check, ce_s0, out)
 
         if "report" in stages:
-            final = _resume(out, slots.n)
+            final = _resume(out, slots.n, config.objective)
             everything = np.arange(problem.n)
             refs = np.load(out / "references.npz")
             mask_f = slots.mask(final.on, arch.n_layer)
@@ -303,7 +307,7 @@ def _summary(problem: Problem, scores: np.ndarray) -> dict[str, object]:
     return out
 
 
-def _resume(out: Path, n: int) -> PruneState:
+def _resume(out: Path, n: int, objective: str) -> PruneState:
     sets = sorted((out / "sets").glob("S_*.npz")) if (out / "sets").exists() else []
     if sets:
         d = np.load(sets[-1])
@@ -322,8 +326,8 @@ def _resume(out: Path, n: int) -> PruneState:
     )
     return PruneState(
         on=np.ones(n, bool),
-        est=np.asarray(table["d_ce"], np.float64),
-        se=np.asarray(table["se_ce"], np.float64),
+        est=np.asarray(table[f"d_{objective}"], np.float64),
+        se=np.asarray(table[f"se_{objective}"], np.float64),
         readded=np.full(n, -1),
         removed=np.full(n, -1),
     )
@@ -457,7 +461,8 @@ def combine(ctx: Context, out: Path) -> None:
             cols[f"{label}_{q}"] = mean[:, i]
         cols[f"{label}_ce_sd"], cols[f"{label}_ce_skew"] = sd[:, CE], skew[:, CE]
         if label == "d":
-            cols["se_ce"] = se[:, CE]
+            for i, q in enumerate(QUANTITIES):
+                cols[f"se_{q}"] = se[:, i]
             del mu
     cols["d_ce"] = cols.pop("d_ce")
     dce_r, dce_h = a["delta_ce"], b["delta"][:, CE]
