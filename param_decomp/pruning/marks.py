@@ -4,11 +4,12 @@
         --grids_dir <run>/<filter>-<s>/ab_grids [--mask <mask_dir> ...] [--default <mask_dir>]
 
 Each mask dir holds a learned mask's `state.npz` (`<prune_dir>/learn[/<learn_name>]/lam_<λ>`, λ
-the L0 penalty weight); without `--mask`, every `state.npz` under `<prune_dir>/learn` is used.
+the L0 penalty weight); without `--mask`, every `state.npz` under `<prune_dir>/learn` is used. The blockwise run's newest `sets/S_<j>.npz`, when present, is
+always added (its entry also carries `blocks`: the block that removed each component).
 A component is pruned when its logit `ℓ ≤ 0`; a run still in progress is marked as far as it got.
 
 Writes `<grids_dir>/pruned.js` (`window.PRUNED = {temperature_r2_cut, default, masks: [{name,
-label, n_pruned, pruned: {site: [component]}}], sites: {site: {component: screen record}}}`) and
+label, n_pruned, pruned: {site: [component]}, [blocks: {site: [block]}]}], sites: {site: {component: screen record}}}`) and
 refreshes `index.html` / `alive.html` from the current applet, whose "pruning mask" menu picks
 the mask that draws a red ✕ in a white square in the top-right corner of pruned tiles."""
 
@@ -45,6 +46,35 @@ def mask_entry(prune_dir: Path, mask_dir: Path, slots: Slots) -> dict[str, objec
     return {"name": name, "label": label, "n_pruned": int((~on).sum()), "pruned": pruned}
 
 
+def blockwise_entry(prune_dir: Path, slots: Slots) -> dict[str, object] | None:
+    """The blockwise run's newest set `sets/S_<j>.npz` (`on`, and `removed`: the block that last
+    removed each component), labelled with its size and its accuracy on `Q` from
+    `learn/baseline.json` when scored there; None without sets."""
+    sets = sorted((prune_dir / "sets").glob("S_*.npz"))
+    if not sets:
+        return None
+    saved = np.load(sets[-1])
+    on, removed = saved["on"], saved["removed"]
+    assert on.size == slots.n, (on.size, slots.n)
+    label = f"blockwise ({sets[-1].stem}): {int(on.sum())} kept"
+    baseline = prune_dir / "learn" / "baseline.json"
+    scored = json.loads(baseline.read_text()).get(sets[-1].stem) if baseline.exists() else None
+    if scored is not None:
+        label += f", acc {100 * scored['all']['correct']:.1f}%"
+    pruned: dict[str, list[int]] = {}
+    blocks: dict[str, list[int]] = {}
+    for a in np.flatnonzero(~on):
+        pruned.setdefault(slots.sites[a], []).append(int(slots.index[a]))
+        blocks.setdefault(slots.sites[a], []).append(int(removed[a]))
+    return {
+        "name": f"blockwise/{sets[-1].stem}",
+        "label": label,
+        "n_pruned": int((~on).sum()),
+        "pruned": pruned,
+        "blocks": blocks,
+    }
+
+
 def pruned_payload(
     prune_dir: Path, mask_dirs: list[Path], default: Path | None, alive: dict[str, np.ndarray]
 ) -> dict[str, object]:
@@ -54,6 +84,7 @@ def pruned_payload(
     (`temperature.npz`) when that stage ran."""
     slots = slots_of(alive)
     masks = [mask_entry(prune_dir, d, slots) for d in mask_dirs]
+    blockwise = blockwise_entry(prune_dir, slots)
     table = np.genfromtxt(
         prune_dir / "components.tsv", delimiter="\t", names=True, dtype=None, encoding=None
     )
@@ -79,7 +110,7 @@ def pruned_payload(
     return {
         "temperature_r2_cut": TEMPERATURE_R2,
         "default": mask_dirs.index(default) if default is not None else 0,
-        "masks": masks,
+        "masks": masks + ([blockwise] if blockwise is not None else []),
         "sites": sites,
     }
 
@@ -132,7 +163,7 @@ def main() -> None:
     (args.grids_dir / "alive.html").write_text(alive_page())
     for m in payload["masks"]:  # pyright: ignore[reportGeneralTypeIssues]
         print(m["label"])
-    print(f"{len(mask_dirs)} masks -> {args.grids_dir}")
+    print(f"{len(payload['masks'])} masks -> {args.grids_dir}")  # pyright: ignore[reportArgumentType]
 
 
 if __name__ == "__main__":

@@ -126,8 +126,11 @@ const selectedKey = () => `${SLICES.ops[+$("op").value]}:${SLICES.positions[+$("
 const positionLabel = p => `${p} (${SLICES.position_labels[p]})`;
 // A pruning run's per-component screen record (`pruned.js`), else null, with `pruned` set
 // from the mask chosen in the "pruning mask" menu (`PRUNED.masks[i].pruned`: {site: [c]}).
+// Per mask, {site: Map(component -> block that removed it, or null)}; only the blockwise
+// run's entry carries `blocks`.
 const pruneSets = (window.PRUNED?.masks ?? []).map(m =>
-  new Map(Object.entries(m.pruned).map(([site, cs]) => [site, new Set(cs)])));
+  new Map(Object.entries(m.pruned).map(([site, cs]) =>
+    [site, new Map(cs.map((c, k) => [c, m.blocks?.[site]?.[k] ?? null]))])));
 const currentMask = () => {
   const v = $("mask").value, i = v === "" ? -1 : +v;
   return i >= 0 && i < pruneSets.length ? i : null;
@@ -136,7 +139,8 @@ function pruneInfo(name, c) {
   const rec = window.PRUNED?.sites?.[name]?.[c];
   if (!rec) return null;
   const i = currentMask();
-  return { ...rec, pruned: i !== null && !!pruneSets[i].get(name)?.has(+c),
+  const hit = i !== null ? pruneSets[i].get(name) : undefined;
+  return { ...rec, pruned: !!hit?.has(+c), block: hit?.get(+c) ?? null,
            source: i !== null ? window.PRUNED.masks[i].label : "no mask" };
 }
 const fmt = (x, d = 4) => (Math.abs(x) >= 1e-3 || x === 0 ? x.toFixed(d) : x.toExponential(1));
@@ -153,7 +157,7 @@ function showTip(ev, text) {
 const hideTip = () => { tip().style.display = "none"; };
 function pruneTooltip(info) {
   const lines = [
-    info.pruned ? "PRUNED" : "kept",
+    info.pruned ? (info.block !== null ? `PRUNED in block ${info.block}` : "PRUNED") : "kept",
     `screen on S0 (all alive, delta off); ablating this component:`,
     `  KL(alive-only || ablated): ${fmt(info.kl)}`,
     `  dCE: ${fmt(info.d_ce)} ± ${fmt(info.se_ce)} nats (among integers: ${fmt(info.d_ce_int)})`,
@@ -442,7 +446,7 @@ function renderDetail() {
   const pi = 0, oi = 0;
   const info = pruneInfo(selected.name, selected.c), pruned = info?.pruned ? info : null;
   $("dtitle").textContent = `${selected.name} · component ${selected.c} · op ${cur.ops[oi]} · position ${positionLabel(cur.positions[pi])}`
-    + (pruned ? " · ✕ pruned" : "");
+    + (pruned ? " · ✕ pruned" + (pruned.block !== null ? ` in block ${pruned.block}` : "") : "");
   // A split slice draws the pooled thumbnail until the module's full grids arrive.
   const fullGrids = fullData(selected.mi), loading = !fullGrids;
   const drawers = tileDrawers(selected.mi, selected.si, pi, oi, fullGrids || moduleData(selected.mi));
