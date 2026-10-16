@@ -216,3 +216,100 @@ def _write(
         next_round=np.asarray(state.next_round),
         fresh_screens=np.asarray(state.fresh_screens),
     )
+
+
+def run_blockwise(
+    config: PruneConfig,
+    ctx: Context,
+    state: PruneState,
+    check: np.ndarray,
+    ce_s0: float,
+    out_dir: Path,
+) -> PruneState:
+    """Prune block by block, L0 first. For block `l`: screen every surviving component of the
+    block on the current set, remove the most negative candidates (`est + z·se ≤ ε`, at most
+    `max_batch_fraction` of the block's survivors) under the exact check on `Q`, re-screen the
+    block's survivors after each accepted batch, stop when none qualifies (or a batch of one
+    fails the check), then test the block's removed components for re-addition. Lower blocks
+    are never revisited. `state.next_round` counts the blocks done."""
+    assert config.epsilon is not None, "set `epsilon` from the screen's SE distribution first"
+    eps, z, theta = config.epsilon, config.z, config.theta
+    slots, n_layer = ctx.slots, ctx.arch.n_layer
+    full = config.full_precision
+    objective = QUANTITIES.index(config.objective)
+    targets = target_on_sample(ctx)
+    (out_dir / "sets").mkdir(parents=True, exist_ok=True)
+    log = (out_dir / "rounds.jsonl").open("a")
+
+    def mean_obj(on: np.ndarray) -> float:
+        return float(
+            np.mean(score_set(ctx, slots.mask(on, n_layer), check, full, False)[objective])
+        )
+
+    def screen(comps: np.ndarray) -> None:
+        mask = slots.mask(state.on, n_layer)
+        caches = sample_caches(ctx, mask, targets)
+        state.est[comps], state.se[comps] = lean_screen(
+            ctx, mask, state.on, comps, caches, objective
+        )
+        del caches
+
+    ce_now = mean_obj(state.on)
+    for layer in range(state.next_round, n_layer):
+        t0 = time.time()
+        block = slots.layer == layer
+        record: dict[str, object] = {
+            "block": layer,
+            "size_before": int(state.on.sum()),
+            "block_before": int((block & state.on).sum()),
+            "ce_before": ce_now,
+        }
+        batches: list[dict[str, object]] = []
+        screen(np.nonzero(block & state.on)[0])
+        for _ in range(config.max_rounds):
+            cand = np.nonzero(block & state.on & (state.est + z * state.se <= eps))[0]
+            if not cand.size:
+                break
+            cand = cand[np.argsort(state.est[cand])]
+            cap = max(1, int(config.max_batch_fraction * (block & state.on).sum()))
+            batch = cand[:cap]
+            tries: list[dict[str, float]] = []
+            while batch.size:
+                trial = state.on.copy()
+                trial[batch] = False
+                ce_trial = mean_obj(trial)
+                tries.append({"size": int(batch.size), "ce": ce_trial})
+                if (
+                    ce_trial - ce_now <= config.round_tolerance
+                    and ce_trial - ce_s0 <= config.global_budget
+                ):
+                    break
+                batch = batch[: batch.size // 2]
+            batches.append({"candidates": int(cand.size), "tries": tries})
+            if not batch.size:
+                break
+            state.on[batch] = False
+            state.removed[batch] = layer
+            ce_now = tries[-1]["ce"]
+            screen(np.nonzero(block & state.on)[0])
+        gone = np.nonzero(block & ~state.on)[0]
+        readded = np.zeros(0, np.int64)
+        if gone.size:
+            screen(gone)
+            readded = gone[state.est[gone] - z * state.se[gone] > theta]
+            if readded.size:
+                state.on[readded] = True
+                state.readded[readded] = layer
+                ce_now = mean_obj(state.on)
+        record.update(
+            batches=batches,
+            removed=int(gone.size - readded.size),
+            readded=int(readded.size),
+            block_after=int((block & state.on).sum()),
+            size_after=int(state.on.sum()),
+            ce_after=ce_now,
+            seconds=time.time() - t0,
+        )
+        _write(log, record, out_dir, layer, state, np.zeros(slots.n))
+    log.close()
+    return state

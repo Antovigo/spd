@@ -33,7 +33,7 @@ from param_decomp.pruning.engine import (
     target_logp,
 )
 from param_decomp.pruning.problem import Problem
-from param_decomp.pruning.prune import PruneState, run_rounds, score_set
+from param_decomp.pruning.prune import PruneState, run_blockwise, run_rounds, score_set
 from param_decomp.pruning.run import combine
 from param_decomp.pruning.screen import (
     Context,
@@ -479,3 +479,38 @@ def test_build_and_select_under_a_zero1_placement() -> None:
     ci = np.asarray(lower[slots.sites[a]], np.float32)[:, :, slots.index[a]].max(axis=1)
     np.testing.assert_allclose(np.sort(values[a])[::-1], np.sort(ci)[::-1][:3], rtol=1e-2)
     assert set(top[a].tolist()) <= set(range(20))
+
+
+def test_blockwise_pruning(setup: Setup, tmp_path: Path) -> None:
+    ctx = _context(setup, sample_all=True)
+    n = ctx.slots.n
+    on0 = np.ones(n, bool)
+    mask0 = ctx.slots.mask(on0, ctx.arch.n_layer)
+    config = PruneConfig.model_validate(
+        {
+            "run": {"kind": "id", "id": "p-test"},
+            "step": 0,
+            "filter_id": "cf-test",
+            "pool": {},
+            "epsilon": 1e-3,
+            "objective": "ce_int",
+            "mode": "blockwise",
+            "max_rounds": 3,
+        }
+    )
+    check = np.arange(ctx.problem.n)
+    ce_s0 = float(np.mean(score_set(ctx, mask0, check, "fp32", False)[CE_INT]))
+    state = PruneState(
+        on=on0.copy(), est=np.zeros(n), se=np.zeros(n),
+        readded=np.full(n, -1), removed=np.full(n, -1),
+    )  # fmt: skip
+    final = run_blockwise(config, ctx, state, check, ce_s0, tmp_path)
+    records = [json.loads(line) for line in (tmp_path / "rounds.jsonl").read_text().splitlines()]
+    assert [r["block"] for r in records] == list(range(ctx.arch.n_layer))
+    assert final.next_round == ctx.arch.n_layer
+    # Removals only ever happen in the block being pruned.
+    was_removed = final.removed >= 0
+    np.testing.assert_array_equal(final.removed[was_removed], ctx.slots.layer[was_removed])
+    on_mask = ctx.slots.mask(final.on, ctx.arch.n_layer)
+    ce_final = float(np.mean(score_set(ctx, on_mask, check, "fp32", False)[CE_INT]))
+    assert ce_final - ce_s0 <= config.global_budget + 1e-6

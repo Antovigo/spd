@@ -42,7 +42,7 @@ from param_decomp.pruning import model as pm
 from param_decomp.pruning.config import PruneConfig
 from param_decomp.pruning.engine import score_target
 from param_decomp.pruning.problem import Problem, build_problem
-from param_decomp.pruning.prune import PruneState, run_rounds, score_set
+from param_decomp.pruning.prune import PruneState, run_blockwise, run_rounds, score_set
 from param_decomp.pruning.screen import (
     CE,
     Context,
@@ -86,6 +86,7 @@ ROUND_KNOBS = (
     "max_rounds",
     "max_fresh_screens",
     "objective",
+    "mode",
 )
 R_BIN = 100
 
@@ -233,7 +234,11 @@ def run(config: PruneConfig, data_root: Path, name: str, stages: tuple[str, ...]
             ce_s0 = float(
                 np.mean(score_set(ctx, mask0, check, config.full_precision, False)[objective])
             )
-            run_rounds(config, ctx, state, check, ce_s0, out)
+            match config.mode:
+                case "global":
+                    run_rounds(config, ctx, state, check, ce_s0, out)
+                case "blockwise":
+                    run_blockwise(config, ctx, state, check, ce_s0, out)
 
         if "report" in stages:
             final = _resume(out, slots.n, config.objective)
