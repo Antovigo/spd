@@ -47,7 +47,10 @@
   .matrix-strip { display: flex; gap: 12px; overflow-x: auto; padding-bottom: 6px; }
   .matrix-strip .tile { flex: 0 0 auto; }
   .tile { border: 1px solid var(--line); border-radius: 6px; background: var(--card);
-          cursor: pointer; text-align: center; }
+          cursor: pointer; text-align: center; position: relative; }
+  /* Components a pruning run removed (`pruned.js`, written by param_decomp.pruning.marks). */
+  .tile .pruned { position: absolute; top: 1px; right: 3px; font-size: 11px; line-height: 1;
+                  color: #c0392b; pointer-events: none; }
   .tile.sel { outline: 2px solid #7b5cd6; }
   .tile .lbl { font-size: 11px; color: var(--muted); padding: 3px 4px; white-space: nowrap; }
   canvas { image-rendering: pixelated; display: block; margin: 0 auto; }
@@ -96,6 +99,8 @@
 </div>
 
 <script src="manifest.js"></script>
+<!-- Optional: present only after a pruning run marked this grid (window.PRUNED). -->
+<script src="pruned.js" onerror="window.PRUNED = null"></script>
 <script>
 "use strict";
 const $ = id => document.getElementById(id);
@@ -109,6 +114,8 @@ let selected = null;       // {mi, si} selected component
 
 const selectedKey = () => `${SLICES.ops[+$("op").value]}:${SLICES.positions[+$("pos").value]}`;
 const positionLabel = p => `${p} (${SLICES.position_labels[p]})`;
+// `{block, set}` of a component the pruning run removed, else null.
+const prunedInfo = (name, c) => window.PRUNED?.sites?.[name]?.[c] ?? null;
 
 // Render only if this payload is still the selected slice (script tags load async, so an
 // older request can land after a newer one).
@@ -346,6 +353,14 @@ function renderGallery() {
       lbl.className = "lbl";
       lbl.textContent = `#${comp.c}`;
       tile.append(cv, lbl);
+      const pruned = prunedInfo(comp.name, comp.c);
+      if (pruned) {
+        const mark = document.createElement("span");
+        mark.className = "pruned";
+        mark.textContent = "✂";
+        tile.title = `pruned in block ${pruned.block} (${window.PRUNED.source})`;
+        tile.append(mark);
+      }
       tile.onclick = () => { selected = { mi: comp.mi, si: comp.si, c: comp.c, name: comp.name }; render(); };
       if (selected && selected.mi === comp.mi && selected.si === comp.si) tile.classList.add("sel");
       strip.append(tile);
@@ -366,7 +381,9 @@ function renderDetail() {
   detail.style.display = "block";
   document.body.classList.add("drawer-open");
   const pi = 0, oi = 0;
-  $("dtitle").textContent = `${selected.name} · component ${selected.c} · op ${cur.ops[oi]} · position ${positionLabel(cur.positions[pi])}`;
+  const pruned = prunedInfo(selected.name, selected.c);
+  $("dtitle").textContent = `${selected.name} · component ${selected.c} · op ${cur.ops[oi]} · position ${positionLabel(cur.positions[pi])}`
+    + (pruned ? ` · ✂ pruned in block ${pruned.block}` : "");
   // A split slice draws the pooled thumbnail until the module's full grids arrive.
   const fullGrids = fullData(selected.mi), loading = !fullGrids;
   const drawers = tileDrawers(selected.mi, selected.si, pi, oi, fullGrids || moduleData(selected.mi));
