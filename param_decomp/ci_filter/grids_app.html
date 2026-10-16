@@ -49,8 +49,10 @@
   .tile { border: 1px solid var(--line); border-radius: 6px; background: var(--card);
           cursor: pointer; text-align: center; position: relative; }
   /* Components a pruning run removed (`pruned.js`, written by param_decomp.pruning.marks). */
-  .tile .pruned { position: absolute; top: 1px; right: 3px; font-size: 11px; line-height: 1;
-                  color: #c0392b; pointer-events: none; }
+  .tile .pruned { position: absolute; top: 3px; right: 3px; width: 13px; height: 13px;
+                  background: #fff; border: 1px solid #c0392b; border-radius: 2px;
+                  color: #c0392b; font: bold 11px/13px sans-serif; text-align: center;
+                  pointer-events: none; }
   .tile.sel { outline: 2px solid #7b5cd6; }
   .tile .lbl { font-size: 11px; color: var(--muted); padding: 3px 4px; white-space: nowrap; }
   canvas { image-rendering: pixelated; display: block; margin: 0 auto; }
@@ -357,7 +359,7 @@ function renderGallery() {
       if (pruned) {
         const mark = document.createElement("span");
         mark.className = "pruned";
-        mark.textContent = "✂";
+        mark.textContent = "✕";
         tile.title = `pruned in block ${pruned.block} (${window.PRUNED.source})`;
         tile.append(mark);
       }
@@ -383,7 +385,7 @@ function renderDetail() {
   const pi = 0, oi = 0;
   const pruned = prunedInfo(selected.name, selected.c);
   $("dtitle").textContent = `${selected.name} · component ${selected.c} · op ${cur.ops[oi]} · position ${positionLabel(cur.positions[pi])}`
-    + (pruned ? ` · ✂ pruned in block ${pruned.block}` : "");
+    + (pruned ? ` · ✕ pruned in block ${pruned.block}` : "");
   // A split slice draws the pooled thumbnail until the module's full grids arrive.
   const fullGrids = fullData(selected.mi), loading = !fullGrids;
   const drawers = tileDrawers(selected.mi, selected.si, pi, oi, fullGrids || moduleData(selected.mi));

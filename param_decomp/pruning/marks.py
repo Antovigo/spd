@@ -5,7 +5,7 @@
 
 Writes `<grids_dir>/pruned.js` (`window.PRUNED = {source, sites: {site: {component: {block}}}}`)
 from the newest `sets/S_<j>.npz` (a run still in progress is marked as far as it got) and
-refreshes `index.html` / `alive.html` from the current applet, which draws a ✂ in the top-right
+refreshes `index.html` / `alive.html` from the current applet, which draws a red ✕ in a white square in the top-right
 corner of every pruned component's tile. A component counts as pruned when it is in `S₀` and off
 in that set; `block` is the block (blockwise mode) or round (global mode) that last removed it."""
 
