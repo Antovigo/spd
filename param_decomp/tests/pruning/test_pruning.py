@@ -496,6 +496,7 @@ def test_blockwise_pruning(setup: Setup, tmp_path: Path) -> None:
             "objective": "ce_int",
             "mode": "blockwise",
             "max_rounds": 3,
+            "round_precision": "tf32",
         }
     )
     check = np.arange(ctx.problem.n)
@@ -508,6 +509,7 @@ def test_blockwise_pruning(setup: Setup, tmp_path: Path) -> None:
     records = [json.loads(line) for line in (tmp_path / "rounds.jsonl").read_text().splitlines()]
     assert [r["block"] for r in records] == list(range(ctx.arch.n_layer))
     assert final.next_round == ctx.arch.n_layer
+    assert not (tmp_path / "sets" / "partial.npz").exists()
     # Removals only ever happen in the block being pruned.
     was_removed = final.removed >= 0
     np.testing.assert_array_equal(final.removed[was_removed], ctx.slots.layer[was_removed])

@@ -44,6 +44,8 @@ class PruneConfig(BaseConfig):
     full_precision: PrecisionName = "bf16"
     """Site and head matmuls of the full-`P` passes (exact `CE`, gradient, reports)."""
     target_precision: PrecisionName = "bf16"
+    round_precision: PrecisionName | None = None
+    """Site and head matmuls of the blockwise re-screens (`None`: the screen's)."""
     """The dense target (Llama) reference: its weights are bf16."""
 
     objective: Literal["ce", "ce_int"] = "ce"

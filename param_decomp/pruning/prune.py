@@ -10,6 +10,7 @@ the components whose first-order estimate disagrees with `est`, and the re-addit
 components whose gradient and direct ablation-in say they help. A stalled round triggers a fresh
 screen of every component; a fresh screen that changes nothing ends the run."""
 
+import dataclasses
 import json
 import time
 from dataclasses import dataclass
@@ -23,7 +24,13 @@ from param_decomp.core.log import logger
 from param_decomp.pruning.config import PruneConfig
 from param_decomp.pruning.engine import mask_gradient, score_prompts
 from param_decomp.pruning.model import Mask, Precision
-from param_decomp.pruning.screen import Context, lean_screen, sample_caches, target_on_sample
+from param_decomp.pruning.screen import (
+    Context,
+    Precisions,
+    lean_screen,
+    sample_caches,
+    target_on_sample,
+)
 from param_decomp.pruning.stats import QUANTITIES
 
 
@@ -229,16 +236,26 @@ def run_blockwise(
     """Prune block by block, L0 first. For block `l`: screen every surviving component of the
     block on the current set, remove the most negative candidates (`est + z·se ≤ ε`, at most
     `max_batch_fraction` of the block's survivors) under the exact check on `Q`, re-screen the
-    block's survivors after each accepted batch, stop when none qualifies (or a batch of one
-    fails the check), then test the block's removed components for re-addition. Lower blocks
-    are never revisited. `state.next_round` counts the blocks done."""
+    block's remaining candidates after each accepted batch (a survivor above the threshold is
+    not re-measured until the block's re-addition pass), stop when none qualifies (or a batch
+    of one fails the check), then test the block's removed components for re-addition. Lower
+    blocks are never revisited. `state.next_round` counts the blocks done; the state is also
+    saved after every accepted batch (`sets/partial.npz`), and a resumed block starts from it."""
     assert config.epsilon is not None, "set `epsilon` from the screen's SE distribution first"
     eps, z, theta = config.epsilon, config.z, config.theta
     slots, n_layer = ctx.slots, ctx.arch.n_layer
     full = config.full_precision
     objective = QUANTITIES.index(config.objective)
     targets = target_on_sample(ctx)
+    if config.round_precision is not None:
+        ctx = dataclasses.replace(
+            ctx,
+            precisions=Precisions(
+                config.round_precision, config.round_precision, ctx.precisions.target
+            ),
+        )
     (out_dir / "sets").mkdir(parents=True, exist_ok=True)
+    partial = out_dir / "sets" / "partial.npz"
     log = (out_dir / "rounds.jsonl").open("a")
 
     def mean_obj(on: np.ndarray) -> float:
@@ -265,7 +282,19 @@ def run_blockwise(
             "ce_before": ce_now,
         }
         batches: list[dict[str, object]] = []
-        screen(np.nonzero(block & state.on)[0])
+        resumed = partial.exists() and int(np.load(partial)["layer"]) == layer
+        if resumed:
+            saved = np.load(partial)
+            state.on, state.est, state.se = (
+                saved["on"].copy(),
+                saved["est"].copy(),
+                saved["se"].copy(),
+            )
+            state.removed = saved["removed"].copy()
+            ce_now = mean_obj(state.on)
+            logger.info(f"block {layer}: resumed mid-block, {int((block & state.on).sum())} left")
+        else:
+            screen(np.nonzero(block & state.on)[0])
         for _ in range(config.max_rounds):
             cand = np.nonzero(block & state.on & (state.est + z * state.se <= eps))[0]
             if not cand.size:
@@ -291,7 +320,11 @@ def run_blockwise(
             state.on[batch] = False
             state.removed[batch] = layer
             ce_now = tries[-1]["ce"]
-            screen(np.nonzero(block & state.on)[0])
+            rest = np.setdiff1d(cand, batch)
+            if rest.size:
+                screen(rest)
+            np.savez(partial, layer=np.asarray(layer), on=state.on, est=state.est, se=state.se,
+                     removed=state.removed)  # fmt: skip
         gone = np.nonzero(block & ~state.on)[0]
         readded = np.zeros(0, np.int64)
         if gone.size:
@@ -311,5 +344,6 @@ def run_blockwise(
             seconds=time.time() - t0,
         )
         _write(log, record, out_dir, layer, state, np.zeros(slots.n))
+        partial.unlink(missing_ok=True)
     log.close()
     return state

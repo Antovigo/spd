@@ -87,6 +87,7 @@ ROUND_KNOBS = (
     "max_fresh_screens",
     "objective",
     "mode",
+    "round_precision",
 )
 R_BIN = 100
 
