@@ -565,3 +565,6 @@ def test_learned_mask(setup: Setup, tmp_path: Path) -> None:
     assert (tmp_path / "learn" / "baseline.json").exists()
     on = learn_mask(config, ctx, check, 1.0, tmp_path)
     assert int(on.sum()) == final["size"]
+    changed = config.model_copy(update={"learn_lr": 0.1})
+    with pytest.raises(AssertionError, match="learn settings differ"):
+        learn_mask(changed, ctx, check, 1.0, tmp_path)

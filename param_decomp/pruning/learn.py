@@ -8,7 +8,8 @@ loss is `mean_B ce_int + λ · Σ_c σ(ℓ_c / T)` over a minibatch `B` of `P \\
 down when the first-order cost of dropping `c`, `−∂ ce_int / ∂ m_c`, is below `λ` (nats per
 component). Adam on `ℓ`; the mask at the last step is the result, scored on all of `Q`.
 
-Writes `<prune_dir>/learn/lam_<λ>/{log.jsonl, state.npz, final.json}` and
+Writes `<prune_dir>/learn/lam_<λ>/{learn_config.json, log.jsonl, state.npz, final.json}`
+(`learn_config.json` pins the settings of `TRAINING_FIELDS`; a resume under other settings fails) and
 `<prune_dir>/learn/baseline.json` (`S₀` and the newest blockwise set on `Q`)."""
 
 import json
@@ -24,6 +25,11 @@ from param_decomp.pruning.screen import Context
 from param_decomp.pruning.stats import QUANTITIES
 
 CE_INT = QUANTITIES.index("ce_int")
+TRAINING_FIELDS = (
+    "seed", "full_precision", "learn_steps", "learn_batch", "learn_lr", "learn_init",
+    "learn_temperature", "learn_eval_every", "learn_eval_size",
+)  # fmt: skip
+"""Config fields that shape one λ's outputs: pinned per λ in `learn_config.json`."""
 BETA1, BETA2, ADAM_EPS = 0.9, 0.999, 1e-8
 
 
@@ -69,6 +75,14 @@ def learn_mask(
     """Train one mask at sparsity weight `lam`; returns `on` `(A,)`. Resumes from `state.npz`."""
     d = out / "learn" / f"lam_{lam:g}"
     d.mkdir(parents=True, exist_ok=True)
+    pinned = {k: getattr(config, k) for k in TRAINING_FIELDS}
+    pin_path = d / "learn_config.json"
+    if pin_path.exists():
+        old = json.loads(pin_path.read_text())
+        assert old == pinned, f"{d}: learn settings differ from {pin_path}: {old} vs {pinned}"
+    else:
+        assert not (d / "state.npz").exists(), f"{d}: state.npz without {pin_path}"
+        pin_path.write_text(json.dumps(pinned, indent=1))
     if (d / "final.json").exists():
         return np.load(d / "state.npz")["logit"] > 0
     temp = config.learn_temperature

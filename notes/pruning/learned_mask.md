@@ -41,9 +41,12 @@ after renormalizing the next-token distribution over the integer tokens 0..999.
 - `learn/baseline.json` scores `S₀` and `S_32` on all of `Q`. Each `learn/lam_<λ>/final.json`
   scores that λ's final mask on `Q` with the same function: size, `ce`, `ce_int`, accuracy,
   `P(integer)` and KL to Llama, over all prompts, additions and subtractions.
-- **Verdict.** The learned mask wins if the λ whose mask keeps about 11,006 components reaches
-  a lower `ce_int` on `Q` than `S_32`, or if some λ keeps clearly fewer components at
-  `ce_int ≤ 0.019`.
+- **Verdict.** Both criteria use `S_32`'s `ce_int` on `Q` from `baseline.json` (not its all-`P`
+  0.019). The learned mask wins if the λ whose mask keeps about 11,006 components reaches a
+  lower `ce_int` on `Q` than `S_32`, or if some λ keeps clearly fewer components at no higher
+  `ce_int` on `Q`.
+- `learn_config.json` in each λ directory pins the settings that shape it; resuming under
+  other settings fails.
 - `log.jsonl` records the size and the `ce_int` on the first 4,096 prompts of `Q` every 50
   steps.
 
