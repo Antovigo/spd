@@ -23,4 +23,5 @@ filter `addsub-08-last-pos`). Outputs land in
    `components.tsv` and `estimator_check.json`, then set `epsilon` in the config.
 6. **Stage set 3**: `./run.sh --stages prune,report`. `prune` resumes from the newest
    `sets/S_<j>.npz`, continuing the round numbering.
-7. **Pull** (cluster): `./pull.sh`.
+7. **Pull** (cluster): `./pull.sh`. To keep the ab-grid applet's pruning-mask menu current with
+   every learned mask, run `./sync_marks.sh` (same variables) in the background instead.

@@ -40,6 +40,8 @@ def mask_entry(prune_dir: Path, mask_dir: Path, slots: Slots) -> dict[str, objec
     config = json.loads(config_path.read_text()) if config_path.exists() else {}
     objective = config.get("learn_objective", "ce_int")
     sampled = ", sampled mask" if config.get("learn_sampling", False) else ""
+    if config.get("learn_max_screen_d_ce_int") is not None:
+        sampled += f", candidates screen d_ce_int ≤ {config['learn_max_screen_d_ce_int']}"
     label = (
         f"{objective}{sampled}, λ={lam}"
         + ("" if sweep == "." else f" ({sweep})")
