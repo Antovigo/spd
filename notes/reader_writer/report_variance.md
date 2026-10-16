@@ -1,7 +1,7 @@
 # Which readers drive each MLP writer? First results of the exact variance split (addsub -08)
 
-*Short report on the run of [`plan_variance.md`](plan_variance.md). Block 31 at position `=` was
-still running when this was written; every other (block, position) pair is included.*
+*Short report on the run of [`plan_variance.md`](plan_variance.md), all 32 blocks and positions
+1 to 4.*
 
 ## What was computed
 
@@ -25,10 +25,10 @@ puts into the residual stream, $\mathrm{Var}(t_{d,w}) \lVert U_{d,w} \rVert^2$, 
 the writer's write vector (plan §8). Up readers' terms are further split by which gate reader
 routes them (plan §6, the $J$ terms), on a random subsample of 8,000 prompts.
 
-All the checks of plan §10 passed on all 127 completed (block, position) pairs: the writer
+All the checks of plan §10 passed on all 128 (block, position) pairs: the writer
 activation recomputed from the readers matches the model's within $3 \times 10^{-3}$ of the bf16
 rounding scale, both identities hold to float32 rounding, and shares sum to 1 within $10^{-4}$.
-None of the 22,936 (writer, position) pairs was excluded for zero variance; 780 are flagged as
+None of the 23,508 (writer, position) pairs was excluded for zero variance; 808 are flagged as
 carrying less than 1 % of their block's median writer variance.
 
 Component names below are AB-grid ids, `layers.<l>.mlp.<kind>_proj:<id>`.
@@ -56,19 +56,20 @@ readers moving, rather than going through the mean gate.
 | $b$ | 24–31 | 0.63 | 0.39 | 8 | 0.09 |
 | `=` | 0–11 | 1.00 | 0.52 | 3 | −0.09 |
 | `=` | 12–23 | 0.42 | 0.60 | 13 | 0.22 |
-| `=` | 24–30 | 0.27 | 0.52 | 35 | 0.57 |
+| `=` | 24–31 | 0.27 | 0.51 | 44 | 0.56 |
 
 1. **The large writers are sparse.** Weighted by variance, a writer's variance is 90 % accounted
-   for by 1 to 28 readers (medians 3 to 13 in the table) in every pair except `=` in blocks 24–30,
-   out of 69 to 716 readers in the block. At `=` in blocks 24–30 it takes 25 to 91 readers
-   (block 29: 91 of 696). Unweighted medians are larger (8 to 196): the many small writers draw
+   for by 1 to 28 readers (medians 3 to 13 in the table) in every pair except `=` in blocks 24–31,
+   out of 69 to 716 readers in the block. At `=` in blocks 24–31 it takes 25 to 91 readers
+   (block 29: 91 of 696; block 31: 69 of 569). Unweighted medians are larger (8 to 196): the many small writers draw
    on many readers.
-2. **Cancellation is small.** Negative weights make up 3 % to 16 % of the total $\lvert a \rvert$ in
+2. **Cancellation is small.** Negative weights make up 3 % to 17 % of the total $\lvert a \rvert$ in
    every (block, position) pair.
 3. **Up and gate readers both matter.** The up readers' fraction ranges from 0.05 (block 0, `=`) to
    0.99 (block 2, `=`), with medians between 0.34 and 0.60.
 4. **Gating by individual gate readers matters mostly at `=` in late blocks.** There, 47 % to 73 % of
-   the up readers' weight is routed by specific gate readers (blocks 23–30), against medians of
+   the up readers' weight is routed by specific gate readers (blocks 23–30; block 31 is the
+   exception, at −0.002), against medians of
    −0.09 to 0.26 elsewhere. A negative routed fraction (16 of the 32 operator-position blocks, and 11 of
    the 12 `=` pairs in blocks 0–11) means the gate readers' movements reduce the covariance that the up readers would
    carry through the mean gate.
@@ -76,7 +77,7 @@ readers moving, rather than going through the mean gate.
    `=` in blocks 0–11 by one: the `=` token is the same on every prompt, so the MLP input varies
    only through attention there.
 6. **A writer's main reader often has the writer's own id.** Among the 3 largest writers of every
-   (block, position) pair (381 writers), 172 have a reader with the same id among their 4 largest
+   (block, position) pair (384 writers), 172 have a reader with the same id among their 4 largest
    readers. The run was initialized with `neuron_aligned_zero_u`.
 
 Examples (the two largest writers of a few pairs; numbers are shares of the writer's variance):
@@ -92,6 +93,7 @@ Examples (the two largest writers of a few pairs; numbers are shares of the writ
 | 19, `=` | down_proj:3 | 0.11 | up_proj:3 (0.57), up_proj:326 (0.17), up_proj:647 (0.09) |
 | 24, `=` | down_proj:2 | 0.09 | gate_proj:2 (0.35), gate_proj:11 (0.12), gate_proj:171 (0.09) |
 | 30, `=` | down_proj:50 | 0.03 | gate_proj:909 (0.47), gate_proj:357 (0.16), gate_proj:39 (0.10) |
+| 31, `=` | down_proj:38 | 0.12 | up_proj:812 (0.17), gate_proj:198 (0.12), gate_proj:182 (0.09) |
 | 31, operator | down_proj:8 | 0.75 | gate_proj:8 (0.68), gate_proj:69 (0.09), gate_proj:127 (0.06) |
 
 The grouping of plan §9 (clustering the weights into reader–writer groups) is not part of this
