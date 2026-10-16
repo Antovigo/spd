@@ -313,6 +313,41 @@ def kl_int_prompts(
 
 
 @eqx.filter_jit
+def factored_logp(
+    arch: Arch,
+    shared: Shared,
+    factors: Factors,
+    mask: Mask,
+    tokens: Int[Array, "B T"],
+    precision: Precision,
+) -> Float[Array, "B vocab"]:
+    none = Flips.none(tokens.shape[0])
+    return log_softmax32(
+        factored_logits(arch, shared, factors, mask, none, tokens, precision, precision)
+    )
+
+
+@eqx.filter_jit
+def kl_four(
+    logp: Float[Array, "B vocab"],
+    logp_s0: Float[Array, "B vocab"],
+    logp_llama: Float[Array, "B vocab"],
+    int_ids: Int[Array, " 1000"],
+) -> Float[Array, "4 B"]:
+    """Per prompt: `KL(ref ‖ p)` over the integer tokens and over the full vocabulary, for
+    `ref` = `S₀` then Llama, in that order."""
+    lq = int_log_q(logp, int_ids)
+    return jnp.stack(
+        [
+            kl_int(int_log_q(logp_s0, int_ids), lq),
+            jnp.sum(jnp.exp(logp_s0) * (logp_s0 - logp), axis=-1),
+            kl_int(int_log_q(logp_llama, int_ids), lq),
+            jnp.sum(jnp.exp(logp_llama) * (logp_llama - logp), axis=-1),
+        ]
+    )
+
+
+@eqx.filter_jit
 def mask_gradient(
     arch: Arch,
     shared: Shared,

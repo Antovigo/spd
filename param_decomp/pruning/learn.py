@@ -25,7 +25,7 @@ import numpy as np
 
 from param_decomp.core.log import logger
 from param_decomp.pruning.config import PruneConfig
-from param_decomp.pruning.engine import kl_int_prompts
+from param_decomp.pruning.engine import factored_logp, kl_four, kl_int_prompts, target_logp
 from param_decomp.pruning.model import Mask
 from param_decomp.pruning.prune import gradient, score_set
 from param_decomp.pruning.screen import Context
@@ -187,3 +187,43 @@ def run_learn(config: PruneConfig, ctx: Context, check: np.ndarray, out: Path) -
     baseline(config, ctx, check, out)
     for lam in config.learn_lambdas:
         learn_mask(config, ctx, check, lam, out)
+
+
+KL_COLUMNS = ("kl_int_s0", "kl_full_s0", "kl_int_llama", "kl_full_llama")
+
+
+def kl_table(config: PruneConfig, ctx: Context, check: np.ndarray, out: Path) -> None:
+    """`learn/kl_table.json`: for `S₀`, the newest blockwise set and every finished learned
+    mask, the mean over `Q` of `KL(ref ‖ p_mask)` over the integer tokens (renormalized) and
+    over the full vocabulary, `ref` = `S₀` (the alive-only model) and Llama."""
+    masks = {"s0": np.ones(ctx.slots.n, bool)}
+    sets = sorted((out / "sets").glob("S_*.npz"))
+    if sets:
+        masks[sets[-1].stem] = np.load(sets[-1])["on"]
+    for state in sorted((out / "learn").glob("**/lam_*/state.npz")):
+        if (state.parent / "final.json").exists():
+            masks[str(state.parent.relative_to(out / "learn"))] = np.load(state)["logit"] > 0
+    jmasks = {k: ctx.slots.mask(on, ctx.arch.n_layer) for k, on in masks.items()}
+    sums = {k: np.zeros(len(KL_COLUMNS)) for k in masks}
+    p, prec = ctx.problem, config.full_precision
+    t0 = time.time()
+    for s in range(0, check.size, ctx.batch_size):
+        chunk = check[s : s + ctx.batch_size]
+        rows = np.concatenate([chunk, np.repeat(chunk[-1:], ctx.batch_size - chunk.size)])
+        tokens = jnp.asarray(p.tokens[rows])
+        s0 = factored_logp(ctx.arch, ctx.shared, ctx.factors, jmasks["s0"], tokens, prec)
+        llama = target_logp(
+            ctx.arch, ctx.shared, ctx.dense, tokens, config.target_precision,
+            config.target_precision,
+        )  # fmt: skip
+        for k, m in jmasks.items():
+            logp = factored_logp(ctx.arch, ctx.shared, ctx.factors, m, tokens, prec)
+            sums[k] += np.asarray(kl_four(logp, s0, llama, ctx.int_ids))[:, : chunk.size].sum(1)
+        logger.info(f"kl_table: {s + chunk.size}/{check.size} ({time.time() - t0:.0f}s)")
+    table = {
+        k: {"size": int(masks[k].sum())}
+        | dict(zip(KL_COLUMNS, (v / check.size).tolist(), strict=True))
+        for k, v in sums.items()
+    }
+    (out / "learn" / "kl_table.json").write_text(json.dumps(table, indent=1))
+    logger.info(f"kl_table -> {out / 'learn' / 'kl_table.json'}")

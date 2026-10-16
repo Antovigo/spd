@@ -548,7 +548,7 @@ def test_temperature_fit() -> None:
 def test_learned_mask(setup: Setup, tmp_path: Path) -> None:
     """A large λ prunes components, the run resumes from `state.npz`, and `final.json` scores
     the last mask on the check set."""
-    from param_decomp.pruning.learn import learn_mask, run_learn
+    from param_decomp.pruning.learn import kl_table, learn_mask, run_learn
 
     ctx = _context(setup, sample_all=True)
     check = np.arange(0, ctx.problem.n, 2)
@@ -584,6 +584,11 @@ def test_learned_mask(setup: Setup, tmp_path: Path) -> None:
     )
     run_learn(cosine, ctx, check, tmp_path)
     assert (tmp_path / "learn" / "cos" / "lam_1" / "final.json").exists()
+    kl_table(config, ctx, check, tmp_path)
+    table = json.loads((tmp_path / "learn" / "kl_table.json").read_text())
+    assert table["s0"]["kl_int_s0"] == pytest.approx(0.0, abs=1e-6)
+    assert table["s0"]["kl_full_s0"] == pytest.approx(0.0, abs=1e-6)
+    assert set(table) == {"s0", "lam_1", "cos/lam_1"}
     changed = config.model_copy(update={"learn_lr": 0.1})
     with pytest.raises(AssertionError, match="learn settings differ"):
         learn_mask(changed, ctx, check, 1.0, tmp_path)

@@ -74,6 +74,7 @@ STAGES = (
     "prune",
     "report",
     "learn",
+    "learn_kl",
 )
 PERIODS = (2, 5, 10, 20, 50, 100)
 ROUND_KNOBS = (
@@ -249,6 +250,11 @@ def run(config: PruneConfig, data_root: Path, name: str, stages: tuple[str, ...]
             from param_decomp.pruning.learn import run_learn
 
             run_learn(config, ctx, check, out)
+
+        if "learn_kl" in stages:
+            from param_decomp.pruning.learn import kl_table
+
+            kl_table(config, ctx, check, out)
 
         if "temperature" in stages and not (out / "temperature.npz").exists():
             temperature(config, ctx, mask0, out)
