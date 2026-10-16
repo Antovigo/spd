@@ -1,13 +1,13 @@
-"""Mark the components a pruning run removed in a CI filter's ab-grid applet.
+"""Mark the components a learned mask removed in a CI filter's ab-grid applet.
 
     python -m param_decomp.pruning.marks --prune_dir <run>/analysis/pruning/step_<s>/<name>
-        --grids_dir <run>/<filter>-<s>/ab_grids
+        --mask <prune_dir>/learn/<learn_name>/lam_<λ> --grids_dir <run>/<filter>-<s>/ab_grids
 
-Writes `<grids_dir>/pruned.js` (`window.PRUNED = {source, sites: {site: {component: {block}}}}`)
-from the newest `sets/S_<j>.npz` (a run still in progress is marked as far as it got) and
-refreshes `index.html` / `alive.html` from the current applet, which draws a red ✕ in a white square in the top-right
-corner of every pruned component's tile. A component counts as pruned when it is in `S₀` and off
-in that set; `block` is the block (blockwise mode) or round (global mode) that last removed it."""
+Writes `<grids_dir>/pruned.js` (`window.PRUNED = {source, n_pruned, temperature_r2_cut, sites:
+{site: {component: record}}}`) from the mask's `state.npz` (a component is pruned when its logit
+`ℓ ≤ 0`; a run still in progress is marked as far as it got) and refreshes `index.html` /
+`alive.html` from the current applet, which draws a red ✕ in a white square in the top-right
+corner of every pruned component's tile."""
 
 import argparse
 import json
@@ -23,16 +23,15 @@ TEMPERATURE_R2 = 0.5
 `notes/rmsnorm/entropy-components.md`)."""
 
 
-def pruned_payload(prune_dir: Path, alive: dict[str, np.ndarray]) -> dict[str, object]:
-    """Per `S₀` component: whether the latest set pruned it (and in which block), and its screen
-    on `S₀` — KL from the alive-only model when ablated, `ΔCE` (full vocabulary and among
+def pruned_payload(
+    prune_dir: Path, mask_dir: Path, alive: dict[str, np.ndarray]
+) -> dict[str, object]:
+    """Per `S₀` component: whether the learned mask in `mask_dir` pruned it, and its screen on
+    `S₀` — KL from the alive-only model when ablated, `ΔCE` (full vocabulary and among
     integers, with SE), `P(integer)` before and after the ablation — plus its temperature fit
     (`temperature.npz`) when that stage ran."""
-    sets = sorted((prune_dir / "sets").glob("S_*.npz"))
-    assert sets, f"no sets/S_*.npz under {prune_dir}"
-    saved = np.load(sets[-1])
     slots = slots_of(alive)
-    on, removed = saved["on"], saved["removed"]
+    on = np.load(mask_dir / "state.npz")["logit"] > 0
     assert on.size == slots.n, (on.size, slots.n)
     table = np.genfromtxt(
         prune_dir / "components.tsv", delimiter="\t", names=True, dtype=None, encoding=None
@@ -47,7 +46,6 @@ def pruned_payload(prune_dir: Path, alive: dict[str, np.ndarray]) -> dict[str, o
         p_after = float(table["without_p_int"][a])
         info: dict[str, object] = {
             "pruned": bool(not on[a]),
-            "block": int(removed[a]),
             "kl": float(table["without_kl_base"][a]),
             "d_ce": float(table["d_ce"][a]),
             "se_ce": float(table["se_ce"][a]),
@@ -59,7 +57,7 @@ def pruned_payload(prune_dir: Path, alive: dict[str, np.ndarray]) -> dict[str, o
             info.update(temp_r2=float(temp["r2"][a]), beta=float(temp["beta"][a]))
         sites.setdefault(slots.sites[a], {})[str(int(slots.index[a]))] = info
     return {
-        "source": f"{prune_dir.name}/{sets[-1].name}",
+        "source": str(mask_dir.relative_to(prune_dir.parent)),
         "n_pruned": int((~on).sum()),
         "temperature_r2_cut": TEMPERATURE_R2,
         "sites": sites,
@@ -91,9 +89,10 @@ def alive_set(prune_dir: Path) -> dict[str, np.ndarray]:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--prune_dir", type=Path, required=True)
+    ap.add_argument("--mask", type=Path, required=True)
     ap.add_argument("--grids_dir", type=Path, required=True)
     args = ap.parse_args()
-    payload = pruned_payload(args.prune_dir, alive_set(args.prune_dir))
+    payload = pruned_payload(args.prune_dir, args.mask, alive_set(args.prune_dir))
     (args.grids_dir / "pruned.js").write_text(f"window.PRUNED = {json.dumps(payload)};\n")
     (args.grids_dir / "index.html").write_bytes(APPLET.read_bytes())
     (args.grids_dir / "alive.html").write_text(alive_page())
