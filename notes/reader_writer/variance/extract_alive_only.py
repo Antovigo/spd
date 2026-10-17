@@ -10,7 +10,11 @@ l this writes, for the block's alive gate / up / down components (columns in tha
     OUT/kl_last.npy     (N,) float32           KL(original || alive-only) at the last position
     OUT/meta.json
 
-    python extract_alive_only.py [--limit N] [--out DIR]
+    python extract_alive_only.py [--limit N] [--out DIR] [--alive_json FILE]
+
+`--alive_json` replaces the filter's alive set by another list in the same format (e.g. a pruned
+subset written by `param_decomp.pruning.alive_json` on experiment/comp_pruning): the model is then
+that set at 100 %, everything else off.
 """
 
 import argparse
@@ -56,6 +60,9 @@ def main() -> None:
     ap.add_argument("--batch_size", type=int, default=200)
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--out", type=Path, default=OUT)
+    ap.add_argument(
+        "--alive_json", type=Path, default=None, help="alive list (default: the filter's)"
+    )
     ap.add_argument("--profile", action="store_true", help="time the forward pieces, write nothing")
     args = ap.parse_args()
     out: Path = args.out
@@ -64,7 +71,8 @@ def main() -> None:
 
     outputs = CIFilterOutputs.for_run(RUN_DIR, STEP, FILTER)
     config = CIFilterConfig.from_file(outputs.config)
-    alive_json = json.loads(outputs.alive.read_text())
+    alive_path = outputs.alive if args.alive_json is None else args.alive_json
+    alive_json = json.loads(alive_path.read_text())
     alive = {s: np.asarray(ids, np.int32) for s, ids in alive_json["components"].items()}
     sites = {(b, k): f"layers.{b}.mlp.{k}_proj" for b in range(N_LAYER) for k in KINDS}
 
@@ -179,7 +187,7 @@ def main() -> None:
         for m in mm:
             m.flush()
     np.save(out / "kl_last.npy", kl_last)
-    meta = {"run_dir": str(RUN_DIR), "step": STEP, "filter": FILTER, "model": "alive-only",
+    meta = {"run_dir": str(RUN_DIR), "step": STEP, "filter": FILTER, "model": "alive-only", "alive_json": str(alive_path),
             "n_prompts": n, "positions": list(POSITIONS), "inner_dtype": "float32",
             "absmax": absmax, "kl_last_mean": float(kl_last.mean()),
             "n_alive": {b: {k: int(alive[sites[(b, k)]].size) for k in KINDS}

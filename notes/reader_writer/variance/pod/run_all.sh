@@ -3,6 +3,8 @@
 # then variance.py for blocks 0..31 (each skips the positions already published, and resumes a
 # half-done position from its saved accumulators). Stops at the first failure.
 #     source /workspace/spd/notes/reader_writer/variance/pod/env.sh && [VARIANCE_ARGS="--n_sub 8000"] ./run_all.sh [LAYERS...]
+# With ALIVE_JSON=<file> NAME=<name>: the model is that alive list instead of the filter's, and
+# everything goes to analysis/reader_writer/variance_<name>/ instead of variance/.
 # Follow: tail -f $DATA_ROOT/logs/rwv.latest.log
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -14,13 +16,14 @@ if [ "${FOREGROUND:-0}" != 1 ]; then
   echo "started pid $! -> $LOG"; exit 0
 fi
 LAYERS=("$@"); [ ${#LAYERS[@]} -gt 0 ] || LAYERS=($(seq 0 31))
-OUT="$RUN_DIR/analysis/reader_writer/variance"
+OUT="$RUN_DIR/analysis/reader_writer/variance${NAME:+_$NAME}"
+ALIVE_ARGS=(); [ -n "${ALIVE_JSON:-}" ] && ALIVE_ARGS=(--alive_json "$ALIVE_JSON")
 cd "$HERE"
 echo "$(date -u +%FT%TZ) commit $(git -C "$REPO" log -1 --format=%h)"
 nvidia-smi --query-gpu=name,driver_version,memory.total,memory.used --format=csv
 if [ ! -f "$OUT/alive_only/meta.json" ]; then
   echo "$(date -u +%FT%TZ) extraction"
-  "$VENV_PY" -u extract_alive_only.py --out "$OUT/alive_only"
+  "$VENV_PY" -u extract_alive_only.py --out "$OUT/alive_only" "${ALIVE_ARGS[@]}"
 fi
 for L in "${LAYERS[@]}"; do
   echo "$(date -u +%FT%TZ) block $L"
