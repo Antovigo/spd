@@ -159,9 +159,17 @@ def main() -> None:
     ap.add_argument("--grids_dir", type=Path, required=True)
     ap.add_argument("--mask", type=Path, nargs="*", default=None)
     ap.add_argument("--default", type=Path, default=None)
+    # Mask names (paths under `learn/`) left out of the menu: the obsolete constant-LR sweep
+    # (top-level `lam_*`) and `kl3000`, abandoned at step 400 with an empty mask.
+    ap.add_argument("--skip", nargs="*", default=["lam_*", "kl3000/*"])
     args = ap.parse_args()
+    learn = args.prune_dir / "learn"
     mask_dirs = args.mask or sorted(
-        (p.parent for p in (args.prune_dir / "learn").rglob("state.npz")),
+        (
+            p.parent
+            for p in learn.rglob("state.npz")
+            if not any(p.parent.relative_to(learn).full_match(g) for g in args.skip)
+        ),
         key=lambda d: (str(d.parent), lam_of(d)),
     )
     assert mask_dirs, f"no learned masks under {args.prune_dir / 'learn'}"
