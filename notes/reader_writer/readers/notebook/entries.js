@@ -1,298 +1,170 @@
-// Notebook entries for the MLP readers applet (index.html, "Notebook" tab), oldest first.
+// Notebook pages for the MLP readers applet (index.html, "Notebook" tab) and the hosted notebook.
 // Figures live in notebook/fig/ next to this file; links are relative to index.html.
 window.NOTEBOOK = [
 {
-id: "l0-mod10",
-title: "Block-0 readers of a mod 10",
+id: "mod10",
+title: "Mod 10 representations",
 date: "2026-10-20",
 html: `
-<p class="note"><b>Note (2026-10-20):</b> this entry centres activations, residue means and r². The entry "Block-0 a mod 10 without centring" gives the uncentred numbers, which supersede the centred ones.</p>
-<p><b>Short version.</b> Eleven of the 153 kept block-0 readers respond to <i>a</i> mod 10. Ten of them pick one
-residue each, and together they cover all ten residues (residue 0 has two readers). The ten residue directions
-fill a full 9-dimensional subspace: nothing lower-dimensional explains these readers (95% of their periodic
-variance needs all 9 directions). The directions are not mutually orthogonal. Their Gram matrix depends only on the
-residue difference, and its most negative entries are at a difference of ±3. In Fourier terms, all five frequencies
-of period 10 are present, each on its own nearly orthogonal plane. Inside the space the readers can see, this
-subspace is the token embedding's mod-10 structure: the principal-angle cosines are ≥ 0.9998. Removing it from the
-other 142 readers changes them by a median of 15% (at most 70%), and leaves no mod-10 periodicity behind except in
-one reader.</p>
+<p><b>Summary.</b> At the token <i>a</i>, the block-0 MLP input contains a 9-dimensional subspace <i>D</i> that encodes
+<i>a</i> mod 10 as five nearly orthogonal Fourier components. These are four planes and one line, and the residues
+sit on circles around the zero of the activation space. <i>D</i> is the token embedding's own mod-10 structure.
+Eleven of the 153 kept block-0 readers are explained by <i>D</i> (r² 0.62–0.98). Ten of them respond to a single
+residue, and every residue 0–9 has at least one such reader. Each reader's read vector lies almost entirely in
+<i>D</i>, and in every plane it points at its residue. No reader reads the parity line or the mod-5 planes on its
+own with any strength.</p>
 
 <h3>Setup and notation</h3>
-<p>Run p-ba8b0c08, step 40000. The prompts are <code>&lt;BOS&gt; a op b =</code> with integer operands
-<i>a</i>, <i>b</i> ∈ {1, …, 400} and op ∈ {+, −}. The model is the <b>alive-only</b> model: every component of the
+<p>Run p-ba8b0c08, step 40000. The prompts are <code>&lt;BOS&gt; a op b =</code>, with integer operands
+<i>a</i>, <i>b</i> ∈ {1, …, 400} and op ∈ {+, −}. The model is the alive-only model: every component of the
 ceiling filter <code>addsub-08-last-pos</code> is on, and every other component and the weight delta are off.
-Activations come from <code>notes/reader_writer/variance/extract_alive_only.py</code>, and the analysis script is
-<code>notes/reader_writer/readers/mod10_L0.py</code> (branch experiment/arith_representations).</p>
+<b>Nothing on this page is centred or detrended.</b> The network has no biases, so zero is always the zero of the
+activation space. Scripts: <code>notes/reader_writer/readers/mod10_page.py</code> and
+<code>notes/reader_writer/repr_repo/seed_l0_mod10.py</code> (branch experiment/arith_representations).</p>
 <ul>
-<li><b>Position.</b> Everything here is at token position 1, the token <i>a</i>. Causal attention means the block-0 MLP
-input there depends on <i>a</i> only (measured: the maximum deviation across 8 random (<i>b</i>, op) pairs is 0).</li>
-<li><b>Readers.</b> A reader <i>c</i> is a gate component (<code>g&lt;id&gt;</code>) or an up component (<code>u&lt;id&gt;</code>)
-of block 0. This entry uses only the readers kept by the learned mask "kl_int, sampled mask, λ=5e-05", which leaves
-K = 153 of them.</li>
-<li><b>Vectors and activations.</b> <i>V<sub>c</sub></i> ∈ ℝ<sup>4096</sup> is reader <i>c</i>'s read vector, and
-<i>V</i> = [<i>V<sub>c</sub></i>] is the 4096 × K matrix. <i>x</i>(<i>a</i>) ∈ ℝ<sup>4096</sup> is the block-0 MLP input
-(after the post-attention RMSNorm). The plotted inner activation is
-<i>f<sub>c</sub></i>(<i>a</i>) = <i>x</i>(<i>a</i>) · <i>V<sub>c</sub></i> / ‖<i>V<sub>c</sub></i>‖, a real number.</li>
-<li><b>Projection onto span(V).</b> <i>x<sub>V</sub></i>(<i>a</i>) = <i>V</i>(<i>V</i><sup>T</sup><i>V</i>)<sup>+</sup><i>V</i><sup>T</sup><i>x</i>(<i>a</i>)
-is the orthogonal projection of <i>x</i>(<i>a</i>) onto span(<i>V</i>), where <sup>+</sup> is the pseudo-inverse. It can
-be computed from the stored activations, and every reader sees it exactly: <i>V<sub>c</sub></i> · <i>x<sub>V</sub></i> = <i>V<sub>c</sub></i> · <i>x</i>.
-"v-space" in this entry means span(<i>V</i>).</li>
-<li><b>Trend and periodic part.</b> The trend of a function of <i>a</i> is its moving average over the window
-<i>a</i>−5 … <i>a</i>+4. Each such window contains every residue once, so the trend has no period-10 part. The
-oscillating part is <i>p<sub>c</sub></i>(<i>a</i>) = <i>f<sub>c</sub></i>(<i>a</i>) − trend, taken on
-<i>a</i> ∈ 𝒜 = {6, …, 395} (39 full periods).</li>
-<li><b>Residue profile.</b> <i>r</i> = <i>a</i> mod 10 ∈ {0, …, 9}. <i>m<sub>c</sub></i>(<i>r</i>) is the mean of <i>p<sub>c</sub></i>
-over the <i>a</i> ∈ 𝒜 with <i>a</i> mod 10 = <i>r</i>.</li>
-<li><b>Periodic share.</b> <i>S</i><sub>10</sub>(<i>c</i>) = Σ<sub><i>a</i>∈𝒜</sub> <i>m<sub>c</sub></i>(<i>a</i> mod 10)² / Σ<sub><i>a</i>∈𝒜</sub> (<i>f<sub>c</sub></i>(<i>a</i>) − mean <i>f<sub>c</sub></i>)²
-∈ [0, 1] is the share of <i>f<sub>c</sub></i>'s variance that repeats with period 10. <i>S<sub>q</sub></i> is the same
-quantity for an integer modulus <i>q</i>, with a width-<i>q</i> trend.</li>
+<li><b>Position and residue.</b> Everything is measured at position 1, the token <i>a</i>. Causal attention means the
+block-0 MLP input there depends on <i>a</i> alone. <i>r</i> = <i>a</i> mod 10 ∈ {0, …, 9}.</li>
+<li><b>Readers.</b> A reader <i>c</i> is a block-0 gate component <code>g&lt;id&gt;</code> or up component
+<code>u&lt;id&gt;</code> kept by the learned mask "kl_int, sampled mask, λ=5e-05" (153 readers).
+<i>V<sub>c</sub></i> ∈ ℝ<sup>4096</sup> is its read vector.</li>
+<li><b>Input.</b> <i>x<sub>V</sub></i>(<i>a</i>) ∈ ℝ<sup>4096</sup> is the block-0 MLP input (after the post-attention RMSNorm),
+projected orthogonally onto span{<i>V<sub>c</sub></i>}. Every reader sees this projection exactly.</li>
+<li><b>Inner activation.</b> <i>f<sub>c</sub></i>(<i>a</i>) = <i>x<sub>V</sub></i>(<i>a</i>) · <i>V<sub>c</sub></i> / ‖<i>V<sub>c</sub></i>‖.</li>
+<li><b>Residue means.</b> μ<sub><i>r</i></sub> is the mean of <i>x<sub>V</sub></i>(<i>a</i>) over the 40 values of <i>a</i> with
+<i>a</i> mod 10 = <i>r</i>, and <i>m<sub>c</sub></i>(<i>r</i>) is the mean of <i>f<sub>c</sub></i> over the same values.</li>
+<li><b>Fourier components.</b> <i>i</i> is the imaginary unit and <i>k</i> ∈ {1, …, 5} an integer frequency.
+Ψ<sub><i>k</i></sub> = Σ<sub><i>r</i></sub> μ<sub><i>r</i></sub> exp(−2π<i>i</i><i>kr</i>/10) ∈ ℂ<sup>4096</sup>.
+<i>P<sub>k</sub></i> is the orthonormal basis of span{Re Ψ<sub><i>k</i></sub>, Im Ψ<sub><i>k</i></sub>}: a plane for
+<i>k</i> = 1 … 4 and a line for <i>k</i> = 5. These are the representations <code>L0.p1.*.k1</code> … <code>.k5</code>
+of the representation repository. <i>D</i> is the span of all five, 9 dimensions.</li>
+<li><b>Projections and r².</b> Π<sub><i>X</i></sub> is the orthogonal projection onto a span <i>X</i>. The reader's
+activation with its input restricted to <i>X</i> is
+<i>g<sub>c</sub><sup>X</sup></i>(<i>a</i>) = Π<sub><i>X</i></sub><i>x<sub>V</sub></i>(<i>a</i>) · <i>V<sub>c</sub></i> / ‖<i>V<sub>c</sub></i>‖, and
+r²<sub><i>X</i></sub>(<i>c</i>) = 1 − Σ<sub><i>a</i></sub>(<i>f<sub>c</sub></i> − <i>g<sub>c</sub><sup>X</sup></i>)² / Σ<sub><i>a</i></sub><i>f<sub>c</sub></i>²,
+summed over <i>a</i> = 1 … 400.</li>
+<li><b>Sign convention.</b> A component's sign is a gauge choice: (<i>V<sub>c</sub></i>, <i>U<sub>c</sub></i>) and
+(−<i>V<sub>c</sub></i>, −<i>U<sub>c</sub></i>) give the same weights. For each mod-10 reader, <i>s<sub>c</sub></i> ∈ {+1, −1} is
+the sign that makes its response at its main residue positive. Profiles and read directions below are shown
+multiplied by <i>s<sub>c</sub></i>; only u54 has <i>s<sub>c</sub></i> = −1.</li>
 </ul>
 
-<h3>1. Which readers respond to a mod 10</h3>
-<p>A reader counts as a mod-10 reader when <i>S</i><sub>10</sub>(<i>c</i>) ≥ τ, with threshold τ = 0.5. As a control,
-the largest <i>S<sub>q</sub></i> for <i>q</i> ∈ {7, 11, 13} over all 153 readers is 0.05, 0.09 and 0.08. For
-<i>q</i> ∈ {9, 12} the maximum is 0.87 and 0.86, but this comes from one reader, g124, whose
-<i>S</i><sub>10</sub> = 0.03.</p>
-<figure><img src="notebook/fig/l0_s10_sorted.png"><figcaption>Readers sorted by <i>S</i><sub>10</sub> (bars). Dots: the
-largest <i>S<sub>q</sub></i> over the control moduli <i>q</i> ∈ {7, 9, 11, 12, 13}. Dashed line: τ.</figcaption></figure>
-<p><b>Result: 11 readers.</b> Ten readers have <i>S</i><sub>10</sub> between 0.97 and 0.98: g43, g47, g58, g59, g62, g69,
-u52, u54, u60, u794. u31 is at 0.62. The next readers are below τ: g152 (0.45), u122 (0.42), u41 (0.33), and then
-g175 (0.21).</p>
-<figure><img src="notebook/fig/l0_examples.png"><figcaption><i>f<sub>c</sub></i>(<i>a</i>) for <i>a</i> = 1 … 400 (blue) and its
-trend (grey), for u54, u60 and two other top readers.</figcaption></figure>
-<p><b>Each reader picks one residue.</b> The table lists, for each reader, the largest |<i>m<sub>c</sub></i>(<i>r</i>)| / max<sub><i>r</i></sub> |<i>m<sub>c</sub></i>(<i>r</i>)|
-and its residue <i>r</i>, then the second largest:</p>
-<table><tr><th>reader</th><th>main residue (value)</th><th>second (value)</th></tr>
-<tr><td>u794</td><td>0 (+1.00)</td><td>3, 7 (−0.12)</td></tr>
-<tr><td>u31</td><td>0 (+1.00)</td><td>3 (−0.29), 7 (−0.24)</td></tr>
-<tr><td>g43</td><td>1 (+1.00)</td><td>8 (−0.17)</td></tr>
-<tr><td>g69</td><td>2 (+1.00)</td><td>5 (−0.69)</td></tr>
-<tr><td>u60</td><td>3 (+1.00)</td><td>6 (−0.39)</td></tr>
-<tr><td>g62</td><td>4 (+1.00)</td><td>7 (−0.13)</td></tr>
-<tr><td>u52</td><td>5 (+1.00)</td><td>8 (−0.14)</td></tr>
-<tr><td>u54</td><td>6 (−1.00)</td><td>9, 2 (+0.12)</td></tr>
-<tr><td>g58</td><td>7 (+1.00)</td><td>4 (−0.29)</td></tr>
-<tr><td>g59</td><td>8 (+1.00)</td><td>5 (−0.50)</td></tr>
-<tr><td>g47</td><td>9 (+1.00)</td><td>6 (−0.43)</td></tr></table>
-<p>Every residue 0 … 9 has a reader. u54 is the only one whose main response is negative: it dips at residue 6. When a
-reader has a large second residue, that residue is always its main residue ± 3. Examples are u60 (3 and 6), g69
-(2 and 5) and g59 (8 and 5). Section 2 shows that this follows from the geometry of the directions.</p>
-<figure><img src="notebook/fig/l0_mod10_profiles.png"><figcaption><i>m<sub>c</sub></i>(<i>r</i>) / max<sub><i>r</i></sub> |<i>m<sub>c</sub></i>(<i>r</i>)| for the
-11 readers (rows) and the residues <i>r</i> (columns).</figcaption></figure>
-
-<h3>2. The directions they read</h3>
-<p><b>Residue means.</b> For each residue <i>r</i>, μ<sub><i>r</i></sub> ∈ ℝ<sup>4096</sup> is the mean of <i>x<sub>V</sub></i>(<i>a</i>) − trend over the
-<i>a</i> ∈ 𝒜 with <i>a</i> mod 10 = <i>r</i>. μ̄ is the mean of the ten μ<sub><i>r</i></sub>, and
-<i>M</i> = [μ<sub>0</sub> … μ<sub>9</sub>] is the 4096 × 10 matrix. Every reader's profile is a read-out of these vectors:
-<i>m<sub>c</sub></i>(<i>r</i>) = <i>V<sub>c</sub></i> · μ<sub><i>r</i></sub> / ‖<i>V<sub>c</sub></i>‖. μ̄ is close to zero:
-‖μ̄‖ is 0.008 times the mean ‖μ<sub><i>r</i></sub>‖.</p>
-<p><b>No subspace smaller than 9 dimensions.</b> The centred matrix <i>M</i> − μ̄ has rank at most 9, and here it has
-9 non-zero singular values σ<sub><i>j</i></sub>, where <i>j</i> = 1 … 9 indexes them. They run from 2.30 down to 1.28,
-and the smallest is 0.56 times the largest. Let <i>D<sub>n</sub></i> be the span of the top-<i>n</i> left singular
-vectors, for an integer <i>n</i> from 0 to 9. Projecting <i>x<sub>V</sub></i>(<i>a</i>) − mean onto <i>D<sub>n</sub></i>
-explains the following share of the 11 readers' variance:</p>
-<table><tr><th>n</th><th>1</th><th>3</th><th>5</th><th>7</th><th>8</th><th>9</th></tr>
-<tr><td>periodic part <i>p<sub>c</sub></i></td><td>0.19</td><td>0.44</td><td>0.69</td><td>0.85</td><td>0.92</td><td>0.98</td></tr>
-<tr><td>whole <i>f<sub>c</sub></i></td><td>0.19</td><td>0.44</td><td>0.68</td><td>0.83</td><td>0.90</td><td>0.95</td></tr></table>
-<p>The smallest <i>n</i> that reaches 95% of the periodic variance is <i>n</i>* = 9. Below, <i>D</i> = <i>D</i><sub>9</sub>
-denotes this subspace and Π<sub><i>D</i></sub> the orthogonal projection onto it.</p>
-<p><b>The residue directions are not orthogonal, and the pattern depends only on the residue difference.</b> The cosines
-between centred residue means, cos(μ<sub><i>r</i></sub> − μ̄, μ<sub><i>r′</i></sub> − μ̄) for residues <i>r</i> ≠ <i>r′</i>, average
-−0.110. That is the value −1/9 a regular simplex would give, but the entries are not equal. They range from −0.34 to
-+0.07. Every pair with <i>r′</i> − <i>r</i> ≡ ±3 (mod 10) lies between −0.34 and −0.24 (mean −0.31), and every other
-pair lies between −0.16 and +0.07. This is why a reader tuned to residue <i>r</i> responds negatively at <i>r</i> ± 3
-(section 1).</p>
-<figure><img src="notebook/fig/l0_mu_svd_cos.png"><figcaption>Left: share of ‖<i>M</i> − μ̄‖² (squared Frobenius norm)
-carried by each singular direction <i>j</i>. Middle: variance of the 11 readers explained by <i>D<sub>n</sub></i>.
-Right: cosines between centred residue means.</figcaption></figure>
-<p><b>Fourier structure.</b> <i>i</i> is the imaginary unit. For an integer frequency <i>k</i> ∈ {1, …, 5}, define
-Ψ<sub><i>k</i></sub> = Σ<sub><i>r</i>=0…9</sub> μ<sub><i>r</i></sub> exp(−2π<i>i</i><i>kr</i>/10) ∈ ℂ<sup>4096</sup>,
-with real part Re Ψ<sub><i>k</i></sub> and imaginary part Im Ψ<sub><i>k</i></sub>. Frequency <i>k</i> = 5 is real (it is the
-parity of <i>a</i>). Each <i>k</i> = 1 … 4 spans a plane. The share of the energy Σ<sub><i>r</i></sub>‖μ<sub><i>r</i></sub> − μ̄‖²
-at each frequency is:</p>
-<table><tr><th>k</th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th></tr>
-<tr><td>energy share</td><td>0.27</td><td>0.28</td><td>0.13</td><td>0.17</td><td>0.15</td></tr></table>
-<p>All five frequencies are present, and none dominates. Within each plane, |cos(Re Ψ<sub><i>k</i></sub>, Im Ψ<sub><i>k</i></sub>)| ≤ 0.05
-and ‖Re Ψ<sub><i>k</i></sub>‖ / ‖Im Ψ<sub><i>k</i></sub>‖ is between 1.02 and 1.39. So the ten residues sit on a circle
-in each plane, visiting it at angle 2π<i>kr</i>/10. Across frequencies the nine vectors
-{Re Ψ<sub>1…5</sub>, Im Ψ<sub>1…4</sub>} are nearly orthogonal: |cos| ≤ 0.27, with the largest value between Re Ψ<sub>2</sub>
-and Re Ψ<sub>4</sub>. A circulant geometry like this predicts the cosine at residue difference 3 to be
-Σ<sub><i>k</i></sub> (energy share)<sub><i>k</i></sub> · cos(2π·3<i>k</i>/10) = −0.30, which matches the measured mean −0.31.</p>
-<figure><img src="notebook/fig/l0_fourier.png"><figcaption>Left: energy share per frequency <i>k</i>. Middle four: the
-centred μ<sub><i>r</i></sub> projected onto the plane of Ψ<sub><i>k</i></sub> (orthonormalised Re, Im axes), labelled by
-<i>r</i>. Right: |cos| between the nine real Fourier vectors.</figcaption></figure>
-<p><b>The readers' vectors sit inside D and are close to orthogonal there.</b> For the ten one-residue readers,
-‖Π<sub><i>D</i></sub><i>V<sub>c</sub></i>‖² / ‖<i>V<sub>c</sub></i>‖² is between 0.86 and 0.97. For u31 it is 0.38. Within
-<i>D</i>, the cosines between projected read vectors are at most 0.42 in absolute value. The exception is the two
-residue-0 readers, u31 and u794, whose cosine is 0.89.</p>
-<figure><img src="notebook/fig/l0_reader_vectors.png"><figcaption>Left: share of each reader's ‖<i>V<sub>c</sub></i>‖² inside
-<i>D</i> (its main residue in brackets). Right: cosines between the projected read vectors Π<sub><i>D</i></sub><i>V<sub>c</sub></i>.</figcaption></figure>
-<p><b>The subspace comes from the token embedding.</b> Let <i>e</i>(<i>a</i>) ∈ ℝ<sup>4096</sup> be Llama-3.1-8B's embedding
-row of the single token for <i>a</i>, and γ ∈ ℝ<sup>4096</sup> the weight of block 0's post-attention RMSNorm. The MLP
-input would be <i>z</i>(<i>a</i>) = γ ⊙ <i>e</i>(<i>a</i>) / rms(<i>e</i>(<i>a</i>)) if attention added nothing, where ⊙ is
-the elementwise product and rms is the root-mean-square over the 4096 coordinates. Define ε<sub><i>r</i></sub> as the
-residue mean of <i>z</i>(<i>a</i>) − trend, exactly as μ<sub><i>r</i></sub> is defined, and ε̄ as their mean. Let
-Π<sub><i>V</i></sub> be the orthogonal projection onto span(<i>V</i>). Then:</p>
+<h3>1. The representation: circles around zero</h3>
+<p>The frequency of a plane determines what it can encode. Residue <i>r</i> sits at angle 2π<i>kr</i>/10 in the
+plane of frequency <i>k</i>:</p>
 <ul>
-<li>The principal-angle cosines between span{μ<sub><i>r</i></sub> − μ̄} and span{Π<sub><i>V</i></sub>(ε<sub><i>r</i></sub> − ε̄)}
-are ≥ 0.9998 for all nine angles. Without the projection Π<sub><i>V</i></sub> they are 0.89 … 0.94. span(<i>V</i>) holds
-83% of Σ<sub><i>r</i></sub>‖ε<sub><i>r</i></sub> − ε̄‖², so part of the embedding's mod-10 structure is invisible to the
-kept readers.</li>
-<li>For each of the 11 readers, the correlation over <i>r</i> between <i>m<sub>c</sub></i>(<i>r</i>) and
-<i>V<sub>c</sub></i> · Π<sub><i>V</i></sub>ε<sub><i>r</i></sub> / ‖<i>V<sub>c</sub></i>‖ is ≥ 0.999998. The ratio of their norms is
-0.951 … 0.954, a single factor shared by all 11 readers.</li>
+<li><i>k</i> = 1 and <i>k</i> = 3 each carry the full residue, <i>a</i> mod 10.</li>
+<li><i>k</i> = 2 and <i>k</i> = 4 carry only <i>a</i> mod 5, so residues <i>r</i> and <i>r</i> + 5 coincide.</li>
+<li><i>k</i> = 5 carries only <i>a</i> mod 2.</li>
 </ul>
-<figure><img src="notebook/fig/l0_embedding.png"><figcaption>Left: principal-angle cosines between the data subspace and
-the projected embedding subspace (the 10th pairs the null directions of two rank-9 matrices and carries no information). Right: per-reader correlation
-between the observed and embedding-predicted residue profiles.</figcaption></figure>
-
-<h3>3. The other readers after removing D</h3>
-<p>For each of the 142 kept block-0 readers outside the 11 above, the part along <i>D</i> is
-<i>w<sub>c</sub></i>(<i>a</i>) = <i>V<sub>c</sub></i> · Π<sub><i>D</i></sub>(<i>x<sub>V</sub></i>(<i>a</i>) − mean<sub><i>a</i></sub> <i>x<sub>V</sub></i>) / ‖<i>V<sub>c</sub></i>‖.
-The residual is ρ<sub><i>c</i></sub>(<i>a</i>) = <i>f<sub>c</sub></i>(<i>a</i>) − mean <i>f<sub>c</sub></i> − <i>w<sub>c</sub></i>(<i>a</i>), and the
-change is ‖<i>w<sub>c</sub></i>‖ / ‖<i>f<sub>c</sub></i> − mean <i>f<sub>c</sub></i>‖, with norms taken over <i>a</i> = 1 … 400.
-Note that <i>w<sub>c</sub></i> includes any non-periodic content of <i>x</i> that lies in <i>D</i>.</p>
-<p><b>Result.</b> The change has median 0.15, 90th percentile 0.28 and maximum 0.70. The largest changes are g152 (0.70),
-u122 (0.64) and u41 (0.59), which are the three readers just below τ in section 1. After the subtraction,
-<i>S</i><sub>10</sub>(ρ<sub><i>c</i></sub>) ≤ 0.021 for 141 of the 142 readers. The exception is g140, at 0.157 (it was
-0.164 before the subtraction, with change 0.095).</p>
-<figure><img src="notebook/fig/l0_others_change.png"><figcaption>Change for the 142 other readers, sorted (the first 40
-are labelled).</figcaption></figure>
-<figure><img src="notebook/fig/l0_others_residual.png"><figcaption>The 24 other readers with the largest change, in
-order (left column first). Grey: <i>f<sub>c</sub></i> − mean <i>f<sub>c</sub></i>. Blue: residual ρ<sub><i>c</i></sub>.
-The horizontal axis is <i>a</i>.</figcaption></figure>
-`
-},
-{
-id: "l0-mod10-planes",
-title: "Block-0 a mod 10: the Fourier planes",
-date: "2026-10-20",
-html: `
-<p class="note"><b>Note (2026-10-20):</b> this entry centres activations, residue means and r². The entry "Block-0 a mod 10 without centring" gives the uncentred numbers, which supersede the centred ones.</p>
-<p>This entry follows up on "Block-0 readers of a mod 10" and reuses its notation: <i>a</i>, <i>r</i>, <i>c</i>,
-<i>V<sub>c</sub></i>, <i>x<sub>V</sub></i>(<i>a</i>), <i>f<sub>c</sub></i>, μ<sub><i>r</i></sub>, Ψ<sub><i>k</i></sub>, <i>D</i>
-and Π. The 11 mod-10 readers are g43, g47, g58, g59, g62, g69, u31, u52, u54, u60 and u794. Script:
-<code>notes/reader_writer/readers/mod10_planes.py</code>.</p>
-<p><b>Planes and terminology.</b> <i>k</i> ∈ {1, …, 5} is the integer frequency of a period-10 function of <i>a</i>.
-<i>k</i> = 1 is the fundamental and <i>k</i> = 2 … 5 are its harmonics, so "harmonic" is the correct word. <i>P<sub>k</sub></i>
-is an orthonormal basis of span{Re Ψ<sub><i>k</i></sub>, Im Ψ<sub><i>k</i></sub>}: a plane for <i>k</i> = 1 … 4 and a line
-for <i>k</i> = 5. Together the five spans give exactly <i>D</i> (9 dimensions). The smallest principal-angle cosine
-between span{<i>P</i><sub>1…5</sub>} and span{μ<sub><i>r</i></sub> − μ̄} is 1.0000.</p>
-<p><b>Not every plane carries the full residue.</b> In the plane of frequency <i>k</i>, residue <i>r</i> sits at angle
-2π<i>kr</i>/10, so a plane can only tell apart residues that differ modulo 10/gcd(<i>k</i>, 10):</p>
+<figure><img src="notebook/fig/mod10_planes.png"><figcaption>Coordinates <i>P<sub>k</sub></i><sup>T</sup><i>x<sub>V</sub></i>(<i>a</i>) for
+every <i>a</i> (small dots) and <i>P<sub>k</sub></i><sup>T</sup>μ<sub><i>r</i></sub> (large dots, labelled by <i>r</i>). The
+black cross is the zero of the activation space. For <i>k</i> = 5, the line coordinate is plotted against
+<i>a</i>.</figcaption></figure>
+<p>The circles are centred close to zero. The table gives ‖centre‖, the norm of the mean of the ten
+<i>P<sub>k</sub></i><sup>T</sup>μ<sub><i>r</i></sub>, and the radius, their mean distance from that centre:</p>
+<table><tr><th>k</th><th>encodes</th><th>‖centre‖</th><th>radius</th></tr>
+<tr><td>1</td><td>a mod 10</td><td>0.105</td><td>0.875</td></tr>
+<tr><td>2</td><td>a mod 5</td><td>0.084</td><td>0.906</td></tr>
+<tr><td>3</td><td>a mod 10</td><td>0.020</td><td>0.608</td></tr>
+<tr><td>4</td><td>a mod 5</td><td>0.050</td><td>0.706</td></tr>
+<tr><td>5</td><td>a mod 2</td><td>0.032</td><td>0.658</td></tr></table>
+<p><i>D</i> holds 10.3% of ‖<i>x<sub>V</sub></i>(<i>a</i>)‖² on average over <i>a</i> (minimum 4.2%, maximum 18.9%).</p>
+<p><b>The planes are nearly orthogonal.</b> The largest principal-angle cosine between two different planes is
+0.27, between <i>k</i> = 2 and <i>k</i> = 4, both of which are mod 5. The next is 0.17 (<i>k</i> = 3, 4). Every other
+pair is ≤ 0.08.</p>
+<figure><img src="notebook/fig/mod10_planes_cos.png"><figcaption>Largest principal-angle cosine between span <i>P<sub>k</sub></i> and
+span <i>P<sub>k′</sub></i>.</figcaption></figure>
+<p><b>The residue directions.</b> Let <i>M</i> = [μ<sub>0</sub> … μ<sub>9</sub>]. Its first singular direction
+carries 76% of ‖<i>M</i>‖². This is the part all ten residues share, and it lies outside <i>D</i>. As a result, the
+raw residue means are far from orthogonal: cos(μ<sub><i>r</i></sub>, μ<sub><i>r′</i></sub>) is 0.65–0.79 for every pair
+<i>r</i> ≠ <i>r′</i>. Inside <i>D</i>, cos(Π<sub><i>D</i></sub>μ<sub><i>r</i></sub>, Π<sub><i>D</i></sub>μ<sub><i>r′</i></sub>) ranges from −0.36 to
++0.09. Pairs whose residues differ by ±3 (mod 10) give −0.36 to −0.24 (mean −0.30), and all other pairs give −0.24
+to +0.09. The 11 readers of section 2 need all of <i>M</i>: their mean r² over the top-<i>n</i> singular directions
+reaches 0.96 only at <i>n</i> = 10, where <i>n</i> is an integer from 0 to 10.</p>
+<figure><img src="notebook/fig/mod10_mu.png"><figcaption>From left: share of ‖<i>M</i>‖² per singular direction <i>j</i>;
+mean r² of the 11 readers against <i>n</i>; raw cosines between residue means; cosines after projecting onto
+<i>D</i>.</figcaption></figure>
+<p><b>Origin: the token embedding.</b> Let <i>e</i>(<i>a</i>) ∈ ℝ<sup>4096</sup> be Llama-3.1-8B's embedding row for the
+single token of <i>a</i>, and γ ∈ ℝ<sup>4096</sup> the weight of block 0's post-attention RMSNorm. Define
+<i>z</i>(<i>a</i>) = γ ⊙ <i>e</i>(<i>a</i>) / rms(<i>e</i>(<i>a</i>)), where ⊙ is the elementwise product and rms is the
+root-mean-square over the 4096 coordinates. This is the MLP input the embedding alone would give. Let
+ε<sub><i>r</i></sub> be its residue means, and <i>D</i><sub>ε</sub> the span of their five Fourier components, built
+exactly like <i>D</i>. Then:</p>
 <ul>
-<li><i>k</i> = 1 and <i>k</i> = 3: each plane alone identifies all of <i>a</i> mod 10.</li>
-<li><i>k</i> = 2 and <i>k</i> = 4: each identifies only <i>a</i> mod 5, so <i>r</i> and <i>r</i> + 5 coincide. The Ψ<sub>2</sub>
-panel of the Fourier figure in the previous entry shows these pairs on top of each other.</li>
-<li><i>k</i> = 5: identifies only <i>a</i> mod 2.</li>
+<li>The nine principal-angle cosines between <i>D</i> and the projection of <i>D</i><sub>ε</sub> onto
+span{<i>V<sub>c</sub></i>} are ≥ 0.9998. Without that projection they are 0.89–0.94: on average 84% of
+<i>D</i><sub>ε</sub> lies in span{<i>V<sub>c</sub></i>}.</li>
+<li>For each of the 11 readers, the cosine over <i>r</i> between <i>V<sub>c</sub></i> · Π<sub><i>D</i></sub>μ<sub><i>r</i></sub> and
+<i>V<sub>c</sub></i> · Π<sub><i>D</i>ε</sub>ε<sub><i>r</i></sub> is ≥ 0.9986. The ratio of their norms is 0.951–0.960.</li>
 </ul>
-<p>So the full residue is encoded twice, in the planes <i>k</i> = 1 and <i>k</i> = 3. The readers do not use that
-redundancy, though: each reader draws on all five frequencies (see the variance table below).</p>
-<p><b>The planes are close to orthogonal.</b> For each pair of frequencies (<i>k</i>, <i>k′</i>), the figure shows the
-largest principal-angle cosine between span <i>P<sub>k</sub></i> and span <i>P<sub>k′</sub></i>. Off the diagonal, the
-values are ≤ 0.08 except for (2, 4) at 0.27 and (3, 4) at 0.17.</p>
-<figure><img src="notebook/fig/l0_planes_cos.png"><figcaption>Largest principal-angle cosine between the frequency-<i>k</i>
-and frequency-<i>k′</i> spans.</figcaption></figure>
-<p><b>Projecting the input onto the planes.</b> Replace each reader's input <i>x<sub>V</sub></i>(<i>a</i>) by its projection
-onto <i>D</i>, or onto a subset of the planes, and compare the resulting activation with <i>f<sub>c</sub></i>. There are
-two versions.</p>
-<p><b>Centred version.</b> Here the replaced activation is <i>V<sub>c</sub></i> · Π<sub><i>X</i></sub>(<i>x<sub>V</sub></i>(<i>a</i>) − mean<sub><i>a</i></sub> <i>x<sub>V</sub></i>) / ‖<i>V<sub>c</sub></i>‖ + mean <i>f<sub>c</sub></i>,
-where Π<sub><i>X</i></sub> is the orthogonal projection onto the span of the planes in subset <i>X</i>. The table gives the
-share of Var<sub><i>a</i></sub> <i>f<sub>c</sub></i> it reproduces, over <i>a</i> = 1 … 400:</p>
-<table><tr><th>X</th><th>g43</th><th>g47</th><th>g58</th><th>g59</th><th>g62</th><th>g69</th><th>u31</th><th>u52</th><th>u54</th><th>u60</th><th>u794</th></tr>
-<tr><td>all (<i>D</i>)</td><td>0.99</td><td>0.99</td><td>0.98</td><td>0.99</td><td>0.98</td><td>0.99</td><td>0.70</td><td>0.98</td><td>0.98</td><td>0.98</td><td>0.95</td></tr>
-<tr><td><i>k</i>=1</td><td>0.27</td><td>0.26</td><td>0.22</td><td>0.24</td><td>0.22</td><td>0.22</td><td>0.11</td><td>0.19</td><td>0.22</td><td>0.24</td><td>0.27</td></tr>
-<tr><td><i>k</i>=2</td><td>0.21</td><td>0.36</td><td>0.25</td><td>0.28</td><td>0.17</td><td>0.36</td><td>0.43</td><td>0.27</td><td>0.18</td><td>0.23</td><td>0.36</td></tr>
-<tr><td><i>k</i>=3</td><td>0.26</td><td>0.14</td><td>0.08</td><td>0.07</td><td>0.19</td><td>0.02</td><td>0.11</td><td>0.07</td><td>0.19</td><td>0.10</td><td>0.37</td></tr>
-<tr><td><i>k</i>=4</td><td>0.15</td><td>0.15</td><td>0.14</td><td>0.14</td><td>0.13</td><td>0.11</td><td>0.40</td><td>0.24</td><td>0.13</td><td>0.10</td><td>0.42</td></tr>
-<tr><td><i>k</i>=5</td><td>0.11</td><td>0.17</td><td>0.15</td><td>0.16</td><td>0.09</td><td>0.17</td><td>0.10</td><td>0.09</td><td>0.12</td><td>0.17</td><td>0.15</td></tr>
-<tr><td><i>k</i>=1,3</td><td>0.50</td><td>0.42</td><td>0.35</td><td>0.33</td><td>0.40</td><td>0.28</td><td>0.21</td><td>0.23</td><td>0.38</td><td>0.34</td><td>0.60</td></tr></table>
-<p>With all of <i>D</i>, ten readers keep 95–99% of their variance, and u31 keeps 70%. No single plane gives more than
-0.43, and the two planes that each carry the full residue (<i>k</i> = 1, 3) give 0.21–0.60 together. Each reader's single peak at
-one residue is a sum over all five harmonics.</p>
-<p><b>Raw version.</b> Here the replaced activation is <i>V<sub>c</sub></i> · Π<sub><i>D</i></sub> <i>x<sub>V</sub></i>(<i>a</i>) / ‖<i>V<sub>c</sub></i>‖:
-everything outside <i>D</i> is discarded, including the mean input. The mean input mean<sub><i>a</i></sub> <i>x<sub>V</sub></i>
-has only 0.19% of its squared norm in <i>D</i>. As a result, each reader's activation shifts by a constant of −0.50 to
-+0.29 standard deviations of <i>f<sub>c</sub></i>, while its correlation with <i>f<sub>c</sub></i> over <i>a</i> stays at
-0.98–0.99 (u31: 0.84).</p>
-<figure><img src="notebook/fig/l0_planes_ev.png"><figcaption>Centred version: share of Var <i>f<sub>c</sub></i>
-reproduced, per reader and plane subset <i>X</i>.</figcaption></figure>
-<figure><img src="notebook/fig/l0_planes_overlay.png"><figcaption><i>f<sub>c</sub></i>(<i>a</i>) for <i>a</i> = 1 … 100 (grey), the
-centred version (blue) and the raw version (red, dashed).</figcaption></figure>
-`
-},
-{
-id: "l0-mod10-uncentred",
-title: "Block-0 a mod 10 without centring",
-date: "2026-10-20",
-html: `
-<p><b>Why this entry exists.</b> The network has no biases, so the zero of every activation is the zero of the
-activation space. The two previous entries centred several quantities: residue means after removing a trend, mean
-subtraction, and centred r². This entry redoes those measurements with nothing centred and nothing detrended. It
-supersedes the centred numbers in the earlier entries. The representation repository now uses these definitions.
-Scripts: <code>notes/reader_writer/repr_repo/{seed_l0_mod10,plot_planes_raw}.py</code> (commit cdf0c00b8).</p>
-<p><b>Notation.</b></p>
+<figure><img src="notebook/fig/mod10_embedding.png"><figcaption>Left: principal-angle cosines between <i>D</i> and the projected
+<i>D</i><sub>ε</sub>. Right: per-reader cosine between the observed and the embedding-predicted residue
+profiles.</figcaption></figure>
+
+<h3>2. The readers it explains</h3>
+<p>A reader counts as a mod-10 reader when r²<sub><i>D</i></sub>(<i>c</i>) ≥ 0.5. As a control, the largest r² any
+reader gets from any of 20 random 9-dimensional subspaces of span{<i>V<sub>c</sub></i>} is 0.31.</p>
+<figure><img src="notebook/fig/mod10_r2_sorted.png"><figcaption>r²<sub><i>D</i></sub> of the 153 readers, sorted (bars), and the
+random-subspace control (dots).</figcaption></figure>
+<p><b>Result: 11 readers.</b> In order of r²<sub><i>D</i></sub>: g59 0.98, g69 0.96, g58 0.96, u60 0.95, g47 0.92,
+u54 0.91, g62 0.89, u52 0.88, g43 0.84, u794 0.74, u31 0.62. The next readers are g152 (0.40), u41 (0.25) and g175
+(0.19).</p>
+<p><b>Each reader picks one residue.</b> Outside its residue, each reader's profile is close to zero: the median of
+<i>m<sub>c</sub></i>(<i>r</i>) over <i>r</i> is within ±0.02 of max |<i>m<sub>c</sub></i>|. The table lists each reader's
+main residue and its next-largest values of <i>s<sub>c</sub></i> <i>m<sub>c</sub></i>(<i>r</i>), as fractions of
+max<sub><i>r</i></sub> |<i>m<sub>c</sub></i>(<i>r</i>)|:</p>
+<table><tr><th>reader</th><th>main residue</th><th>next</th></tr>
+<tr><td>u794</td><td>0</td><td>all |·| ≤ 0.01</td></tr>
+<tr><td>u31</td><td>0</td><td>5 (+0.26), 3 (−0.18)</td></tr>
+<tr><td>g43</td><td>1</td><td>0 (+0.05), 8 (−0.04)</td></tr>
+<tr><td>g69</td><td>2</td><td>5 (−0.61)</td></tr>
+<tr><td>u60</td><td>3</td><td>6 (−0.29)</td></tr>
+<tr><td>g62</td><td>4</td><td>all |·| ≤ 0.02</td></tr>
+<tr><td>u52</td><td>5</td><td>3 (+0.04)</td></tr>
+<tr><td>u54</td><td>6</td><td>all |·| ≤ 0.01</td></tr>
+<tr><td>g58</td><td>7</td><td>4 (−0.19)</td></tr>
+<tr><td>g59</td><td>8</td><td>5 (−0.42)</td></tr>
+<tr><td>g47</td><td>9</td><td>6 (−0.32), 8 (+0.12)</td></tr></table>
+<p>Every residue has a reader. Every second value of magnitude ≥ 0.18 is negative and at the main residue ± 3.
+The one exception is u31, which has +0.26 at residue 5. This matches the −0.30 cosine between Π<sub><i>D</i></sub>μ<sub><i>r</i></sub> and Π<sub><i>D</i></sub>μ<sub><i>r</i>±3</sub> in section 1.</p>
+<figure><img src="notebook/fig/mod10_profiles.png"><figcaption><i>s<sub>c</sub></i> <i>m<sub>c</sub></i>(<i>r</i>) / max<sub><i>r</i></sub>
+|<i>m<sub>c</sub></i>(<i>r</i>)|, one row per reader.</figcaption></figure>
+<figure><img src="notebook/fig/mod10_overlay.png"><figcaption><i>f<sub>c</sub></i>(<i>a</i>) for <i>a</i> = 1 … 100 (grey) and
+<i>g<sub>c</sub><sup>D</sup></i>(<i>a</i>) (blue), in the component's own sign.</figcaption></figure>
+
+<h3>3. How much each reader reads from each plane</h3>
+<figure><img src="notebook/fig/mod10_per_plane.png"><figcaption>Left: ‖<i>P<sub>k</sub></i><sup>T</sup><i>V<sub>c</sub></i>‖² / ‖<i>V<sub>c</sub></i>‖², the
+share of the read vector in each plane <i>k</i>. Right: r²<sub><i>P<sub>k</sub></i></sub>(<i>c</i>) for each plane alone (stacked
+bars) and r²<sub><i>D</i></sub>(<i>c</i>) (black ticks). The planes are not exactly orthogonal, so the stacked values
+overlap and can add up to more than 1. Readers are ordered by main residue.</figcaption></figure>
 <ul>
-<li><i>a</i> ∈ {1, …, 400} is the integer operand, and <i>r</i> = <i>a</i> mod 10.</li>
-<li><i>x<sub>V</sub></i>(<i>a</i>) ∈ ℝ<sup>4096</sup> is the block-0 MLP input at position 1 (the token <i>a</i>), projected
-onto the span of the 153 kept block-0 readers' read vectors <i>V<sub>c</sub></i>.</li>
-<li>μ<sub><i>r</i></sub> is the plain mean of <i>x<sub>V</sub></i>(<i>a</i>) over the 40 values of <i>a</i> with
-<i>a</i> mod 10 = <i>r</i>.</li>
-<li>For an integer frequency <i>k</i> ∈ {1, …, 5}, Ψ<sub><i>k</i></sub> = Σ<sub><i>r</i></sub> μ<sub><i>r</i></sub> exp(−2π<i>i</i><i>kr</i>/10),
-where <i>i</i> is the imaginary unit. <i>P<sub>k</sub></i> is the orthonormal basis of span{Re Ψ<sub><i>k</i></sub>, Im Ψ<sub><i>k</i></sub>}:
-a plane for <i>k</i> = 1 … 4 and a line for <i>k</i> = 5. This is the repository representation whose id ends in <code>.k</code><i>k</i>.</li>
-<li><i>D</i> is the span of all five, 9 dimensions, and Π<sub><i>X</i></sub> is the orthogonal projection onto a span <i>X</i>.</li>
+<li><b>Read vectors sit in <i>D</i>.</b> For ten readers, 86–97% of ‖<i>V<sub>c</sub></i>‖² lies in <i>D</i>; for u31 it
+is 38%.</li>
+<li><b>All five frequencies, no single plane.</b> Every reader reads from all five. No plane alone gives any reader
+more than r² = 0.39, and the two full-residue planes (<i>k</i> = 1, 3) together give 0.18–0.49.</li>
+<li><b>Each read vector points at its residue.</b> After applying <i>s<sub>c</sub></i>, the cosine between
+<i>s<sub>c</sub></i> <i>P<sub>k</sub></i><sup>T</sup><i>V<sub>c</sub></i> and <i>P<sub>k</sub></i><sup>T</sup>μ<sub><i>r</i></sub> at the reader's main
+residue is 0.79–1.00 in each plane <i>k</i> = 1 … 4, and the sign matches on the line <i>k</i> = 5, for all 11
+readers.</li>
 </ul>
+<figure><img src="notebook/fig/mod10_planes_arrows.png"><figcaption>Residue means <i>P<sub>k</sub></i><sup>T</sup>μ<sub><i>r</i></sub> (dots, labelled
+by <i>r</i>) and the 11 read directions <i>s<sub>c</sub></i> <i>P<sub>k</sub></i><sup>T</sup><i>V<sub>c</sub></i> / ‖<i>V<sub>c</sub></i>‖ (arrows
+from the origin, coloured by the reader's main residue). Each panel's arrow scale is given in its title.</figcaption></figure>
+<figure><img src="notebook/fig/mod10_reader_vectors.png"><figcaption>Left: ‖Π<sub><i>D</i></sub><i>V<sub>c</sub></i>‖² / ‖<i>V<sub>c</sub></i>‖². Right: cosines
+between the sign-aligned projected read vectors <i>s<sub>c</sub></i> Π<sub><i>D</i></sub><i>V<sub>c</sub></i>.</figcaption></figure>
+<p><b>No mod-2 or mod-5 readers.</b> A reader responds to a plane when that plane alone gives r² ≥ 0.05; this is the
+representation repository's threshold. Six readers respond only to the lower-period planes (<i>k</i> = 2, 4, 5), and
+their total r² is 0.06–0.12: u122 (0.12, mod 5), g158 (0.08), u129 (0.08, parity), g175 (0.07), g87 (0.07) and
+g75 (0.06).</p>
 
-<h3>The planes, with the origin at zero</h3>
-<figure><img src="notebook/fig/l0_planes_raw.png"><figcaption>Coordinates <i>P<sub>k</sub></i><sup>T</sup><i>x<sub>V</sub></i>(<i>a</i>)
-for every <i>a</i> (small dots) and <i>P<sub>k</sub></i><sup>T</sup>μ<sub><i>r</i></sub> (large dots, labelled by
-<i>r</i>). The black cross is the zero of the activation space. For <i>k</i> = 5, the line coordinate is plotted
-against <i>a</i>.</figcaption></figure>
-<p>In every plane the residue means sit on a circle around the origin. The offset of the circle's centre
-(the mean of the ten <i>P<sub>k</sub></i><sup>T</sup>μ<sub><i>r</i></sub>) is small compared with its radius
-(the mean distance of the ten points from that centre):</p>
-<div class="scroll"><table><tr><th>representation</th><th>‖centre‖</th><th>radius</th></tr>
-<tr><td><i>k</i> = 1 (<i>a</i> mod 10)</td><td>0.105</td><td>0.875</td></tr>
-<tr><td><i>k</i> = 2 (<i>a</i> mod 5)</td><td>0.084</td><td>0.906</td></tr>
-<tr><td><i>k</i> = 3 (<i>a</i> mod 10)</td><td>0.020</td><td>0.608</td></tr>
-<tr><td><i>k</i> = 4 (<i>a</i> mod 5)</td><td>0.050</td><td>0.706</td></tr>
-<tr><td><i>k</i> = 5 (<i>a</i> mod 2)</td><td>0.032</td><td>0.658</td></tr></table></div>
-<p>For <i>k</i> = 5 the "radius" is the mean |coordinate − centre|. The plane <i>D</i> holds 10.3% of
-‖<i>x<sub>V</sub></i>(<i>a</i>)‖² on average over <i>a</i> (minimum 4.2%, maximum 18.9%). The rest of the input lies
-outside these planes.</p>
-
-<h3>Residue directions, uncentred</h3>
-<p>The raw μ<sub><i>r</i></sub> are far from orthogonal: cos(μ<sub><i>r</i></sub>, μ<sub><i>r′</i></sub>) is between
-0.65 and 0.79 for every pair <i>r</i> ≠ <i>r′</i>. This is because they share the part of <i>x<sub>V</sub></i> that lies
-outside <i>D</i>. Inside <i>D</i>, cos(Π<sub><i>D</i></sub>μ<sub><i>r</i></sub>, Π<sub><i>D</i></sub>μ<sub><i>r′</i></sub>)
-ranges from −0.36 to +0.09, with the same ±3 pattern found in the first entry.</p>
-<figure><img src="notebook/fig/l0_mu_cos_raw.png"><figcaption>Left: cosines between the raw residue means. Right: the same
-after projecting onto <i>D</i>.</figcaption></figure>
-
-<h3>How much the planes explain, uncentred</h3>
-<p>For reader <i>c</i> with inner activation <i>f<sub>c</sub></i>(<i>a</i>) = <i>x<sub>V</sub></i>(<i>a</i>) · <i>V<sub>c</sub></i> / ‖<i>V<sub>c</sub></i>‖, and a
-span <i>X</i>, define
-<i>g</i>(<i>a</i>) = Π<sub><i>X</i></sub><i>x<sub>V</sub></i>(<i>a</i>) · <i>V<sub>c</sub></i> / ‖<i>V<sub>c</sub></i>‖ and
-r² = 1 − Σ<sub><i>a</i></sub>(<i>f<sub>c</sub></i> − <i>g</i>)² / Σ<sub><i>a</i></sub> <i>f<sub>c</sub></i>², over <i>a</i> = 1 … 400.
-A reader responds to a plane when that plane alone gives r² ≥ 0.05. Its total r² uses <i>X</i> = the span of the
-planes it responds to.</p>
-<div class="scroll"><table><tr><th>reader</th><th>total r²</th><th>k=1</th><th>k=2</th><th>k=3</th><th>k=4</th><th>k=5</th></tr>
-<tr><td>g59</td><td>0.976</td><td>0.230</td><td>0.291</td><td>0.075</td><td>0.140</td><td>0.144</td></tr>
-<tr><td>g58</td><td>0.957</td><td>0.228</td><td>0.256</td><td>0.064</td><td>0.117</td><td>0.152</td></tr>
-<tr><td>u60</td><td>0.953</td><td>0.212</td><td>0.243</td><td>0.092</td><td>0.099</td><td>0.170</td></tr>
-<tr><td>g47</td><td>0.919</td><td>0.225</td><td>0.347</td><td>0.140</td><td>0.141</td><td>0.170</td></tr>
-<tr><td>u54</td><td>0.915</td><td>0.239</td><td>0.141</td><td>0.168</td><td>0.142</td><td>0.098</td></tr>
-<tr><td>g69</td><td>0.913</td><td>0.186</td><td>0.366</td><td>0.024</td><td>0.110</td><td>0.165</td></tr>
-<tr><td>g62</td><td>0.894</td><td>0.219</td><td>0.154</td><td>0.168</td><td>0.131</td><td>0.071</td></tr>
-<tr><td>u52</td><td>0.882</td><td>0.209</td><td>0.197</td><td>0.074</td><td>0.192</td><td>0.088</td></tr>
-<tr><td>g43</td><td>0.841</td><td>0.180</td><td>0.162</td><td>0.237</td><td>0.156</td><td>0.107</td></tr>
-<tr><td>u794</td><td>0.744</td><td>0.201</td><td>0.290</td><td>0.327</td><td>0.356</td><td>0.130</td></tr>
-<tr><td>u31</td><td>0.616</td><td>0.095</td><td>0.387</td><td>0.101</td><td>0.369</td><td>0.095</td></tr></table></div>
-<p>The centred r² from the previous entry were 0.94–0.99 for the first ten readers. Uncentred, they are
-0.74–0.98. The difference is each reader's mean activation, which the planes now have to produce as well. Across all
-153 kept block-0 readers, 27 respond to at least one plane. The next highest totals are g152 (0.40), u41 (0.23) and
-u248 (0.17).</p>
+<h3>4. What D contributes to the other readers</h3>
+<p>For each of the 142 other readers, the change is ‖<i>g<sub>c</sub><sup>D</sup></i>‖ / ‖<i>f<sub>c</sub></i>‖, with norms over
+<i>a</i> = 1 … 400, and the residual is ρ<sub><i>c</i></sub> = <i>f<sub>c</sub></i> − <i>g<sub>c</sub><sup>D</sup></i>. The change has median
+0.14, 90th percentile 0.26 and maximum 0.67 (g152). The next largest are u41 (0.59) and g175 (0.46).</p>
+<figure><img src="notebook/fig/mod10_others_change.png"><figcaption>Change for the 142 other readers, sorted (the first 40 are
+labelled).</figcaption></figure>
+<figure><img src="notebook/fig/mod10_others_residual.png"><figcaption>The 24 other readers with the largest change, in order (left
+column first). Grey: <i>f<sub>c</sub></i>. Blue: ρ<sub><i>c</i></sub>. The horizontal axis is <i>a</i>.</figcaption></figure>
 `
 },
 ];
