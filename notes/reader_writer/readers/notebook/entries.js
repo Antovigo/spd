@@ -6,6 +6,7 @@ id: "l0-mod10",
 title: "Block-0 readers of a mod 10",
 date: "2026-10-20",
 html: `
+<p class="note"><b>Note (2026-10-20):</b> this entry centres activations, residue means and r². The entry "Block-0 a mod 10 without centring" gives the uncentred numbers, which supersede the centred ones.</p>
 <p><b>Short version.</b> Eleven of the 153 kept block-0 readers respond to <i>a</i> mod 10. Ten of them pick one
 residue each, and together they cover all ten residues (residue 0 has two readers). The ten residue directions
 fill a full 9-dimensional subspace: nothing lower-dimensional explains these readers (95% of their periodic
@@ -167,6 +168,7 @@ id: "l0-mod10-planes",
 title: "Block-0 a mod 10: the Fourier planes",
 date: "2026-10-20",
 html: `
+<p class="note"><b>Note (2026-10-20):</b> this entry centres activations, residue means and r². The entry "Block-0 a mod 10 without centring" gives the uncentred numbers, which supersede the centred ones.</p>
 <p>This entry follows up on "Block-0 readers of a mod 10" and reuses its notation: <i>a</i>, <i>r</i>, <i>c</i>,
 <i>V<sub>c</sub></i>, <i>x<sub>V</sub></i>(<i>a</i>), <i>f<sub>c</sub></i>, μ<sub><i>r</i></sub>, Ψ<sub><i>k</i></sub>, <i>D</i>
 and Π. The 11 mod-10 readers are g43, g47, g58, g59, g62, g69, u31, u52, u54, u60 and u794. Script:
@@ -217,6 +219,80 @@ has only 0.19% of its squared norm in <i>D</i>. As a result, each reader's activ
 reproduced, per reader and plane subset <i>X</i>.</figcaption></figure>
 <figure><img src="notebook/fig/l0_planes_overlay.png"><figcaption><i>f<sub>c</sub></i>(<i>a</i>) for <i>a</i> = 1 … 100 (grey), the
 centred version (blue) and the raw version (red, dashed).</figcaption></figure>
+`
+},
+{
+id: "l0-mod10-uncentred",
+title: "Block-0 a mod 10 without centring",
+date: "2026-10-20",
+html: `
+<p><b>Why this entry exists.</b> The network has no biases, so the zero of every activation is the zero of the
+activation space. The two previous entries centred several quantities: residue means after removing a trend, mean
+subtraction, and centred r². This entry redoes those measurements with nothing centred and nothing detrended. It
+supersedes the centred numbers in the earlier entries. The representation repository now uses these definitions.
+Scripts: <code>notes/reader_writer/repr_repo/{seed_l0_mod10,plot_planes_raw}.py</code> (commit cdf0c00b8).</p>
+<p><b>Notation.</b></p>
+<ul>
+<li><i>a</i> ∈ {1, …, 400} is the integer operand, and <i>r</i> = <i>a</i> mod 10.</li>
+<li><i>x<sub>V</sub></i>(<i>a</i>) ∈ ℝ<sup>4096</sup> is the block-0 MLP input at position 1 (the token <i>a</i>), projected
+onto the span of the 153 kept block-0 readers' read vectors <i>V<sub>c</sub></i>.</li>
+<li>μ<sub><i>r</i></sub> is the plain mean of <i>x<sub>V</sub></i>(<i>a</i>) over the 40 values of <i>a</i> with
+<i>a</i> mod 10 = <i>r</i>.</li>
+<li>For an integer frequency <i>k</i> ∈ {1, …, 5}, Ψ<sub><i>k</i></sub> = Σ<sub><i>r</i></sub> μ<sub><i>r</i></sub> exp(−2π<i>i</i><i>kr</i>/10),
+where <i>i</i> is the imaginary unit. <i>P<sub>k</sub></i> is the orthonormal basis of span{Re Ψ<sub><i>k</i></sub>, Im Ψ<sub><i>k</i></sub>}:
+a plane for <i>k</i> = 1 … 4 and a line for <i>k</i> = 5. This is the repository representation whose id ends in <code>.k</code><i>k</i>.</li>
+<li><i>D</i> is the span of all five, 9 dimensions, and Π<sub><i>X</i></sub> is the orthogonal projection onto a span <i>X</i>.</li>
+</ul>
+
+<h3>The planes, with the origin at zero</h3>
+<figure><img src="notebook/fig/l0_planes_raw.png"><figcaption>Coordinates <i>P<sub>k</sub></i><sup>T</sup><i>x<sub>V</sub></i>(<i>a</i>)
+for every <i>a</i> (small dots) and <i>P<sub>k</sub></i><sup>T</sup>μ<sub><i>r</i></sub> (large dots, labelled by
+<i>r</i>). The black cross is the zero of the activation space. For <i>k</i> = 5, the line coordinate is plotted
+against <i>a</i>.</figcaption></figure>
+<p>In every plane the residue means sit on a circle around the origin. The offset of the circle's centre
+(the mean of the ten <i>P<sub>k</sub></i><sup>T</sup>μ<sub><i>r</i></sub>) is small compared with its radius
+(the mean distance of the ten points from that centre):</p>
+<div class="scroll"><table><tr><th>representation</th><th>‖centre‖</th><th>radius</th></tr>
+<tr><td><i>k</i> = 1 (<i>a</i> mod 10)</td><td>0.105</td><td>0.875</td></tr>
+<tr><td><i>k</i> = 2 (<i>a</i> mod 5)</td><td>0.084</td><td>0.906</td></tr>
+<tr><td><i>k</i> = 3 (<i>a</i> mod 10)</td><td>0.020</td><td>0.608</td></tr>
+<tr><td><i>k</i> = 4 (<i>a</i> mod 5)</td><td>0.050</td><td>0.706</td></tr>
+<tr><td><i>k</i> = 5 (<i>a</i> mod 2)</td><td>0.032</td><td>0.658</td></tr></table></div>
+<p>For <i>k</i> = 5 the "radius" is the mean |coordinate − centre|. The plane <i>D</i> holds 10.3% of
+‖<i>x<sub>V</sub></i>(<i>a</i>)‖² on average over <i>a</i> (minimum 4.2%, maximum 18.9%). The rest of the input lies
+outside these planes.</p>
+
+<h3>Residue directions, uncentred</h3>
+<p>The raw μ<sub><i>r</i></sub> are far from orthogonal: cos(μ<sub><i>r</i></sub>, μ<sub><i>r′</i></sub>) is between
+0.65 and 0.79 for every pair <i>r</i> ≠ <i>r′</i>. This is because they share the part of <i>x<sub>V</sub></i> that lies
+outside <i>D</i>. Inside <i>D</i>, cos(Π<sub><i>D</i></sub>μ<sub><i>r</i></sub>, Π<sub><i>D</i></sub>μ<sub><i>r′</i></sub>)
+ranges from −0.36 to +0.09, with the same ±3 pattern found in the first entry.</p>
+<figure><img src="notebook/fig/l0_mu_cos_raw.png"><figcaption>Left: cosines between the raw residue means. Right: the same
+after projecting onto <i>D</i>.</figcaption></figure>
+
+<h3>How much the planes explain, uncentred</h3>
+<p>For reader <i>c</i> with inner activation <i>f<sub>c</sub></i>(<i>a</i>) = <i>x<sub>V</sub></i>(<i>a</i>) · <i>V<sub>c</sub></i> / ‖<i>V<sub>c</sub></i>‖, and a
+span <i>X</i>, define
+<i>g</i>(<i>a</i>) = Π<sub><i>X</i></sub><i>x<sub>V</sub></i>(<i>a</i>) · <i>V<sub>c</sub></i> / ‖<i>V<sub>c</sub></i>‖ and
+r² = 1 − Σ<sub><i>a</i></sub>(<i>f<sub>c</sub></i> − <i>g</i>)² / Σ<sub><i>a</i></sub> <i>f<sub>c</sub></i>², over <i>a</i> = 1 … 400.
+A reader responds to a plane when that plane alone gives r² ≥ 0.05. Its total r² uses <i>X</i> = the span of the
+planes it responds to.</p>
+<div class="scroll"><table><tr><th>reader</th><th>total r²</th><th>k=1</th><th>k=2</th><th>k=3</th><th>k=4</th><th>k=5</th></tr>
+<tr><td>g59</td><td>0.976</td><td>0.230</td><td>0.291</td><td>0.075</td><td>0.140</td><td>0.144</td></tr>
+<tr><td>g58</td><td>0.957</td><td>0.228</td><td>0.256</td><td>0.064</td><td>0.117</td><td>0.152</td></tr>
+<tr><td>u60</td><td>0.953</td><td>0.212</td><td>0.243</td><td>0.092</td><td>0.099</td><td>0.170</td></tr>
+<tr><td>g47</td><td>0.919</td><td>0.225</td><td>0.347</td><td>0.140</td><td>0.141</td><td>0.170</td></tr>
+<tr><td>u54</td><td>0.915</td><td>0.239</td><td>0.141</td><td>0.168</td><td>0.142</td><td>0.098</td></tr>
+<tr><td>g69</td><td>0.913</td><td>0.186</td><td>0.366</td><td>0.024</td><td>0.110</td><td>0.165</td></tr>
+<tr><td>g62</td><td>0.894</td><td>0.219</td><td>0.154</td><td>0.168</td><td>0.131</td><td>0.071</td></tr>
+<tr><td>u52</td><td>0.882</td><td>0.209</td><td>0.197</td><td>0.074</td><td>0.192</td><td>0.088</td></tr>
+<tr><td>g43</td><td>0.841</td><td>0.180</td><td>0.162</td><td>0.237</td><td>0.156</td><td>0.107</td></tr>
+<tr><td>u794</td><td>0.744</td><td>0.201</td><td>0.290</td><td>0.327</td><td>0.356</td><td>0.130</td></tr>
+<tr><td>u31</td><td>0.616</td><td>0.095</td><td>0.387</td><td>0.101</td><td>0.369</td><td>0.095</td></tr></table></div>
+<p>The centred r² from the previous entry were 0.94–0.99 for the first ten readers. Uncentred, they are
+0.74–0.98. The difference is each reader's mean activation, which the planes now have to produce as well. Across all
+153 kept block-0 readers, 27 respond to at least one plane. The next highest totals are g152 (0.40), u41 (0.23) and
+u248 (0.17).</p>
 `
 },
 ];
