@@ -240,7 +240,50 @@ explains 8% and 19%.</li>
 are −0.39 to −0.20. The dual-like neurons have small or positive lobes: u#5708, u#8969 and u#13630 (α 1.12–1.34, lobes
 +0.05 to +0.17), and g#13010 (α 1.14, lobe −0.15).</li>
 </ul>
-<h3>6. Neurons against components</h3>
+<h3>6. The arrangement: one shift generates every direction</h3>
+<p><b>Short answer.</b> Yes. One linear map <i>S</i> on <i>D</i>, "add 1 to the residue", carries each residue mean to
+the next, with 7% relative error. Its eigenvalues are rotations by exactly 2π<i>k</i>/10 for <i>k</i> = 1 … 5. The
+same <i>S</i> also carries each reader's read direction onto the read direction of the reader for the next
+residue. The arrangement is therefore a clock: one rotation per Fourier plane, applied the same number of times.
+It is not an orthonormal one, though: <i>S</i> is not an isometry, and residue 0 sits further out than the others.
+Script: <code>notes/reader_writer/readers/regularity.py</code>.</p>
+<ul>
+<li><b>Coordinates.</b> <i>y<sub>r</sub></i> ∈ ℝ<sup>9</sup> are the coordinates of Π<sub><i>D</i></sub>μ<sub><i>r</i></sub> in an orthonormal basis of
+<i>D</i>.</li>
+<li><b>The shift.</b> <i>S</i> is the 9 × 9 matrix minimising Σ<sub><i>r</i></sub>‖<i>S</i> <i>y<sub>r</sub></i> − <i>y</i><sub><i>r</i>+1</sub>‖², with
+indices mod 10.</li>
+<li><b>Read directions.</b> <i>q<sub>c</sub></i> is a reader's read direction inside <i>D</i>, Π<sub><i>D</i></sub><i>s<sub>c</sub></i><i>w<sub>c</sub></i>
+normalised. For a pair of readers <i>c</i>, <i>c′</i> with main residues <i>r</i>₀, <i>r</i>₀′, Δ = <i>r</i>₀′ − <i>r</i>₀ mod 10.</li>
+</ul>
+<figure><img src="notebook/fig/regularity.png"><figcaption>
+<ol>
+<li>Cosine between Π<sub><i>D</i></sub>μ<sub><i>r</i></sub> and Π<sub><i>D</i></sub>μ<sub><i>r′</i></sub> for every pair, against Δ = <i>r′</i> − <i>r</i>.</li>
+<li>Eigenvalues of <i>S</i>: modulus against angle × 10/2π.</li>
+<li>For every pair of readers (components; clean neurons), the raw cosine cos(<i>q<sub>c</sub></i>, <i>q<sub>c′</sub></i>) (dots) and
+cos(<i>S</i><sup>Δ</sup><i>q<sub>c</sub></i>, <i>q<sub>c′</sub></i>) (crosses), against Δ.</li>
+</ol></figcaption></figure>
+<ul>
+<li><b>Residue means: a near-perfect clock.</b> <i>S</i> reproduces <i>y</i><sub><i>r</i>+1</sub> from <i>y<sub>r</sub></i> with 7.5% relative error
+(components) and 6.7% (neurons). Its nine eigenvalues have modulus 0.995–1.000. Their angles are 2π/10 times 0.99,
+1.99, 3.00, 4.00 (each as a ± pair) and 5.00, i.e. one rotation per Fourier plane and a sign flip on the parity line.
+<i>S</i><sup>10</sup> is within 5% of the identity.</li>
+<li><b>But not an isometry.</b> The singular values of <i>S</i> range from 0.71 to 1.41. The planes are not exactly
+orthogonal (largest principal cosine 0.28), and the orbits in them are not exact circles. Fitting the coordinates
+in plane <i>k</i> as <i>A</i>e<sup>2π<i>ikr</i>/10</sup> + <i>B</i>e<sup>−2π<i>ikr</i>/10</sup>, where <i>i</i> is the imaginary unit and
+<i>A</i>, <i>B</i> are complex amplitudes, gives |<i>B</i>|/|<i>A</i>| = 0.01 (<i>k</i> = 1), 0.05 (2), 0.05 (3) and 0.17 (4). So
+plane 4 is the most elliptical, and the per-residue residuals are 14–30% of the plane's norm.</li>
+<li><b>Residue 0 is longer.</b> ‖Π<sub><i>D</i></sub>μ<sub>0</sub>‖ is 1.94 (components) and 2.13 (neurons), against
+1.58–1.77 and 1.73–1.88 for the other residues. As a result, the cosine between residue means depends on Δ only
+in part: grouping pairs by Δ explains 64–67% of the variance of the off-diagonal cosines, and individual pairs
+deviate by up to 0.22.</li>
+<li><b>Read directions follow the same clock.</b> Between readers of different residues, the raw cosine is −0.48 to
++0.22. After applying <i>S</i><sup>Δ</sup> to one of them, it is 0.81–1.00 for components (median 0.94) and 0.71–1.00 for
+clean neurons (median 0.95). For comparison, two readers of the same residue have cosine 0.89 (u31, u794) and
+0.71–0.99 (neurons). The lowest transported pairs (0.71–0.82) involve readers of different type: g69, the most
+matched-filter component (β = 0.96), paired with g47, g59 or u794; and dual-like up rows (u#13630, u#8969) paired
+with matched-filter gate rows (g#8969, g#13630).</li>
+</ul>
+<h3>7. Neurons against components</h3>
 <p>For each of the decomposition's 11 mod-10 components, take the neuron row with the largest |cosine| to its read
 vector. Every gate component's best match is a gate row with the same main residue (cosine 0.61–0.70). The same holds for
 every up component except u31, whose best match is not a mod-10 neuron:</p>
@@ -259,7 +302,7 @@ every up component except u31, whose best match is not a mod-10 neuron:</p>
 <p>The cosines are well below 1. This fits the component read vectors lying almost entirely in <i>D</i> while the
 neuron rows lie mostly outside it.</p>
 
-<h3>7. What D contributes to the other neurons</h3>
+<h3>8. What D contributes to the other neurons</h3>
 <p>For each of the 28,648 other neurons, the change is ‖<i>g<sub>n</sub><sup>D</sup></i>‖ / ‖<i>f<sub>n</sub></i>‖, with norms over
 <i>a</i> = 1 … 400, and the residual is ρ<sub><i>n</i></sub> = <i>f<sub>n</sub></i> − <i>g<sub>n</sub><sup>D</sup></i>. The change has median
 0.20, 90th percentile 0.29, 99th percentile 0.37 and maximum 0.74 (u#11614). The next are g#11563 (0.69) and u#5727
