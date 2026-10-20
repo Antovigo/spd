@@ -11,7 +11,9 @@ html: `
 sit on circles around the zero of the activation space. <i>D</i> is the token embedding's own mod-10 structure.
 Eleven of the 153 kept block-0 readers are explained by <i>D</i> (r² 0.62–0.98). Ten of them respond to a single
 residue, and every residue 0–9 has at least one such reader. Each reader's read vector lies almost entirely in
-<i>D</i>, and in every plane it points at its residue. No reader reads the parity line or the mod-5 planes on its
+<i>D</i>, and in every plane it points at its residue. The read vectors match the dual basis of the residue means
+(cosine 0.85–1.00) rather than the means themselves (0.46–0.60), mostly because they leave out the direction all
+ten means share. No reader reads the parity line or the mod-5 planes on its
 own with any strength.</p>
 
 <h3>Setup and notation</h3>
@@ -152,12 +154,52 @@ by <i>r</i>) and the 11 read directions <i>s<sub>c</sub></i> <i>P<sub>k</sub></i
 from the origin, coloured by the reader's main residue). Each panel's arrow scale is given in its title.</figcaption></figure>
 <figure><img src="notebook/fig/mod10_reader_vectors.png"><figcaption>Left: ‖Π<sub><i>D</i></sub><i>V<sub>c</sub></i>‖² / ‖<i>V<sub>c</sub></i>‖². Right: cosines
 between the sign-aligned projected read vectors <i>s<sub>c</sub></i> Π<sub><i>D</i></sub><i>V<sub>c</sub></i>.</figcaption></figure>
+<h3>4. The readers read with the dual basis of the residue means</h3>
+<p>The ten residue means μ<sub>0</sub> … μ<sub>9</sub> are linearly independent but far from orthogonal: they span
+a 10-dimensional space <i>M</i>, which is <i>D</i> plus one shared direction. A one-hot reader therefore cannot use
+μ<sub><i>r</i>₀</sub> itself as its read vector. The vector that responds 1 at <i>r</i>₀ and 0 at every other residue
+is the dual vector μ*<sub><i>r</i>₀</sub>, defined as follows.</p>
+<ul>
+<li><b>Dual basis.</b> μ*<sub><i>r</i></sub> ∈ <i>M</i> are the ten vectors with μ*<sub><i>r</i></sub> · μ<sub><i>r′</i></sub> = 1 if
+<i>r</i> = <i>r′</i> and 0 otherwise. They are the rows of the pseudo-inverse of [μ<sub>0</sub> … μ<sub>9</sub>].</li>
+<li><b>Notation.</b> Π<sub><i>M</i></sub> is the orthogonal projection onto <i>M</i>, and <i>r</i>₀ is the reader's main residue.
+<i>u</i> ∈ ℝ<sup>4096</sup> is the unit vector along the part of the mean of the ten μ<sub><i>r</i></sub> that lies
+outside <i>D</i>; this is the shared direction.</li>
+</ul>
+<figure><img src="notebook/fig/mod10_dual.png"><figcaption>From left: cosines of each reader's
+sign-aligned read vector Π<sub><i>M</i></sub><i>s<sub>c</sub></i><i>V<sub>c</sub></i> with every residue mean
+μ<sub><i>r</i></sub>; the same with every dual vector μ*<sub><i>r</i></sub>; both cosines at the reader's own residue;
+and each reader's largest side lobe, the most negative <i>s<sub>c</sub></i><i>m<sub>c</sub></i>(<i>r</i>) / max |<i>m<sub>c</sub></i>|
+over <i>r</i> ≠ <i>r</i>₀, against its dual cosine.</figcaption></figure>
+<ul>
+<li><b>The read vectors are the dual vectors.</b> The cosine of Π<sub><i>M</i></sub><i>s<sub>c</sub></i><i>V<sub>c</sub></i> with
+μ*<sub><i>r</i>₀</sub> is 0.85–1.00, and it is ≥ 0.98 for six readers: g43, g58, g62, u52, u54 and u794. The cosine
+with μ<sub><i>r</i>₀</sub> is 0.46–0.60. Off the main residue, the cosines with the dual vectors are small, as the
+second panel shows. Note that ‖Π<sub><i>M</i></sub><i>V<sub>c</sub></i>‖² / ‖<i>V<sub>c</sub></i>‖² is 0.87–0.97 for ten readers
+and 0.38 for u31.</li>
+<li><b>The side lobes are departures from the dual.</b> The six readers at cosine ≥ 0.98 have side lobes no larger
+than 0.19 in magnitude. Of the other five, all but u31 (−0.18) have the larger lobes: g69 at cosine 0.85 has −0.61,
+g59 at 0.93 has −0.42, g47 at 0.92 has −0.32, and u60 at 0.96 has −0.29.</li>
+</ul>
+<figure><img src="notebook/fig/mod10_dual_split.png"><figcaption>Left: cosine with the shared direction <i>u</i> of
+<i>s<sub>c</sub></i><i>V<sub>c</sub></i>, of μ<sub><i>r</i>₀</sub> and of μ*<sub><i>r</i>₀</sub>. Right: inside <i>D</i>, the cosine of
+Π<sub><i>D</i></sub><i>s<sub>c</sub></i><i>V<sub>c</sub></i> with Π<sub><i>D</i></sub>μ<sub><i>r</i>₀</sub> and with Π<sub><i>D</i></sub>μ*<sub><i>r</i>₀</sub>.</figcaption></figure>
+<p><b>Most of the difference is the shared direction.</b></p>
+<ul>
+<li>On average, <i>u</i> carries 76% of ‖μ<sub><i>r</i></sub>‖² but only 0.4% of ‖μ*<sub><i>r</i></sub>‖². The cosine with
+<i>u</i> is 0.84–0.89 for μ<sub><i>r</i>₀</sub>, 0.04–0.10 for μ*<sub><i>r</i>₀</sub>, and 0.02–0.10 for
+<i>s<sub>c</sub></i><i>V<sub>c</sub></i>.</li>
+<li>Inside <i>D</i>, the read vectors are close to both: the cosine is 0.92–0.98 with Π<sub><i>D</i></sub>μ<sub><i>r</i>₀</sub>
+and 0.85–1.00 with Π<sub><i>D</i></sub>μ*<sub><i>r</i>₀</sub>. The dual is closer for six readers (g43, g58, g62, u52,
+u54, u794), and the residue mean is closer for g47, g59, g69 and u31. u60 is equally close to both (0.96).</li>
+</ul>
+
 <p><b>No mod-2 or mod-5 readers.</b> A reader responds to a plane when that plane alone gives r² ≥ 0.05; this is the
 representation repository's threshold. Six readers respond only to the lower-period planes (<i>k</i> = 2, 4, 5), and
 their total r² is 0.06–0.12: u122 (0.12, mod 5), g158 (0.08), u129 (0.08, parity), g175 (0.07), g87 (0.07) and
 g75 (0.06).</p>
 
-<h3>4. What D contributes to the other readers</h3>
+<h3>5. What D contributes to the other readers</h3>
 <p>For each of the 142 other readers, the change is ‖<i>g<sub>c</sub><sup>D</sup></i>‖ / ‖<i>f<sub>c</sub></i>‖, with norms over
 <i>a</i> = 1 … 400, and the residual is ρ<sub><i>c</i></sub> = <i>f<sub>c</sub></i> − <i>g<sub>c</sub><sup>D</sup></i>. The change has median
 0.14, 90th percentile 0.26 and maximum 0.67 (g152). The next largest are u41 (0.59) and g175 (0.46).</p>

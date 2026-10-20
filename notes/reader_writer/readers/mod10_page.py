@@ -592,7 +592,8 @@ def main() -> None:
         ax.set_xticklabels(
             [f"{names[sel[j]]} (r={int(main_r[j])})" for j in po], rotation=90, fontsize=7
         )
-        ax.legend(frameon=False, fontsize=8, loc="upper right")
+    axs[0].legend(frameon=False, fontsize=8, loc="upper center", bbox_to_anchor=(0.5, 0.75))
+    axs[1].legend(frameon=False, fontsize=8, loc="lower left")
     fig.tight_layout()
     fig.savefig(fig_dir / "mod10_dual_split.png")
     plt.close(fig)
