@@ -465,6 +465,138 @@ def main() -> None:
     fig.savefig(fig_dir / "mod10_reader_vectors.png")
     plt.close(fig)
 
+    # the dual basis of the residue means: mu*_r . mu_r' = delta_rr', mu*_r in span{mu_r}
+    Qm = orth(mu.T)  # (4096, 10) orthonormal basis of span{mu_r}
+    dual = np.linalg.pinv(mu).T  # (10, 4096)
+    assert np.allclose(dual @ mu.T, np.eye(10), atol=1e-8)
+    Vm = Qm @ (Qm.T @ (sgn * V[:, sel]))  # Pi_M s_c V_c, (4096, |sel|)
+    res["sel_V_share_in_M"] = dict(
+        zip(
+            [names[i] for i in sel],
+            ((Vm**2).sum(0) / (V[:, sel] ** 2).sum(0)).tolist(),
+            strict=True,
+        )
+    )
+
+    def cosmat(X: np.ndarray, Y: np.ndarray) -> np.ndarray:
+        return (X / np.linalg.norm(X, axis=1, keepdims=True)) @ (
+            Y / np.linalg.norm(Y, axis=0, keepdims=True)
+        )
+
+    def cos(x: np.ndarray, y: np.ndarray) -> float:
+        return float(np.dot(x, y) / np.linalg.norm(x) / np.linalg.norm(y))
+
+    c_mu = cosmat(mu, Vm)  # (10, |sel|)
+    c_dual = cosmat(dual, Vm)
+    js = np.arange(len(sel))
+    res["cos_V_mu_main"] = dict(
+        zip([names[i] for i in sel], c_mu[main_r, js].tolist(), strict=True)
+    )
+    res["cos_V_dual_main"] = dict(
+        zip([names[i] for i in sel], c_dual[main_r, js].tolist(), strict=True)
+    )
+    lobe = np.array([np.delete(prof[:, j], main_r[j]).min() for j in js])
+    res["most_negative_lobe"] = dict(zip([names[i] for i in sel], lobe.tolist(), strict=True))
+    fig, axs = plt.subplots(1, 4, figsize=(17, 3.9), gridspec_kw={"width_ratios": [1, 1, 1.2, 1]})
+    for ax, c, t in (
+        (axs[0], c_mu, "cos(Π_M s_c V_c, μ_r)"),
+        (axs[1], c_dual, "cos(Π_M s_c V_c, μ*_r)"),
+    ):
+        im = ax.imshow(c[:, po].T, cmap="RdBu_r", vmin=-1, vmax=1, aspect="auto")
+        ax.set_yticks(range(len(sel)))
+        ax.set_yticklabels([f"{names[sel[j]]} (r={int(main_r[j])})" for j in po], fontsize=7)
+        ax.set_xticks(range(10))
+        ax.set_xlabel("r")
+        ax.set_title(t)
+        fig.colorbar(im, ax=ax, shrink=0.8)
+    w = 0.38
+    axs[2].bar(
+        np.arange(len(sel)) - w / 2, c_mu[main_r, js][po], w, color="#b5442d", label="with μ_r₀"
+    )
+    axs[2].bar(
+        np.arange(len(sel)) + w / 2, c_dual[main_r, js][po], w, color="#1f4e9c", label="with μ*_r₀"
+    )
+    axs[2].set_xticks(range(len(sel)))
+    axs[2].set_xticklabels([names[sel[j]] for j in po], rotation=90, fontsize=7)
+    axs[2].set_ylim(0, 1.05)
+    axs[2].set_title("cosine of Π_M s_c V_c at the reader's own residue r₀")
+    axs[2].legend(frameon=False, fontsize=8, loc="lower right")
+    axs[3].scatter(
+        c_dual[main_r, js], lobe, c=[cmap(int(r)) for r in main_r], s=30, edgecolor="k", lw=0.5
+    )
+    for j in js:
+        axs[3].annotate(
+            names[sel[j]],
+            (c_dual[main_r[j], j], lobe[j]),
+            fontsize=7,
+            xytext=(3, 2),
+            textcoords="offset points",
+        )
+    axs[3].axhline(0, color="#888", lw=0.6)
+    axs[3].set_xlabel("cos(Π_M s_c V_c, μ*_r₀)")
+    axs[3].set_ylabel("most negative s_c m_c(r) / max |m_c|, r ≠ r₀")
+    axs[3].set_title("side lobes appear when V_c leaves μ*_r₀")
+    fig.tight_layout()
+    fig.savefig(fig_dir / "mod10_dual.png")
+    plt.close(fig)
+
+    # where the primal / dual difference lives: the shared direction u outside D, and inside D
+    mubar = mu.mean(axis=0)
+    u = mubar - D @ (D.T @ mubar)
+    u = u / np.linalg.norm(u)
+    res["share_mu_along_u"] = float(((mu @ u) ** 2 / (mu**2).sum(1)).mean())
+    res["share_dual_along_u"] = float(((dual @ u) ** 2 / (dual**2).sum(1)).mean())
+    Vs_ = sgn * V[:, sel]
+    along = {
+        "V_c": (u @ Vs_) / np.linalg.norm(Vs_, axis=0),
+        "μ_r₀": (mu[main_r] @ u) / np.linalg.norm(mu[main_r], axis=1),
+        "μ*_r₀": (dual[main_r] @ u) / np.linalg.norm(dual[main_r], axis=1),
+    }
+    VD = D @ (D.T @ Vs_)
+    cD_mu = np.array([cos(VD[:, j], D @ (D.T @ mu[main_r[j]])) for j in js])
+    cD_dual = np.array([cos(VD[:, j], D @ (D.T @ dual[main_r[j]])) for j in js])
+    res["along_u"] = {
+        k: dict(zip([names[i] for i in sel], v.tolist(), strict=True)) for k, v in along.items()
+    }
+    res["cos_in_D_mu_main"] = dict(zip([names[i] for i in sel], cD_mu.tolist(), strict=True))
+    res["cos_in_D_dual_main"] = dict(zip([names[i] for i in sel], cD_dual.tolist(), strict=True))
+    fig, axs = plt.subplots(1, 2, figsize=(12, 3.8))
+    w = 0.27
+    for t, (lab, v) in enumerate(along.items()):
+        axs[0].bar(
+            np.arange(len(sel)) + (t - 1) * w,
+            v[po],
+            w,
+            label=lab,
+            color=["#7a7a7a", "#b5442d", "#1f4e9c"][t],
+        )
+    axs[0].set_title("cosine with the shared direction u (outside D)")
+    axs[1].bar(
+        np.arange(len(sel)) - w / 2,
+        cD_mu[po],
+        w,
+        color="#b5442d",
+        label="cos(Π_D s_c V_c, Π_D μ_r₀)",
+    )
+    axs[1].bar(
+        np.arange(len(sel)) + w / 2,
+        cD_dual[po],
+        w,
+        color="#1f4e9c",
+        label="cos(Π_D s_c V_c, Π_D μ*_r₀)",
+    )
+    axs[1].set_ylim(0.5, 1.02)
+    axs[1].set_title("inside D")
+    for ax in axs:
+        ax.set_xticks(range(len(sel)))
+        ax.set_xticklabels(
+            [f"{names[sel[j]]} (r={int(main_r[j])})" for j in po], rotation=90, fontsize=7
+        )
+        ax.legend(frameon=False, fontsize=8, loc="upper right")
+    fig.tight_layout()
+    fig.savefig(fig_dir / "mod10_dual_split.png")
+    plt.close(fig)
+
     # 3) embedding
     z = embedding_inputs()  # (400, 4096)
     eps = np.stack([z[rr == r].mean(axis=0) for r in range(10)])
