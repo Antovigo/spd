@@ -1,13 +1,14 @@
 """Create the representation repository (repo.py) and seed it with the block-0 a mod 10 Fourier planes.
 
 Representations: for k in 1..5, span{Re Psi_k, Im Psi_k} of the block-0 MLP input at position 1, with
-Psi_k = sum_r mu_r exp(-2 pi i k r / 10), mu_r the residue means of x_V(a) - trend (notation of
+Psi_k = sum_r mu_r exp(-2 pi i k r / 10), mu_r the mean of x_V(a) over a = 1..400 with a mod 10 = r (notation of
 ../readers/mod10_L0.py; i is the imaginary unit). k = 1, 3 carry a mod 10, k = 2, 4 carry a mod 5,
 k = 5 (a line) carries a mod 2.
 
 Readers: every kept alive gate / up component of blocks 0..31, positions unmeasured (null), except
-block 0 at position 1. There, for each representation R, r2_R = 1 - sum_a (f~ - g_R)^2 / sum_a f~^2 over
-a = 1..400, with f~ = f_c - mean f_c and g_R = V_c . Pi_R (x_V(a) - mean_a x_V) / ||V_c||. responds_to
+block 0 at position 1. There, for each representation R, r2_R = 1 - sum_a (f_c - g_R)^2 / sum_a f_c^2 over
+a = 1..400, with g_R = V_c . Pi_R x_V(a) / ||V_c||. Nothing is centred: the network has no biases, so
+the zero of every quantity is the zero of the activation space. responds_to
 holds the R with r2_R >= the threshold, and r2 is the same quantity for the span of responds_to.
 
     python seed_l0_mod10.py [--threshold 0.05] [--commit SHA]
@@ -16,13 +17,14 @@ holds the R with r2_R >= the threshold, and r2 is the same quantity for the span
 import argparse
 import datetime
 import json
+import shutil
 import sys
 from pathlib import Path
 
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "readers"))
-from mod10_L0 import FILTER, SRC, VALID, A, N, class_means, kept_readers, moving_trend  # noqa: E402
+from mod10_L0 import FILTER, SRC, A, N, kept_readers  # noqa: E402
 from repo import ROOT, Repo  # noqa: E402
 
 ENCODES = {1: "a mod 10", 2: "a mod 5", 3: "a mod 10", 4: "a mod 5", 5: "a mod 2"}
@@ -72,9 +74,12 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--threshold", type=float, default=0.05)
     ap.add_argument("--commit", default="unknown")
+    ap.add_argument("--replace", action="store_true", help="delete an existing repository first")
     args = ap.parse_args()
     today = datetime.date.today().isoformat()
     readers = all_kept_readers()
+    if args.replace and (ROOT / "meta.json").exists():
+        shutil.rmtree(ROOT)
     repo = Repo.create(
         ROOT,
         {
@@ -87,6 +92,7 @@ def main() -> None:
             "pool": "a, b in 1..400, ops + then -",
             "positions": {"1": "a", "2": "op", "3": "b", "4": "="},
             "response_threshold": args.threshold,
+            "convention": "no centring or detrending: zero is the zero of the activation space (the network has no biases)",
             "response_threshold_meaning": "a reader responds to a representation when projecting its input onto "
             "that representation alone explains >= this share of its variance",
             "created": today,
@@ -102,9 +108,10 @@ def main() -> None:
     F = T / vnorm
     W = V @ np.linalg.pinv(V.T @ V)
     xv = (W @ T.T).T
-    xc = xv - xv.mean(axis=0)
-    mu = W @ class_means(T - moving_trend(T, 10), 10, VALID).T
-    muc = mu - mu.mean(axis=1, keepdims=True)
+    # no centring and no detrending anywhere: the network has no biases, so zero is the zero of the space
+    mu = np.stack(
+        [xv[r == A % 10].mean(axis=0) for r in range(10)], axis=1
+    )  # (4096, 10) raw residue means
     rr = np.arange(10)
     prov = {
         "script": "notes/reader_writer/repr_repo/seed_l0_mod10.py",
@@ -133,16 +140,15 @@ def main() -> None:
                 "npz_keys": {
                     "basis": "(4096, d) orthonormal basis",
                     "re_im": "(4096, 2 or 1) Re Psi_k, Im Psi_k before orthonormalising",
-                    "residue_coords": "(10, d) coordinates of mu_r - mu_bar in basis, row r",
+                    "residue_coords": "(10, d) coordinates of mu_r (raw, uncentred) in basis, row r",
                 },
             },
             "provenance": prov,
         }
-        repo.add_representation(rep, {"basis": B, "re_im": raw, "residue_coords": muc.T @ B})
+        repo.add_representation(rep, {"basis": B, "re_im": raw, "residue_coords": mu.T @ B})
         rep_ids.append(rid)
 
-    Fc = F - F.mean(axis=0)
-    per = {rid: r2(Fc, xc, repo.basis(rid), V, vnorm) for rid in rep_ids}
+    per = {rid: r2(F, xv, repo.basis(rid), V, vnorm) for rid in rep_ids}
     counts = dict.fromkeys(rep_ids, 0)
     for j, name in enumerate(names):
         r2_by = {rid: float(per[rid][j]) for rid in rep_ids}
@@ -152,7 +158,7 @@ def main() -> None:
         total = 0.0
         if resp:
             B = orth(np.concatenate([repo.basis(rid) for rid in resp], 1))
-            total = float(r2(Fc[:, [j]], xc, B, V[:, [j]], vnorm[[j]])[0])
+            total = float(r2(F[:, [j]], xv, B, V[:, [j]], vnorm[[j]])[0])
         kind = {"g": "gate", "u": "up"}[name[0]]
         repo.set_position(
             f"L0.{kind}.{name[1:]}",
@@ -161,7 +167,7 @@ def main() -> None:
                 "r2": total,
                 "responds_to": resp,
                 "r2_by_rep": r2_by,
-                "method": "input x_V(a) replaced by its projection onto span(responds_to), centred; "
+                "method": "input x_V(a) replaced by its projection onto span(responds_to), uncentred: r2 = 1 - sum (f - g)^2 / sum f^2; "
                 "a = 1..400 (position 1 depends on a only)",
                 "updated": today,
             },
