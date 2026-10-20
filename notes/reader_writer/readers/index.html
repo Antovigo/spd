@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MLP readers</title>
+<style>
+:root {
+  --bg: #fafaf8; --panel: #ffffff; --fg: #1d1d1b; --muted: #6b6b66; --line: #deded8;
+  --accent: #2a5db0; --sel: #e8b200;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #161615; --panel: #1f1f1d; --fg: #e9e9e4; --muted: #9a9a93; --line: #34342f;
+    --accent: #7ea6ec; --sel: #f2c230;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #161615; --panel: #1f1f1d; --fg: #e9e9e4; --muted: #9a9a93; --line: #34342f;
+  --accent: #7ea6ec; --sel: #f2c230;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body { background: var(--bg); color: var(--fg); font: 13px/1.4 system-ui, sans-serif; display: flex; flex-direction: column; }
+header { display: flex; gap: 16px; align-items: center; padding: 8px 16px; border-bottom: 1px solid var(--line); background: var(--panel); flex-wrap: wrap; }
+header h1 { font-size: 15px; margin: 0 8px 0 0; }
+header label { color: var(--muted); }
+select { font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 2px 4px; }
+.note { color: var(--muted); font-size: 12px; }
+main { flex: 1; display: flex; min-height: 0; }
+#mini { width: 25%; min-width: 220px; border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
+#miniHead { padding: 6px 10px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 12px; }
+#tiles { flex: 1; overflow-y: auto; padding: 8px; display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; align-content: start; }
+.tile { border: 2px solid transparent; border-radius: 4px; padding: 2px; cursor: pointer; background: var(--panel); }
+.tile:hover { border-color: var(--line); }
+.tile.sel { border-color: var(--sel); }
+.tile canvas { width: 100%; display: block; image-rendering: pixelated; }
+.tile .lab { font-size: 11px; color: var(--muted); display: flex; justify-content: space-between; }
+#work { flex: 1; overflow: auto; padding: 16px 24px; }
+#work h2 { margin: 0 0 4px; font-size: 16px; }
+.grids { display: flex; gap: 48px; flex-wrap: wrap; margin-top: 16px; }
+.frame { position: relative; padding-left: 34px; padding-bottom: 28px; }
+.frame .ttl { font-weight: 600; margin-bottom: 4px; }
+.frame canvas { display: block; image-rendering: pixelated; border: 1px solid var(--line); cursor: crosshair; }
+.yt span, .xt span { position: absolute; font-size: 10px; color: var(--muted); }
+.yt span { left: 0; width: 30px; text-align: right; transform: translateY(-50%); }
+.xt span { transform: translateX(-50%); }
+.yl, .xl { position: absolute; color: var(--muted); font-size: 11px; }
+.cbar { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+.cbar canvas { width: 300px; height: 12px; border: 1px solid var(--line); }
+#hover { margin-top: 10px; min-height: 18px; font-variant-numeric: tabular-nums; }
+table.stats { border-collapse: collapse; margin-top: 10px; font-variant-numeric: tabular-nums; }
+table.stats td, table.stats th { padding: 2px 10px 2px 0; text-align: left; }
+.defs { margin-top: 22px; color: var(--muted); font-size: 12px; max-width: 900px; }
+.defs code { color: var(--fg); }
+.tabs { display: flex; gap: 4px; margin-right: 8px; }
+.tabs button { font: inherit; color: var(--muted); background: none; border: 1px solid var(--line); border-radius: 4px; padding: 3px 10px; cursor: pointer; }
+.tabs button.on { color: var(--fg); border-color: var(--accent); }
+.readersOnly.hidden { display: none; }
+#notebook { flex: 1; overflow: auto; padding: 16px 24px; display: none; }
+#notebook article { max-width: 1100px; margin: 0 auto 48px; }
+#notebook h2 { font-size: 18px; margin: 0 0 4px; }
+#notebook h3 { font-size: 14px; margin: 20px 0 6px; }
+#notebook p, #notebook li { line-height: 1.55; max-width: 900px; }
+#notebook img { max-width: 100%; border: 1px solid var(--line); background: #fff; margin: 8px 0; }
+#notebook figcaption { color: var(--muted); font-size: 12px; max-width: 900px; }
+#notebook table { border-collapse: collapse; font-variant-numeric: tabular-nums; }
+#notebook td, #notebook th { padding: 2px 10px 2px 0; text-align: left; border-bottom: 1px solid var(--line); }
+#notebook code { font-size: 12px; }
+#nbToc { color: var(--muted); font-size: 12px; margin-bottom: 16px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>MLP readers</h1>
+  <div class="tabs"><button id="tabR" class="on">Readers</button><button id="tabN">Notebook</button></div>
+  <span class="readersOnly" id="ctl"><label>layer <select id="layer"></select></label>
+  <label>position <select id="pos"></select></label>
+  <label>kind <select id="kind"><option value="all">gate + up</option><option value="gate">gate</option><option value="up">up</option></select></label>
+  <span class="note" id="maskNote"></span></span>
+</header>
+<main>
+  <section id="notebook"><div id="nbToc"></div><div id="nbBody"><p class="note">No notebook entries yet.</p></div></section>
+  <section id="mini">
+    <div id="miniHead">loading…</div>
+    <div id="tiles"></div>
+  </section>
+  <section id="work"><p class="note">Pick a reader in the minimap (or use ↑/↓ keys).</p></section>
+</main>
+<script src="data/meta.js"></script>
+<script src="notebook/entries.js" onerror="window.NOTEBOOK = []"></script>
+<script>
+"use strict";
+const M = window.META;
+const OP_NAMES = { "+": "a + b", "-": "a − b" };
+const DIV_STOPS = [[5,48,97],[146,197,222],[247,247,247],[244,165,130],[103,0,31]]; // ~RdBu_r
+const LUT = new Uint8ClampedArray(256 * 3);
+for (let q = 0; q < 256; q++) {
+  const x = q / 255 * (DIV_STOPS.length - 1), i = Math.min(Math.floor(x), DIV_STOPS.length - 2), f = x - i;
+  for (let c = 0; c < 3; c++) LUT[q * 3 + c] = DIV_STOPS[i][c] * (1 - f) + DIV_STOPS[i + 1][c] * f;
+}
+const $ = id => document.getElementById(id);
+const thumbs = {}, fulls = {}, waiting = {};
+window.regThumbs = d => { thumbs[d.key] = { ...d, q: b64u8(d.grid) }; resolveKey(d.key); };
+window.regFull = d => { fulls[d.key] = { ...d, q: b64u8(d.grid) }; resolveKey(d.key); };
+function b64u8(s) { const b = atob(s), u = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) u[i] = b.charCodeAt(i); return u; }
+function resolveKey(k) { (waiting[k] || []).forEach(f => f()); delete waiting[k]; }
+function load(store, key, file) {
+  if (store[key]) return Promise.resolve(store[key]);
+  return new Promise((res, rej) => {
+    const first = !waiting[key];
+    (waiting[key] = waiting[key] || []).push(() => res(store[key]));
+    if (!first) return;
+    const s = document.createElement("script");
+    s.src = file; s.onerror = () => rej(new Error("missing " + file));
+    document.head.appendChild(s);
+  });
+}
+function paint(canvas, q, offset, n) {
+  canvas.width = n; canvas.height = n;
+  const g = canvas.getContext("2d"), img = g.createImageData(n, n);
+  for (let i = 0; i < n * n; i++) {
+    const v = q[offset + i] * 3, o = i * 4;
+    img.data[o] = LUT[v]; img.data[o + 1] = LUT[v + 1]; img.data[o + 2] = LUT[v + 2]; img.data[o + 3] = 255;
+  }
+  g.putImageData(img, 0, 0);
+}
+const fmt = v => Math.abs(v) >= 100 ? v.toFixed(1) : Math.abs(v) >= 1 ? v.toFixed(3) : v.toPrecision(3);
+
+let state = { layer: null, pos: null, kind: "all", sel: null, list: [] };
+const layers = Object.keys(M.layers).map(Number).sort((x, y) => x - y);
+$("layer").innerHTML = layers.map(l => `<option value="${l}">${l} (${M.layers[l].readers.length})</option>`).join("");
+$("pos").innerHTML = M.positions.map(t => `<option value="${t}">${t}: ${M.position_labels[t]}</option>`).join("");
+$("maskNote").textContent = `pruned readers hidden: ${M.mask_label}`;
+const saved = (() => { try { return JSON.parse(localStorage.getItem("readers_view") || "{}"); } catch (e) { return {}; } })();
+$("layer").value = layers.includes(saved.layer) ? saved.layer : (layers.includes(18) ? 18 : layers[0]);
+$("pos").value = M.positions.includes(saved.pos) ? saved.pos : M.positions[M.positions.length - 1];
+if (saved.kind) $("kind").value = saved.kind;
+["layer", "pos", "kind"].forEach(id => $(id).addEventListener("change", () => refresh()));
+
+async function refresh() {
+  const layer = +$("layer").value, pos = +$("pos").value, kind = $("kind").value;
+  const prevSel = state.sel;
+  state = { layer, pos, kind, sel: null, list: [] };
+  try { localStorage.setItem("readers_view", JSON.stringify({ layer, pos, kind })); } catch (e) {}
+  const key = `L${layer}/p${pos}`;
+  $("miniHead").textContent = "loading…";
+  const T = await load(thumbs, key, `data/${key}/thumbs.js`);
+  if (state.layer !== layer || state.pos !== pos) return;
+  const readers = M.layers[layer].readers;
+  const n = T.n, cells = n * n;
+  const tiles = $("tiles"); tiles.innerHTML = "";
+  readers.forEach((r, i) => {
+    if (kind !== "all" && r.kind !== kind) return;
+    const div = document.createElement("div"); div.className = "tile"; div.dataset.i = i;
+    const c = document.createElement("canvas"); c.width = 2 * n + 2; c.height = n;
+    const g = c.getContext("2d");
+    M.ops.forEach((_, oi) => {
+      const tmp = document.createElement("canvas"); paint(tmp, T.q, (i * M.ops.length + oi) * cells, n);
+      g.drawImage(tmp, oi * (n + 2), 0);
+    });
+    div.appendChild(c);
+    div.insertAdjacentHTML("beforeend", `<div class="lab"><span>${r.kind} ${r.id}</span><span>m ${fmt(T.full_absmax[i])}</span></div>`);
+    div.onclick = () => select(i);
+    tiles.appendChild(div);
+    state.list.push(i);
+  });
+  $("miniHead").textContent = `layer ${layer}, position ${pos} (${M.position_labels[pos]}): ${state.list.length} readers · left half a + b, right half a − b (${M.pool}×${M.pool}-cell means)`;
+  if (prevSel !== null && state.list.includes(prevSel.i) && prevSel.layer === layer) select(prevSel.i);
+  else if (state.list.length) select(state.list[0]);
+}
+
+async function select(i) {
+  const { layer, pos } = state, r = M.layers[layer].readers[i];
+  state.sel = { i, layer };
+  document.querySelectorAll(".tile").forEach(t => t.classList.toggle("sel", +t.dataset.i === i));
+  const tileEl = document.querySelector(`.tile[data-i="${i}"]`);
+  if (tileEl) tileEl.scrollIntoView({ block: "nearest" });
+  const key = `L${layer}/p${pos}/${r.kind}${r.id}`;
+  const F = await load(fulls, key, `data/${key}.js`);
+  if (state.sel.i !== i || state.layer !== layer || state.pos !== pos) return;
+  render(F, r, layer, pos);
+}
+
+function ticks(n) { const out = [1]; for (let v = 50; v <= n; v += 50) out.push(v); return out; }
+
+function render(F, r, layer, pos) {
+  const n = M.n_a, cells = n * n, m = F.absmax;
+  const site = `layers.${layer}.mlp.${r.kind}_proj`;
+  const w = $("work");
+  w.innerHTML = `<h2>${site}:${r.id}</h2>
+    <div class="note">${r.kind} reader of block ${layer} · position ${pos} (${M.position_labels[pos]}) · ‖V‖ = ${fmt(M.layers[layer].v_norm[i_of(r, layer)])} · 1 pixel per prompt</div>
+    <table class="stats"><tr><th></th>${M.ops.map(o => `<th>${OP_NAMES[o]}</th>`).join("")}</tr>
+      <tr><td>mean of v</td>${F.mean.map(v => `<td>${fmt(v)}</td>`).join("")}</tr>
+      <tr><td>std of v</td>${F.std.map(v => `<td>${fmt(v)}</td>`).join("")}</tr></table>
+    <div class="grids" id="grids"></div>
+    <div class="cbar"><span>−${fmt(m)}</span><canvas id="cb" width="256" height="1"></canvas><span>+${fmt(m)}</span><span class="note">v (shared scale, both ops)</span></div>
+    <div id="hover" class="note">hover a grid for values</div>
+    <div class="defs">
+      <b>Definitions.</b> <code>a</code>, <code>b</code>: the integer operands of the prompt <code>a op b =</code>, each 1..${M.n_a};
+      rows are <code>a</code> (top = 1), columns are <code>b</code> (left = 1). Position <code>t</code> ∈ {1: a, 2: op, 3: b, 4: =} is the token
+      position whose block-${layer} MLP input is read (0 = BOS is omitted: it is the same on every prompt).
+      <code>x</code> ∈ ℝ<sup>4096</sup>: the block-${layer} MLP input (post-RMSNorm) at position <code>t</code> in the alive-only model
+      (every component of the ceiling filter <code>addsub-08-last-pos</code> on, everything else and the weight delta off; run p-ba8b0c08, step 40000).
+      <code>V</code> ∈ ℝ<sup>4096</sup>: this component's read vector. Plotted value <code>v = x · V / ‖V‖</code> (real).
+      <code>m</code>: max |<code>v</code>| over both grids of this component at this position (the colour scale ±m; stored as 256 levels, so values are ±m/255 accurate).
+      Minimap thumbnails are ${M.pool}×${M.pool}-cell means, each scaled to its own max |mean|.
+    </div>`;
+  const cb = $("cb"), g = cb.getContext("2d"), img = g.createImageData(256, 1);
+  for (let q = 0; q < 256; q++) { img.data[q*4] = LUT[q*3]; img.data[q*4+1] = LUT[q*3+1]; img.data[q*4+2] = LUT[q*3+2]; img.data[q*4+3] = 255; }
+  g.putImageData(img, 0, 0);
+  const grids = $("grids");
+  M.ops.forEach((op, oi) => {
+    const fr = document.createElement("div"); fr.className = "frame";
+    fr.innerHTML = `<div class="ttl">${OP_NAMES[op]}</div>`;
+    const c = document.createElement("canvas");
+    c.style.width = n + "px"; c.style.height = n + "px";
+    paint(c, F.q, oi * cells, n);
+    fr.appendChild(c);
+    const top = 22;
+    fr.insertAdjacentHTML("beforeend",
+      `<div class="yt">${ticks(n).map(v => `<span style="top:${top + v - 0.5}px">${v}</span>`).join("")}</div>
+       <div class="xt">${ticks(n).map(v => `<span style="left:${34 + v - 0.5}px; top:${top + n + 4}px">${v}</span>`).join("")}</div>
+       <div class="xl" style="left:${34 + n / 2}px; top:${top + n + 16}px">b</div>
+       <div class="yl" style="left:-4px; top:${top + n / 2}px">a</div>`);
+    c.addEventListener("mousemove", ev => {
+      const rc = c.getBoundingClientRect();
+      const bi = Math.floor((ev.clientX - rc.left) / rc.width * n), ai = Math.floor((ev.clientY - rc.top) / rc.height * n);
+      if (ai < 0 || bi < 0 || ai >= n || bi >= n) return;
+      const qv = F.q[oi * cells + ai * n + bi], v = (qv / 127.5 - 1) * m;
+      const a = M.a_min + ai, b = M.b_min + bi, res = op === "+" ? a + b : a - b;
+      $("hover").textContent = `${a} ${op === "+" ? "+" : "−"} ${b} = ${res}:  v = ${fmt(v)}`;
+    });
+    grids.appendChild(fr);
+  });
+}
+function i_of(r, layer) { return M.layers[layer].readers.indexOf(r); }
+
+document.addEventListener("keydown", ev => {
+  if (!state.sel || !["ArrowUp", "ArrowDown"].includes(ev.key) || ev.target.tagName === "SELECT") return;
+  const k = state.list.indexOf(state.sel.i) + (ev.key === "ArrowDown" ? 1 : -1);
+  if (k >= 0 && k < state.list.length) { ev.preventDefault(); select(state.list[k]); }
+});
+// notebook tab: entries from notebook/entries.js, newest first
+function showTab(nb) {
+  $("tabR").classList.toggle("on", !nb); $("tabN").classList.toggle("on", nb);
+  $("notebook").style.display = nb ? "block" : "none";
+  $("mini").style.display = nb ? "none" : "flex";
+  $("work").style.display = nb ? "none" : "block";
+  $("ctl").classList.toggle("hidden", nb);
+  try { localStorage.setItem("readers_tab", nb ? "nb" : "r"); } catch (e) {}
+}
+$("tabR").onclick = () => showTab(false); $("tabN").onclick = () => showTab(true);
+const NB = (window.NOTEBOOK || []).slice().reverse();
+if (NB.length) {
+  $("nbToc").innerHTML = "Entries: " + NB.map(e => `<a href="#nb-${e.id}">${e.title}</a> (${e.date})`).join(" · ");
+  $("nbBody").innerHTML = NB.map(e => `<article id="nb-${e.id}"><h2>${e.title}</h2><div class="note">${e.date}</div>${e.html}</article>`).join("");
+}
+try { if (localStorage.getItem("readers_tab") === "nb") showTab(true); } catch (e) {}
+refresh();
+</script>
+</body>
+</html>
