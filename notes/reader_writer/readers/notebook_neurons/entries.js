@@ -125,7 +125,59 @@ lower-period planes (<i>k</i> = 2, 4, 5). Unlike the decomposition, one of them 
 <i>a</i> mod 5). The next are g#5727 (0.29), g#9679 (0.27) and u#9679 (0.23). The strongest parity-only neuron,
 u#8062, gets r² 0.17.</p>
 
-<h3>4. Neurons against components</h3>
+<h3>4. Do the neurons read with the dual basis of the residue means?</h3>
+<p>This repeats the dual-basis test of the component page. The ten residue means μ<sub>0</sub> … μ<sub>9</sub> span a
+10-dimensional space <i>M</i>: <i>D</i> plus one shared direction. A reader that responds 1 at residue
+<i>r</i>₀ and 0 at the other residues has to read with the dual vector μ*<sub><i>r</i>₀</sub> rather than with
+μ<sub><i>r</i>₀</sub>.</p>
+<ul>
+<li><b>Dual basis.</b> μ*<sub><i>r</i></sub> ∈ <i>M</i> are the ten vectors with μ*<sub><i>r</i></sub> · μ<sub><i>r′</i></sub> = 1 if <i>r</i> = <i>r′</i> and
+0 otherwise. They are the rows of the pseudo-inverse of [μ<sub>0</sub> … μ<sub>9</sub>].</li>
+<li><b>Projections and directions.</b> Π<sub><i>M</i></sub> is the orthogonal projection onto <i>M</i>, and <i>r</i>₀ is the neuron's main
+residue. <i>u</i> is the unit vector along the part of the mean of the ten μ<sub><i>r</i></sub> that lies outside
+<i>D</i>; it carries on average 78% of ‖μ<sub><i>r</i></sub>‖² and 0.3% of ‖μ*<sub><i>r</i></sub>‖².</li>
+<li><b>Groups.</b> "Clean" neurons are the 19 whose main-residue activations separate from all other residues. The
+five "mixed" neurons are g#6837, u#2147, u#1900, g#1179 and g#291.</li>
+</ul>
+<figure><img src="notebook/fig/n_dual.png"><figcaption>From left:
+<ol>
+<li>cosines of each neuron's sign-aligned weight row inside <i>M</i>, Π<sub><i>M</i></sub><i>s<sub>n</sub></i><i>w<sub>n</sub></i>, with every
+residue mean μ<sub><i>r</i></sub>;</li>
+<li>the same with every dual vector μ*<sub><i>r</i></sub>;</li>
+<li>both cosines at the neuron's own residue;</li>
+<li>each neuron's most negative side lobe, the minimum of <i>s<sub>n</sub></i><i>m<sub>n</sub></i>(<i>r</i>) / max |<i>m<sub>n</sub></i>| over
+<i>r</i> ≠ <i>r</i>₀, against its dual cosine.</li>
+</ol>
+Neurons are grouped by main residue.</figcaption></figure>
+<p><b>The part of each neuron in <i>M</i> is dual-like.</b></p>
+<ul>
+<li><b>Cosines at the main residue.</b> For the 19 clean neurons, the cosine of Π<sub><i>M</i></sub><i>s<sub>n</sub></i><i>w<sub>n</sub></i>
+with μ*<sub><i>r</i>₀</sub> is 0.84–0.99, and it is ≥ 0.95 for ten of them. The cosine with μ<sub><i>r</i>₀</sub> is 0.38–0.61.
+The components gave 0.85–1.00 and 0.46–0.60.</li>
+<li><b>Mixed neurons.</b> They are further from the dual: g#291 0.90, g#1179 0.74, u#1900 0.71, g#6837 0.64 and
+u#2147 0.53.</li>
+<li><b>How much of each row this covers.</b> Only a small part of each neuron is in <i>M</i>:
+‖Π<sub><i>M</i></sub><i>w<sub>n</sub></i>‖² / ‖<i>w<sub>n</sub></i>‖² is 0.14–0.32 for the clean neurons and 0.03–0.13 for the mixed ones,
+against 0.87–0.97 for ten components.</li>
+<li><b>Off the main residue.</b> The cosines with the other dual vectors are larger than for the components: the
+largest |cosine| at <i>r</i> ≠ <i>r</i>₀ is 0.12–0.38 for the clean neurons.</li>
+<li><b>Side lobes.</b> Across the clean neurons, the most negative side lobe (−0.42 to −0.05) grows as the dual
+cosine falls; the correlation between the two is 0.53. Among the ten clean neurons with dual cosine ≥ 0.95, the
+lobes are −0.30 to −0.05.</li>
+</ul>
+<figure><img src="notebook/fig/n_dual_split.png"><figcaption>Left: cosine with the shared direction <i>u</i> of
+<i>s<sub>n</sub></i><i>w<sub>n</sub></i>, of μ<sub><i>r</i>₀</sub> and of μ*<sub><i>r</i>₀</sub>. Right: inside <i>D</i>, the cosine of
+Π<sub><i>D</i></sub><i>s<sub>n</sub></i><i>w<sub>n</sub></i> with Π<sub><i>D</i></sub>μ<sub><i>r</i>₀</sub> and with Π<sub><i>D</i></sub>μ*<sub><i>r</i>₀</sub>.</figcaption></figure>
+<p><b>As for the components, the difference is the shared direction.</b></p>
+<ul>
+<li>Every neuron's weight row is nearly orthogonal to <i>u</i>, with cosine −0.02 to 0.07. Against that, the cosine
+with <i>u</i> is 0.85–0.89 for μ<sub><i>r</i>₀</sub> and 0.04–0.10 for μ*<sub><i>r</i>₀</sub>.</li>
+<li>Inside <i>D</i>, the clean neurons are close to both: the cosine is 0.81–1.00 with Π<sub><i>D</i></sub>μ<sub><i>r</i>₀</sub> and
+0.84–0.99 with Π<sub><i>D</i></sub>μ*<sub><i>r</i>₀</sub>. The residue mean is closer for 13 of them and the dual for 6 (g#7854,
+g#13010, u#5708, u#8969, u#10825, u#13630).</li>
+</ul>
+
+<h3>5. Neurons against components</h3>
 <p>For each of the decomposition's 11 mod-10 components, take the neuron row with the largest |cosine| to its read
 vector. Every gate component's best match is a gate row with the same main residue (cosine 0.61–0.70). The same holds for
 every up component except u31, whose best match is not a mod-10 neuron:</p>
@@ -144,7 +196,7 @@ every up component except u31, whose best match is not a mod-10 neuron:</p>
 <p>The cosines are well below 1. This fits the component read vectors lying almost entirely in <i>D</i> while the
 neuron rows lie mostly outside it.</p>
 
-<h3>5. What D contributes to the other neurons</h3>
+<h3>6. What D contributes to the other neurons</h3>
 <p>For each of the 28,648 other neurons, the change is ‖<i>g<sub>n</sub><sup>D</sup></i>‖ / ‖<i>f<sub>n</sub></i>‖, with norms over
 <i>a</i> = 1 … 400, and the residual is ρ<sub><i>n</i></sub> = <i>f<sub>n</sub></i> − <i>g<sub>n</sub><sup>D</sup></i>. The change has median
 0.20, 90th percentile 0.29, 99th percentile 0.37 and maximum 0.74 (u#11614). The next are g#11563 (0.69) and u#5727

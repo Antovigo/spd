@@ -375,6 +375,108 @@ def main() -> None:
     res["arrow_cos_range"] = [float(cosres.min()), float(cosres.max())]
     res["arrow_cos_q05"] = float(np.quantile(cosres, 0.05))
 
+    # dual basis of the residue means: mu*_r . mu_r' = delta_rr', mu*_r in M = span{mu_r}
+    Qm = orth(mu.T)
+    dual = np.linalg.pinv(mu).T  # (10, 4096)
+    assert np.allclose(dual @ mu.T, np.eye(10), atol=1e-8)
+    Ws = (Wu[sel] * sgn[:, None]).T  # (4096, |sel|) sign-aligned unit rows
+    Wm = Qm @ (Qm.T @ Ws)
+    js = np.arange(sel.size)
+    labs = [names[i] for i in sel]
+    res["share_in_M"] = dict(zip(labs, ((Wm**2).sum(0)).tolist(), strict=True))
+
+    def cosmat(X: np.ndarray, Y: np.ndarray) -> np.ndarray:
+        return (X / np.linalg.norm(X, axis=1, keepdims=True)) @ (
+            Y / np.linalg.norm(Y, axis=0, keepdims=True)
+        )
+
+    def cosv(x: np.ndarray, y: np.ndarray) -> float:
+        return float(np.dot(x, y) / np.linalg.norm(x) / np.linalg.norm(y))
+
+    c_mu, c_dual = cosmat(mu, Wm), cosmat(dual, Wm)
+    res["cos_mu_main"] = dict(zip(labs, c_mu[main_r, js].tolist(), strict=True))
+    res["cos_dual_main"] = dict(zip(labs, c_dual[main_r, js].tolist(), strict=True))
+    offd = np.array([np.abs(np.delete(c_dual[:, j], main_r[j])).max() for j in js])
+    res["max_offresidue_abs_cos_dual"] = dict(zip(labs, offd.tolist(), strict=True))
+    lobe = np.array([np.delete(nm[:, j], main_r[j]).min() for j in js])
+    res["most_negative_lobe"] = dict(zip(labs, lobe.tolist(), strict=True))
+    fig, axs = plt.subplots(1, 4, figsize=(17, 5.2), gridspec_kw={"width_ratios": [1, 1, 1.3, 1]})
+    for ax, c, t in (
+        (axs[0], c_mu, "cos(Π_M s_n w_n, μ_r)"),
+        (axs[1], c_dual, "cos(Π_M s_n w_n, μ*_r)"),
+    ):
+        im = ax.imshow(c[:, pk].T, cmap="RdBu_r", vmin=-1, vmax=1, aspect="auto")
+        ax.set_yticks(range(sel.size))
+        ax.set_yticklabels([f"{names[sel[j]]} (r={int(main_r[j])})" for j in pk], fontsize=6)
+        ax.set_xticks(range(10))
+        ax.set_xlabel("r")
+        ax.set_title(t)
+        fig.colorbar(im, ax=ax, shrink=0.8)
+    wb = 0.38
+    axs[2].bar(js - wb / 2, c_mu[main_r, js][pk], wb, color="#b5442d", label="with μ_r₀")
+    axs[2].bar(js + wb / 2, c_dual[main_r, js][pk], wb, color="#1f4e9c", label="with μ*_r₀")
+    axs[2].set_xticks(js)
+    axs[2].set_xticklabels([names[sel[j]] for j in pk], rotation=90, fontsize=6)
+    axs[2].set_ylim(-0.1, 1.05)
+    axs[2].set_title("cosine of Π_M s_n w_n at the neuron's own residue r₀")
+    axs[2].legend(frameon=False, fontsize=8, loc="lower right")
+    axs[3].scatter(
+        c_dual[main_r, js], lobe, c=[cmap(int(r)) for r in main_r], s=30, edgecolor="k", lw=0.5
+    )
+    for j in js:
+        axs[3].annotate(
+            names[sel[j]],
+            (c_dual[main_r[j], j], lobe[j]),
+            fontsize=6,
+            xytext=(3, 2),
+            textcoords="offset points",
+        )
+    axs[3].axhline(0, color="#888", lw=0.6)
+    axs[3].set_xlabel("cos(Π_M s_n w_n, μ*_r₀)")
+    axs[3].set_ylabel("most negative s_n m_n(r) / max |m_n|, r ≠ r₀")
+    axs[3].set_title("side lobe against the dual cosine")
+    fig.tight_layout()
+    fig.savefig(fig_dir / "n_dual.png")
+    plt.close(fig)
+
+    mubar = mu.mean(axis=0)
+    u = mubar - D @ (D.T @ mubar)
+    u = u / np.linalg.norm(u)
+    res["share_mu_along_u"] = float(((mu @ u) ** 2 / (mu**2).sum(1)).mean())
+    res["share_dual_along_u"] = float(((dual @ u) ** 2 / (dual**2).sum(1)).mean())
+    along = {
+        "s_n w_n": u @ Ws,
+        "μ_r₀": (mu[main_r] @ u) / np.linalg.norm(mu[main_r], axis=1),
+        "μ*_r₀": (dual[main_r] @ u) / np.linalg.norm(dual[main_r], axis=1),
+    }
+    WD = D @ (D.T @ Ws)
+    cD_mu = np.array([cosv(WD[:, j], D @ (D.T @ mu[main_r[j]])) for j in js])
+    cD_dual = np.array([cosv(WD[:, j], D @ (D.T @ dual[main_r[j]])) for j in js])
+    res["along_u"] = {k: dict(zip(labs, v.tolist(), strict=True)) for k, v in along.items()}
+    res["cos_in_D_mu_main"] = dict(zip(labs, cD_mu.tolist(), strict=True))
+    res["cos_in_D_dual_main"] = dict(zip(labs, cD_dual.tolist(), strict=True))
+    fig, axs = plt.subplots(1, 2, figsize=(14, 4.2))
+    wb = 0.27
+    for t, (lab, v) in enumerate(along.items()):
+        axs[0].bar(
+            js + (t - 1) * wb, v[pk], wb, label=lab, color=["#7a7a7a", "#b5442d", "#1f4e9c"][t]
+        )
+    axs[0].set_title("cosine with the shared direction u (outside D)")
+    axs[1].bar(js - wb / 2, cD_mu[pk], wb, color="#b5442d", label="cos(Π_D s_n w_n, Π_D μ_r₀)")
+    axs[1].bar(js + wb / 2, cD_dual[pk], wb, color="#1f4e9c", label="cos(Π_D s_n w_n, Π_D μ*_r₀)")
+    axs[1].set_ylim(-0.1, 1.02)
+    axs[1].set_title("inside D")
+    for ax in axs:
+        ax.set_xticks(js)
+        ax.set_xticklabels(
+            [f"{names[sel[j]]} (r={int(main_r[j])})" for j in pk], rotation=90, fontsize=6
+        )
+    axs[0].legend(frameon=False, fontsize=8, loc="upper right")
+    axs[1].legend(frameon=False, fontsize=8, loc="lower left")
+    fig.tight_layout()
+    fig.savefig(fig_dir / "n_dual_split.png")
+    plt.close(fig)
+
     # lower-period-only neurons
     per_all = np.stack([r2(F, (x @ P[k]) @ (P[k].T @ Wu.T)) for k in P])  # (5, 28672)
     resp = per_all >= THR
