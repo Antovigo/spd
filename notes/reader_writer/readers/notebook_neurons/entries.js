@@ -177,7 +177,70 @@ with <i>u</i> is 0.85–0.89 for μ<sub><i>r</i>₀</sub> and 0.04–0.10 for μ
 g#13010, u#5708, u#8969, u#10825, u#13630).</li>
 </ul>
 
-<h3>5. Neurons against components</h3>
+<h3>5. Why readers of residue r respond negatively at r ± 3</h3>
+<p><b>Short answer: geometry.</b> Inside <i>D</i>, the residue means of <i>r</i> and <i>r</i> ± 3 have cosine −0.30
+on average. At every other Δ the average is between −0.10 and −0.01. This comes from how the Fourier energy of the residue means is split
+across frequencies, and the token embedding has the same split. A reader whose read vector, restricted to
+<i>D</i>, follows its residue's mean (a matched filter) inherits that row of cosines as its profile: a negative lobe
+at ±3. A reader that follows the dual vector instead has no lobes. Each reader's lobes are predicted by how much of
+each it is: correlation 0.98 for the components and 0.97 for the clean neurons. Script:
+<code>notes/reader_writer/readers/lobes.py</code>.</p>
+<ul>
+<li><b>Notation.</b> <i>r</i>₀ is a reader's main residue, and Δ = <i>r</i> − <i>r</i>₀ mod 10, written in −4 … 5.
+<i>p</i>(<i>r</i>) = <i>s</i> <i>m</i>(<i>r</i>) / max |<i>m</i>| is its sign-aligned residue profile.</li>
+<li><b>Gram matrix.</b> <i>G</i>(<i>r</i>, <i>r′</i>) = Π<sub><i>D</i></sub>μ<sub><i>r</i></sub> · Π<sub><i>D</i></sub>μ<sub><i>r′</i></sub>.</li>
+<li><b>Profile identity.</b> Because μ<sub><i>r</i></sub> ∈ <i>M</i>, <i>m</i>(<i>r</i>) = μ<sub><i>r</i></sub> · <i>w</i> / ‖<i>w</i>‖ exactly. The profile
+therefore depends only on the part of the read vector inside <i>M</i>, and it is exactly that part's coordinates in
+the dual basis.</li>
+</ul>
+<figure><img src="notebook/fig/lobes_geometry.png"><figcaption>
+<ol>
+<li>Cosine between Π<sub><i>D</i></sub>μ<sub><i>r</i></sub> and Π<sub><i>D</i></sub>μ<sub><i>r′</i></sub> against Δ = <i>r′</i> − <i>r</i>: the mean and
+range over the ten pairs at each Δ, in the alive-only model (components), the original model (neurons) and the
+embedding alone. The dashed line is −1/9, the value for equal energy per dimension.</li>
+<li>The share of Σ<sub><i>r</i></sub>‖Π<sub><i>D</i></sub>μ<sub><i>r</i></sub>‖² at each frequency <i>k</i>. Equal energy per dimension
+would give 2/9 to each plane and 1/9 to the line.</li>
+<li>Each frequency's contribution to the cosine at Δ = 3, beyond −1/9.</li>
+</ol></figcaption></figure>
+<p><b>The geometry comes from the Fourier energy split.</b></p>
+<ul>
+<li>The cosine at Δ = ±3 is −0.30 in all three spaces (range over pairs −0.37 to −0.24). The other Δ give −0.10 to
+−0.01 on average.</li>
+<li>The residue means are close to circulant: their cosine at Δ equals Σ<sub><i>k</i></sub> (share<sub><i>k</i></sub>) cos(2π<i>k</i>Δ/10), where
+share<sub><i>k</i></sub> is the Fourier energy share at frequency <i>k</i>. That formula gives −0.30 at Δ = 3.</li>
+<li>The shares are 0.27, 0.28, 0.12, 0.17 and 0.15 for <i>k</i> = 1 … 5 (neurons; components and embedding agree to
+±0.01). Equal energy per dimension would give 0.22, 0.22, 0.22, 0.22 and 0.11.</li>
+<li>Relative to −1/9, the extra −0.20 at Δ = 3 is made up of:
+<ul>
+<li>the deficit at <i>k</i> = 3 (−0.080), where cos(2π·9/10) = +0.81;</li>
+<li>the excess at <i>k</i> = 2 (−0.049), where cos(2π·6/10) = −0.81;</li>
+<li>the excess on the parity line <i>k</i> = 5 (−0.040);</li>
+<li><i>k</i> = 1 and <i>k</i> = 4 (−0.015 each).</li>
+</ul></li>
+<li>The embedding's split matches the readers' input (cosines ≥ 0.993 between the subspaces; same shares to ±0.01),
+so this geometry is already present in the token embedding.</li>
+</ul>
+<p><b>Each reader is a mix of dual and matched filter.</b> I fit each profile with
+<i>p</i>(<i>r</i>) ≈ α δ(<i>r</i>, <i>r</i>₀) + β <i>G</i>(<i>r</i>₀, <i>r</i>) / <i>G</i>(<i>r</i>₀, <i>r</i>₀) + γ (least squares over the ten
+residues). Here δ(<i>r</i>, <i>r</i>₀) is 1 when <i>r</i> = <i>r</i>₀ and 0 otherwise; α is the dual (one-hot) part, β the
+matched-filter part, and γ a constant from the shared direction.</p>
+<figure><img src="notebook/fig/lobes_fit.png"><figcaption>Left and middle: profiles against Δ (grey) and the fitted model (blue
+dotted), for the 11 components and the 19 clean neurons; the main residue, at 1, is off the top. Right: each
+reader's mean of <i>p</i>(<i>r</i>₀ + 3) and <i>p</i>(<i>r</i>₀ − 3) against the model's value there.</figcaption></figure>
+<ul>
+<li><b>The model predicts the lobes at ±3.</b> Correlation 0.98 for the components (mean absolute error 0.025), 0.97
+for the clean neurons (0.042), and 0.90 for all 24 neurons. Off the main residue, it explains a median 48% of the
+squared profile for components and 83% for clean neurons. Without the matched-filter term (α δ + γ only), it
+explains 8% and 19%.</li>
+<li><b>Components are mostly dual.</b> α &gt; β for 7 of 11 (g43, g58, g62, u52, u54, u60, u794); their lobes at ±3 are
+−0.15 to 0.00. The four with β &gt; α (g69 β = 0.96, g59 0.55, g47 0.53, u31) have the lobes: −0.34, −0.23, −0.18 and
+−0.16.</li>
+<li><b>Neurons are mostly matched filters.</b> β &gt; α for 12 of the 19 clean neurons. Eight gate rows have
+β = 0.69–1.09 (g#13630, g#8969, g#10825, g#8559, g#5708, g#11614, g#5095, and g#7854 with β = 0.51), and their lobes
+are −0.39 to −0.20. The dual-like neurons have small or positive lobes: u#5708, u#8969 and u#13630 (α 1.12–1.34, lobes
++0.05 to +0.17), and g#13010 (α 1.14, lobe −0.15).</li>
+</ul>
+<h3>6. Neurons against components</h3>
 <p>For each of the decomposition's 11 mod-10 components, take the neuron row with the largest |cosine| to its read
 vector. Every gate component's best match is a gate row with the same main residue (cosine 0.61–0.70). The same holds for
 every up component except u31, whose best match is not a mod-10 neuron:</p>
@@ -196,7 +259,7 @@ every up component except u31, whose best match is not a mod-10 neuron:</p>
 <p>The cosines are well below 1. This fits the component read vectors lying almost entirely in <i>D</i> while the
 neuron rows lie mostly outside it.</p>
 
-<h3>6. What D contributes to the other neurons</h3>
+<h3>7. What D contributes to the other neurons</h3>
 <p>For each of the 28,648 other neurons, the change is ‖<i>g<sub>n</sub><sup>D</sup></i>‖ / ‖<i>f<sub>n</sub></i>‖, with norms over
 <i>a</i> = 1 … 400, and the residual is ρ<sub><i>n</i></sub> = <i>f<sub>n</sub></i> − <i>g<sub>n</sub><sup>D</sup></i>. The change has median
 0.20, 90th percentile 0.29, 99th percentile 0.37 and maximum 0.74 (u#11614). The next are g#11563 (0.69) and u#5727
