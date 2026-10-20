@@ -208,6 +208,32 @@ def main() -> None:
     res["flipped_count"] = int((sgn < 0).sum())
     res["flipped_gate"] = int(((sgn < 0) & (sel < 14336)).sum())
     pk = np.lexsort((-r2D[sel], main_r))
+
+    # raw inner activations as a function of a, with the part read from D
+    GDsel = XD @ (D.T @ Wu[sel].T)
+    fig, axs = plt.subplots(12, 2, figsize=(12, 15), sharex=True)
+    for axx, j in zip(axs.T.ravel(), pk, strict=False):
+        axx.axhline(0, color="#ddd", lw=0.6)
+        axx.plot(A, F[:, sel[j]], lw=0.7, color="#bbb")
+        axx.plot(A, GDsel[:, j], lw=0.8, color="#2a5db0")
+        axx.set_ylabel(f"{names[sel[j]]}\n(r={int(main_r[j])})", fontsize=7)
+        axx.text(
+            0.995,
+            0.92,
+            f"r²_D = {r2D[sel[j]]:.2f}",
+            transform=axx.transAxes,
+            ha="right",
+            va="top",
+            fontsize=7,
+        )
+    axs[-1, 0].set_xlabel("a")
+    axs[-1, 1].set_xlabel("a")
+    fig.suptitle(
+        "the 24 mod-10 neurons, by main residue: f_n(a) (grey) and g_n^D(a), the input projected onto D (blue)"
+    )
+    fig.tight_layout()
+    fig.savefig(fig_dir / "n_traces.png")
+    plt.close(fig)
     fig, ax = plt.subplots(figsize=(4.6, max(3.0, 0.11 * sel.size + 1.2)))
     im = ax.imshow(
         nm[:, pk].T, cmap="RdBu_r", vmin=-1, vmax=1, aspect="auto", interpolation="nearest"

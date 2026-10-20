@@ -87,6 +87,9 @@ other residue by one or two.</p>
 <figure><img src="notebook/fig/n_profiles.png"><figcaption><i>s<sub>n</sub></i> <i>m<sub>n</sub></i>(<i>r</i>) /
 max<sub><i>r</i></sub> |<i>m<sub>n</sub></i>(<i>r</i>)| for the 24 neurons (r²<sub><i>D</i></sub> in brackets), grouped by main
 residue.</figcaption></figure>
+<figure><img src="notebook/fig/n_traces.png"><figcaption>The 24 neurons, grouped by main residue <i>r</i> (left column
+first): <i>f<sub>n</sub></i>(<i>a</i>) for <i>a</i> = 1 … 400 in the row's own sign (grey) and <i>g<sub>n</sub><sup>D</sup></i>(<i>a</i>)
+(blue).</figcaption></figure>
 <p><b>Cleanliness.</b> The neurons are less clean than the components. The second-largest |<i>s<sub>n</sub></i>
 <i>m<sub>n</sub></i>(<i>r</i>)| / max is 0.29 at the median and 0.54 at the 90th percentile. For the components, 6 of 11
 stay below 0.2 and the largest is 0.61. Most neurons' negative side lobes sit at the main residue ± 3, as for the
