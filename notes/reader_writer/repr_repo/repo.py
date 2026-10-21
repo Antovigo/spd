@@ -8,13 +8,14 @@ Stored in `<run>/analysis/representation_repository/`:
     vectors/<rep id>.npz    basis (4096, d) float64 orthonormal columns; plus per-representation extras
     readers.json            {"readers": [Reader, ...]}: every alive gate / up component of the ceiling
                             filter that the learned mask "kl_int, sampled mask, λ=5e-05" keeps
+    transitions.json        {"transitions": [Transition, ...]} (schema 2): what one block does to a representation
 
 Representation (one subspace of one block's MLP input at one token position):
     id            "L<block>.p<position>.<name>", e.g. "L0.p1.a_mod10.k1"
     block, position, space   where the vectors live (space: a text description of the activation)
     dim           subspace dimension d
     encodes       the variable it carries, e.g. "a mod 10"
-    kind          "fourier_plane" | "fourier_line" (more kinds as they are found)
+    kind          "fourier_plane" | "fourier_line" | "residue_mean_span" (more kinds as they are found)
     details       kind-specific fields (frequency, residue coordinates, ...)
     vectors       path of the npz, relative to the repository root
     provenance    script, commit, date
@@ -37,6 +38,16 @@ Reader (one component):
                     writer's residual-stream variance; routing (up readers only): phi_sub,
                     phi_mean_gate and gates [{reader, phi_J}] (plan eq. 5, 8,000-prompt subsample)
         covered_fraction, source, method, provenance, updated
+      r2_period10   optional, r2 of the period-10 part of a residue_mean_span alone (its frequency 1..5 Fourier
+                    components, without the direction shared by all residues)
+
+Transition (one block acting on a representation at one position; seed_blocks_mod10.py):
+    id            "L<block>.p<position>.<encodes, underscores>", e.g. "L3.p1.a_mod_10"
+    block, position, input_reps, output_reps   representation ids entering / leaving the block (may be empty)
+    attention, mlp   per-sublayer measurements (definitions in `definitions`)
+    residues      per-residue writes and residue-cloud statistics
+    description   the notebook's factual description of the block
+    definitions, provenance
 """
 
 import json
@@ -47,7 +58,7 @@ from typing import Any
 import numpy as np
 
 ROOT = Path("/mnt/nw/home/a.vigouroux/out/pod-backup/p-ba8b0c08/analysis/representation_repository")
-SCHEMA = 1
+SCHEMA = 2
 POSITIONS = ("1", "2", "3", "4")
 
 
@@ -69,6 +80,12 @@ class Repo:
         self.readers: dict[str, dict[str, Any]] = {
             r["id"]: r for r in json.loads((root / "readers.json").read_text())["readers"]
         }
+        tpath = root / "transitions.json"
+        self.transitions: dict[str, dict[str, Any]] = (
+            {t["id"]: t for t in json.loads(tpath.read_text())["transitions"]}
+            if tpath.exists()
+            else {}
+        )
         self.validate()
 
     @staticmethod
@@ -78,6 +95,7 @@ class Repo:
         _write_json(root / "meta.json", {"schema": SCHEMA} | meta)
         _write_json(root / "representations.json", {"representations": []})
         _write_json(root / "readers.json", {"readers": readers})
+        _write_json(root / "transitions.json", {"transitions": []})
         return Repo(root)
 
     def basis(self, rep_id: str) -> np.ndarray:
@@ -98,6 +116,9 @@ class Repo:
         self.readers[reader_id]["positions"][str(position)] = entry
 
     def validate(self) -> None:
+        for tr in self.transitions.values():
+            for rid in [*tr["input_reps"], *tr["output_reps"]]:
+                assert rid in self.representations, (tr["id"], rid)
         for rep in self.representations.values():
             assert (self.root / rep["vectors"]).exists(), rep["vectors"]
         thr = self.meta["response_threshold"]
@@ -120,3 +141,5 @@ class Repo:
         )
         _write_json(self.root / "representations.json", {"representations": reps})
         _write_json(self.root / "readers.json", {"readers": readers})
+        trs = sorted(self.transitions.values(), key=lambda t: (t["position"], t["block"]))
+        _write_json(self.root / "transitions.json", {"transitions": trs})
