@@ -326,6 +326,17 @@ mean spread), together with residue 1 up to block 14 and residue 5 after it.</li
 <figure><img src="notebook/fig/mod10_track_clouds.png"><figcaption>Residue clouds in <i>D<sup>X</sup></i> at the residual
 stream entering each block. (g) Closest-pair and median separation. (h) Mean radius ‖<i>c<sub>r</sub></i>‖ and mean spread
 <i>s<sub>r</sub></i>. (i) Leave-one-out nearest-mean accuracy of the residue.</figcaption></figure>
+<p><b>The blur and the sharpening, seen in one plane.</b> The figure below projects the stream onto its own
+frequency-1 plane <i>P</i><sub>1</sub>, the plane that carries <i>a</i> mod 10 at one turn per ten residues. In that plane, the
+closest-pair separation falls from 2.58 at the embedding to 0.19 entering block 11, and the median from 7.23 to 1.88.
+Entering blocks 13–15 they are back to 1.00–1.86 and 5.71–6.96. From block 4 to block 12, the residue means' ring no longer
+surrounds the activation zero. From block 6 to block 12 it is also squeezed into a flattened curve, and the clouds overlap. Entering blocks
+13–16, they sit on a circle around zero again, with tight, separated clouds.</p>
+<figure><img src="notebook/fig/mod10_track_k1.png"><figcaption>Residual stream at position 1, entering the block named
+in each title (the last panel leaves block 16), projected onto that boundary's frequency-1 plane <i>P</i><sub>1</sub>. Within the
+plane, the axes are turned so that residue 0's mean lies on the positive horizontal axis. Dots are the 400 values of
+<i>a</i>, coloured by <i>r</i> = <i>a</i> mod 10, and labels are the residue means. The cross is the activation zero.
+Each title gives the closest-pair and median separation in the plane. Script: <code>track_k1_fig.py</code>.</figcaption></figure>
 <figure><img src="notebook/fig/mod10_track_planes.png"><figcaption>Residual stream at every boundary. (a) ‖Ψ<sub><i>k</i></sub>‖.
 (b) Mean principal cosine between <i>P<sub>k</sub></i> and the same frequency's plane at the previous boundary. (c) The
 same against the embedding's plane.</figcaption></figure>
