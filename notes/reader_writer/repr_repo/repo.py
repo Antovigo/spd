@@ -30,6 +30,13 @@ Reader (one component):
       r2_by_rep     {representation id: r2 of that representation alone}
       method        how r2 was measured
       updated       ISO date
+      writers       optional, the block's down components this reader feeds (seed_l0_mod10_writers.py):
+        entries     [{writer "L<block>.down.<id>", site, component, phi, reader_fraction, routing?}]
+                    phi: share of the writer's variance credited to the reader (variance split,
+                    plan_variance.md); reader_fraction: |a| / sum over writers |a|, a = phi times the
+                    writer's residual-stream variance; routing (up readers only): phi_sub,
+                    phi_mean_gate and gates [{reader, phi_J}] (plan eq. 5, 8,000-prompt subsample)
+        covered_fraction, source, method, provenance, updated
 """
 
 import json
