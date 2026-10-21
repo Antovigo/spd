@@ -207,6 +207,48 @@ g75 (0.06).</p>
 labelled).</figcaption></figure>
 <figure><img src="notebook/fig/mod10_others_residual.png"><figcaption>The 24 other readers with the largest change, in order (left
 column first). Grey: <i>f<sub>c</sub></i>. Blue: ρ<sub><i>c</i></sub>. The horizontal axis is <i>a</i>.</figcaption></figure>
+
+<h3>6. Which writers the mod-10 readers feed</h3>
+<p>The writers are the block-0 <code>down_proj</code> components, written <code>d&lt;id&gt;</code>. Each writer <i>w</i> has an
+inner activation <i>t<sub>w</sub></i> (its read vector dotted with the 14,336 neuron outputs) and a write vector
+<i>U<sub>w</sub></i> ∈ ℝ<sup>4096</sup>. The connections come from the exact variance split of
+<code>notes/reader_writer/plan_variance.md</code>, run on the model with only the λ=5e-05 mask's components on. Its
+block-0 readers are exactly the 153 readers of this page. That split splits <i>t<sub>w</sub></i> exactly into one
+term per reader, and the variance of <i>t<sub>w</sub></i> over the prompts into one share per term. Unlike the
+rest of this page, these shares are variances, so they are taken around the mean over the prompts. The data are
+stored in the representation repository, in the <code>writers</code> field of each reader's position 1.
+u31 is left out of this section.</p>
+<ul>
+<li><b>φ<sub><i>w</i>,<i>c</i></sub></b> is the share of Var(<i>t<sub>w</sub></i>) credited to reader <i>c</i>. Summed over all readers it is 1.</li>
+<li><b>Weight.</b> α<sub><i>w</i>,<i>c</i></sub> = φ<sub><i>w</i>,<i>c</i></sub> Var(<i>t<sub>w</sub></i>) ‖<i>U<sub>w</sub></i>‖² is the share times the variance
+that the writer puts into the residual stream.</li>
+<li><b>Reader fraction.</b> |α<sub><i>w</i>,<i>c</i></sub>| / Σ<sub><i>w′</i></sub> |α<sub><i>w′</i>,<i>c</i></sub>|, summed over the 115
+writers <i>w′</i>, is how reader <i>c</i>'s weight divides among the writers. For each reader, the kept writers are
+the largest, until their reader fractions add up to at least 0.9.</li>
+</ul>
+<p><b>Each reader feeds mainly the writer with its own id.</b> u794 is the exception: it feeds d41.</p>
+<div class="tw"><table><tr><th>reader</th><th>r</th><th>main writer</th><th>reader fraction</th><th>φ</th><th>other writers ≥ 0.05</th></tr>
+<tr><td>u794</td><td>0</td><td>d41</td><td>0.76</td><td>+0.54</td><td>–</td></tr>
+<tr><td>g43</td><td>1</td><td>d43</td><td>0.87</td><td>+0.84</td><td>–</td></tr>
+<tr><td>g69</td><td>2</td><td>d69</td><td>0.72</td><td>+0.97</td><td>d52 (0.18)</td></tr>
+<tr><td>u60</td><td>3</td><td>d60</td><td>0.81</td><td>+0.90</td><td>–</td></tr>
+<tr><td>g62</td><td>4</td><td>d62</td><td>0.85</td><td>+0.86</td><td>–</td></tr>
+<tr><td>u52</td><td>5</td><td>d52</td><td>0.63</td><td>+0.37</td><td>d54 (0.08), d43 (0.05)</td></tr>
+<tr><td>u54</td><td>6</td><td>d54</td><td>0.67</td><td>+0.62</td><td>d52 (0.05), d60 (0.05)</td></tr>
+<tr><td>g58</td><td>7</td><td>d58</td><td>0.81</td><td>+0.90</td><td>–</td></tr>
+<tr><td>g59</td><td>8</td><td>d59</td><td>0.81</td><td>+0.97</td><td>d52 (0.08)</td></tr>
+<tr><td>g47</td><td>9</td><td>d47</td><td>0.85</td><td>+0.94</td><td>d54 (0.06)</td></tr></table></div>
+<p>For the gate readers g43, g47, g58, g59 and g62, φ of the main writer is 0.84–0.97: the reader alone carries
+almost all of that writer's variance. For the up readers u52 and u54 it is 0.37 and 0.62. d52 and d54 are also
+kept writers of seven other readers each, with reader fractions 0.01–0.18.</p>
+<figure><img src="notebook/fig/mod10_writers_grids.png"><figcaption>Inner activations on the prompts
+<code>a + b =</code> at position 1 (the token <i>a</i>), in the alive-only model, for <i>a</i>, <i>b</i> = 1 … 400. In each
+panel <i>b</i> runs horizontally and <i>a</i> vertically, starting from the bottom. Position 1 depends on <i>a</i> alone, so
+every panel is horizontal stripes. One row per reader, ordered by main residue <i>r</i>. The first panel (blue frame) is the
+reader's <i>s<sub>c</sub></i> <i>t<sub>c</sub></i>, where <i>t<sub>c</sub></i> = <i>x</i> · <i>V<sub>c</sub></i> is its raw inner
+activation and <i>x</i> the block-0 MLP input. Next come its kept writers' <i>t<sub>w</sub></i>, in raw gauge, titled with
+the reader fraction and φ. The colour scale is symmetric about zero in each panel (red positive, blue negative),
+with the limit in the title.</figcaption></figure>
 `
 },
 ];
