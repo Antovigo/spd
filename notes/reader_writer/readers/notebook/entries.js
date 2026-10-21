@@ -318,6 +318,600 @@ the data (shaded), with ReLU and the tangent at zero for comparison. (b) For eac
 Σ<sub><i>a</i></sub> <i>t<sub>c</sub></i>² on its own residue (bars) and r² of the secant fit Δ<sub><i>c</i></sub> ≈ κ<sub><i>c</i></sub> <i>t<sub>c</sub></i>
 (dots). (c) Fourier amplitudes ‖Ψ<sub><i>k</i></sub>‖ of Δ<sub>C</sub> and of <i>W x</i>. (d) ‖Δ<sub>C</sub>(<i>a</i>)‖ and the
 per-prompt error ‖Δ<sub>C</sub>(<i>a</i>) − <i>W x</i>(<i>a</i>)‖, for <i>a</i> = 1 … 400.</figcaption></figure>
+<!-- track:begin -->
+<h3>8. The representation through blocks 0–16</h3>
+<p>Everything in this section is at position 1 (the token <i>a</i>), in the alive-only model. Position 1 attends
+only to &lt;BOS&gt; and to itself, so the model was rebuilt in float64 from the checkpoint for those two
+positions through block 16. Every block's alive attention and MLP components were on, and the weight delta was off.
+The rebuild matches the stored MLP reader and writer activations of every block to within 1.8% (max relative
+error). Scripts: <code>track_build.py</code>, <code>track_analyze.py</code>, <code>track_page.py</code>.</p>
+<ul>
+<li><b>Boundaries and sublayers.</b> <i>X</i>(<i>a</i>) ∈ ℝ<sup>4096</sup> is the residual stream at one boundary: entering block
+<i>b</i>, or after its attention. A sublayer <i>S</i> is one block's attention or MLP, including its RMSNorm. It adds
+<i>S</i>(<i>X</i>) to the stream.</li>
+<li><b>Fourier planes.</b> Ψ<sub><i>k</i></sub>, <i>P<sub>k</sub></i> and roundness are as in sections 1 and 7, computed from
+<i>X</i>'s residue means. <i>D<sup>X</sup></i> is the 9-dimensional span of <i>X</i>'s five planes, Π<sub><i>D</i></sub> the orthogonal
+projection onto it, and <i>z</i>(<i>a</i>) ∈ ℝ<sup>9</sup> the coordinates of <i>X</i>(<i>a</i>) in an orthonormal basis of
+<i>D<sup>X</sup></i>.</li>
+<li><b>What a sublayer does with the representation.</b> Δ(<i>a</i>) = <i>S</i>(<i>X</i>)(<i>a</i>) − <i>S</i>(<i>X</i> − Π<sub><i>D</i></sub><i>X</i>)(<i>a</i>).
+<i>S</i>(<i>X</i> − Π<sub><i>D</i></sub><i>X</i>) is what the sublayer writes when its input has no period-10 structure. Its own
+period-10 content is therefore made from other features of <i>a</i>.
+<b>Share from D<sup>X</sup></b> is Re⟨Ψ<sub><i>k</i></sub>(<i>S</i>(<i>X</i>)), Ψ<sub><i>k</i></sub>(Δ)⟩ / ‖Ψ<sub><i>k</i></sub>(<i>S</i>(<i>X</i>))‖², for
+<i>k</i> = 1…5. It is 1 when the sublayer's period-10 output is entirely made from <i>D<sup>X</sup></i>, and 0 when none of it is.</li>
+<li><b>Linearity tests.</b> r²<sub>lin</sub> is the uncentred r² of Δ ≈ <i>L z</i>, with one 4096 × 9 matrix <i>L</i> fitted by least squares
+with no intercept, over the 400 prompts. For an MLP, the secant test generalises section 7. For each reader <i>c</i>,
+dt<sub><i>c</i></sub> = <i>t<sub>c</sub></i>(<i>X</i>) − <i>t<sub>c</sub></i>(<i>X</i> − Π<sub><i>D</i></sub><i>X</i>). Δ<sub><i>c</i></sub> is the change in
+the MLP's output when only reader <i>c</i>'s activation is changed that way, and κ<sub><i>c</i></sub> ∈ ℝ<sup>4096</sup> is the
+least-squares secant of Δ<sub><i>c</i></sub> on dt<sub><i>c</i></sub>. "Secant r²" is the r² of Δ ≈ Σ<sub><i>c</i></sub> κ<sub><i>c</i></sub>
+dt<sub><i>c</i></sub>, and "additivity r²" is the r² of Δ ≈ Σ<sub><i>c</i></sub> Δ<sub><i>c</i></sub>. For attention, the value
+path keeps the attention pattern of <i>X</i> and takes the values from <i>X</i> − Π<sub><i>D</i></sub><i>X</i>.</li>
+</ul>
+<p><b>Attention does not act on the representation at position 1.</b> In every block, the attention output's
+frequency-<i>k</i> amplitude is at most 0.06 times the input's. Averaged over heads and prompts, position 1 puts
+93.4–98.2% of its attention weight on &lt;BOS&gt;.</p>
+<p><b>Residue clouds.</b> At each boundary, <i>c<sub>r</sub></i> ∈ ℝ<sup>9</sup> is the mean of <i>z</i>(<i>a</i>) over the 40
+values of <i>a</i> with <i>a</i> mod 10 = <i>r</i> (its norm is the residue's radius), and <i>s<sub>r</sub></i> is the root-mean-square
+distance of those <i>z</i>(<i>a</i>) to <i>c<sub>r</sub></i> (the cloud's spread). The separation of two residues <i>r</i>, <i>r′</i> is
+‖<i>c<sub>r</sub></i> − <i>c<sub>r′</sub></i>‖ / √((<i>s<sub>r</sub></i>² + <i>s<sub>r′</sub></i>²)/2). "Accuracy" is the
+leave-one-out nearest-mean classification accuracy of <i>r</i> from <i>z</i>(<i>a</i>); chance is 0.1. Per residue, an MLP's
+write is the mean of its output over the residue's prompts projected onto <i>D</i> of the stream leaving it, divided by
+the residue's input radius ‖Π<sub><i>D</i></sub>μ<sub><i>r</i></sub>‖.</p>
+<p><b>Summary of blocks 0–16.</b></p>
+<ul>
+<li><b>The MLPs' period-10 output comes from the representation itself.</b> In every block, 0.87–1.05 of each MLP's
+frequency-<i>k</i> output comes from <i>D<sup>X</sup></i> (panel e). Little period-10 content is made from other features of
+<i>a</i>.</li>
+<li><b>Blocks 0–11 rewrite it linearly; blocks 12–16 do not.</b> In blocks 0–11, the MLP's action on
+<i>D<sup>X</sup></i> is a sum of independent, linear reader paths (secant r² 0.91–0.99, additivity 0.94–1.00). In blocks
+12–16, the secant r² falls to 0.51–0.77, and in blocks 12–14 additivity falls to 0.75–0.83: readers interact (panel f).</li>
+<li><b>The clouds first blur, then sharpen.</b> From the embedding to the stream entering block 11, the clouds' spread
+grows faster than their radius, and the closest-pair separation falls from 5.93 to 0.95 (accuracy 0.897). The MLPs of
+blocks 11–14 (12–14 non-additive) tighten the clouds and push them apart: the closest pair reaches 4.12 and accuracy 1.000
+(panels g–i). Blocks 15–16 widen the clouds again (closest pair 3.52).</li>
+<li><b>The planes drift.</b> Each MLP turns the planes a little (cosines 0.62–1.00 per block). By the stream leaving
+block 16, the mean principal cosine with the embedding's planes is 0.20–0.34 (panel c).</li>
+<li><b>Some MLPs move a few residues more than others.</b> Residue 0 in blocks 2 and 3; residue 1 in blocks 7, 8, 11 and 16;
+residues 1 and 9 in block 12; residues 3, 7 and 8 in block 13. In block 14, residues 1, 2, 4, 6 and 9 get more than twice
+the write of 0, 3, 5, 7 and 8. Residue 0's cloud is the widest or second widest at every boundary (1.11–1.35 times the
+mean spread), together with residue 1 up to block 14 and residue 5 after it.</li>
+</ul>
+<figure><img src="notebook/fig/mod10_track_clouds.png"><figcaption>Residue clouds in <i>D<sup>X</sup></i> at the residual
+stream entering each block. (g) Closest-pair and median separation. (h) Mean radius ‖<i>c<sub>r</sub></i>‖ and mean spread
+<i>s<sub>r</sub></i>. (i) Leave-one-out nearest-mean accuracy of the residue.</figcaption></figure>
+<figure><img src="notebook/fig/mod10_track_planes.png"><figcaption>Residual stream at every boundary. (a) ‖Ψ<sub><i>k</i></sub>‖.
+(b) Mean principal cosine between <i>P<sub>k</sub></i> and the same frequency's plane at the previous boundary. (c) The
+same against the embedding's plane.</figcaption></figure>
+<figure><img src="notebook/fig/mod10_track_sublayers.png"><figcaption>Per sublayer. (d) Period-10 output relative to
+the input, per frequency (solid: MLP, dotted: attention). (e) Share of the MLP's period-10 output that comes from
+<i>D<sup>X</sup></i>. (f) Linearity of Δ: the linear fit, the reader-secant reduction, and additivity over readers.</figcaption></figure>
+
+<h4>Block 0</h4>
+<p>The MLP is where the representation grows: frequency-k amplitude goes up 1.4–1.9 times, and the planes turn (mean cosine 0.62–0.78 with the embedding's). The step is linear (secant r² 0.93; section 7). Residue 0 is moved least: its write is 1.07 times its radius, against 1.74–2.07 for the other residues. The clouds widen faster than they move apart (spread 0.035 → 0.091, radius 0.157 → 0.381), so the closest pair (1, 2) drops from 5.93 to 4.83.</p>
+<div class="tw"><table><tr><th></th><th>out gain ‖Ψ<sub>k</sub>(S)‖/‖Ψ<sub>k</sub>(X)‖, k = 1…5</th><th>share from D<sup>X</sup></th>
+<th>Δ / ‖Π<sub>D</sub>X‖</th><th>r²<sub>lin</sub></th><th>mechanism</th></tr>
+<tr><td>attention</td><td>0.01 / 0.00 / 0.00 / 0.01 / 0.00</td><td>0.91–1.06</td>
+<td>0.007</td><td>0.51</td>
+<td>value path r² 0.30; weight on itself 0.055</td></tr>
+<tr><td>MLP</td><td>1.86 / 1.80 / 1.37 / 1.43 / 1.68</td><td>0.94–0.99</td>
+<td>1.703</td><td>0.90</td>
+<td>secant r² 0.93; additivity r² 0.94</td></tr></table></div>
+<p>Mean principal cosine of each plane (k = 1…5) across the attention:
+1.00 / 1.00 / 1.00 / 1.00 / 1.00; across the MLP:
+0.70 / 0.72 / 0.62 / 0.67 / 0.78. Roundness (k = 1…4) entering the block:
+0.98 / 0.91 / 0.91 / 0.72; leaving it: 0.93 / 0.91 / 0.86 / 0.57.
+Largest attention heads in the value path: head 2 (0.85), head 1 (0.04), head 10 (0.04).</p>
+<p>MLP readers carrying 90% of Σ<sub><i>c</i></sub> Σ<sub><i>a</i></sub>‖Δ<sub><i>c</i></sub>‖² (3 more readers not listed):</p>
+<div class="tw"><table><tr><th>reader</th><th>share</th><th>main residue of dt<sub>c</sub></th><th>dt<sub>c</sub> one-hot share</th>
+<th>secant r²</th></tr><tr><td>g47</td><td>0.15</td><td>9</td><td>0.78</td><td>0.91</td></tr><tr><td>g69</td><td>0.14</td><td>2</td><td>0.60</td><td>0.84</td></tr><tr><td>g43</td><td>0.12</td><td>1</td><td>0.82</td><td>0.93</td></tr><tr><td>g59</td><td>0.11</td><td>8</td><td>0.78</td><td>0.92</td></tr><tr><td>u60</td><td>0.10</td><td>3</td><td>0.82</td><td>0.94</td></tr><tr><td>g58</td><td>0.10</td><td>7</td><td>0.91</td><td>0.95</td></tr><tr><td>g62</td><td>0.08</td><td>4</td><td>0.86</td><td>0.95</td></tr><tr><td>u794</td><td>0.08</td><td>0</td><td>0.70</td><td>0.83</td></tr></table></div>
+<div class="tw"><table><tr><th>MLP, per residue r</th><th>0</th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th><th>8</th><th>9</th></tr>
+<tr><td>write / input radius</td><td>1.07</td><td>1.89</td><td>1.88</td><td>1.74</td><td>1.85</td><td>1.82</td><td>2.07</td><td>1.92</td><td>1.85</td><td>1.89</td></tr>
+<tr><td>radius after / before</td><td>1.82</td><td>2.54</td><td>2.55</td><td>2.34</td><td>2.49</td><td>2.41</td><td>2.69</td><td>2.51</td><td>2.45</td><td>2.54</td></tr>
+<tr><td>spread after / mean spread</td><td>1.32</td><td>1.07</td><td>0.97</td><td>0.94</td><td>0.95</td><td>1.13</td><td>0.89</td><td>0.84</td><td>0.94</td><td>0.95</td></tr>
+</table></div>
+<p>Clouds entering → leaving the MLP: closest pair sep 5.93 (1, 2) →
+4.83 (1, 2); median sep 6.60 → 5.49;
+mean spread 0.035 → 0.091; mean radius 0.157 →
+0.381; leave-one-out accuracy 1.000 → 1.000.</p>
+<figure><img src="notebook/fig/mod10_track_b0.png"><figcaption>Block 0: every prompt's coordinates in the five
+planes P<sub>k</sub> of the residual stream entering the block (top) and leaving it (bottom), each in its own
+boundary's planes, coloured by residue, with the residue means labelled. The cross is the activation zero. For k = 5 (a line)
+the vertical axis is a.</figcaption></figure>
+<h4>Block 1</h4>
+<p>The MLP writes little period-10 content (gain 0.04–0.10), and what it writes is linear in the readers (secant r² 0.91, additivity 1.00). The linear fit on z alone is lower (0.54) because Δ here is small (0.13 of the input's D norm). The planes do not move (cosine ≥ 0.99). Spread grows, and the smallest separation falls 4.83 → 3.59.</p>
+<div class="tw"><table><tr><th></th><th>out gain ‖Ψ<sub>k</sub>(S)‖/‖Ψ<sub>k</sub>(X)‖, k = 1…5</th><th>share from D<sup>X</sup></th>
+<th>Δ / ‖Π<sub>D</sub>X‖</th><th>r²<sub>lin</sub></th><th>mechanism</th></tr>
+<tr><td>attention</td><td>0.02 / 0.03 / 0.03 / 0.04 / 0.02</td><td>0.92–1.02</td>
+<td>0.033</td><td>0.59</td>
+<td>value path r² 0.11; weight on itself 0.042</td></tr>
+<tr><td>MLP</td><td>0.10 / 0.09 / 0.08 / 0.09 / 0.04</td><td>0.92–1.05</td>
+<td>0.132</td><td>0.54</td>
+<td>secant r² 0.91; additivity r² 1.00</td></tr></table></div>
+<p>Mean principal cosine of each plane (k = 1…5) across the attention:
+1.00 / 1.00 / 1.00 / 1.00 / 1.00; across the MLP:
+0.99 / 1.00 / 1.00 / 1.00 / 1.00. Roundness (k = 1…4) entering the block:
+0.93 / 0.91 / 0.86 / 0.57; leaving it: 0.91 / 0.90 / 0.86 / 0.57.
+Largest attention heads in the value path: head 26 (0.55), head 25 (0.16), head 18 (0.12).</p>
+<p>MLP readers carrying 90% of Σ<sub><i>c</i></sub> Σ<sub><i>a</i></sub>‖Δ<sub><i>c</i></sub>‖² (4 more readers not listed):</p>
+<div class="tw"><table><tr><th>reader</th><th>share</th><th>main residue of dt<sub>c</sub></th><th>dt<sub>c</sub> one-hot share</th>
+<th>secant r²</th></tr><tr><td>g38</td><td>0.32</td><td>8</td><td>0.22</td><td>0.90</td></tr><tr><td>u223</td><td>0.17</td><td>8</td><td>0.17</td><td>0.86</td></tr><tr><td>u38</td><td>0.16</td><td>0</td><td>0.27</td><td>0.90</td></tr><tr><td>g24</td><td>0.12</td><td>0</td><td>0.56</td><td>0.91</td></tr><tr><td>u13</td><td>0.07</td><td>0</td><td>0.49</td><td>0.86</td></tr><tr><td>g116</td><td>0.04</td><td>4</td><td>0.24</td><td>0.93</td></tr><tr><td>u234</td><td>0.04</td><td>1</td><td>0.65</td><td>0.90</td></tr><tr><td>g42</td><td>0.02</td><td>6</td><td>0.17</td><td>0.93</td></tr></table></div>
+<div class="tw"><table><tr><th>MLP, per residue r</th><th>0</th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th><th>8</th><th>9</th></tr>
+<tr><td>write / input radius</td><td>0.24</td><td>0.20</td><td>0.23</td><td>0.24</td><td>0.24</td><td>0.23</td><td>0.21</td><td>0.22</td><td>0.24</td><td>0.22</td></tr>
+<tr><td>radius after / before</td><td>0.89</td><td>0.99</td><td>1.02</td><td>1.15</td><td>1.26</td><td>1.22</td><td>1.16</td><td>1.12</td><td>1.12</td><td>1.17</td></tr>
+<tr><td>spread after / mean spread</td><td>1.21</td><td>1.13</td><td>1.05</td><td>0.96</td><td>0.96</td><td>1.06</td><td>0.89</td><td>0.84</td><td>0.94</td><td>0.96</td></tr>
+</table></div>
+<p>Clouds entering → leaving the MLP: closest pair sep 4.83 (1, 2) →
+3.59 (1, 2); median sep 5.49 → 4.39;
+mean spread 0.092 → 0.116; mean radius 0.380 →
+0.423; leave-one-out accuracy 1.000 → 1.000.</p>
+<figure><img src="notebook/fig/mod10_track_b1.png"><figcaption>Block 1: every prompt's coordinates in the five
+planes P<sub>k</sub> of the residual stream entering the block (top) and leaving it (bottom), each in its own
+boundary's planes, coloured by residue, with the residue means labelled. The cross is the activation zero. For k = 5 (a line)
+the vertical axis is a.</figcaption></figure>
+<h4>Block 2</h4>
+<p>Linear (secant r² 0.94). The MLP writes mostly to residues 0 and 1 (0.83 and 0.66 of their radius, against 0.19–0.30 for the others), and roundness drops (k = 2: 0.90 → 0.77; k = 4: 0.57 → 0.43).</p>
+<div class="tw"><table><tr><th></th><th>out gain ‖Ψ<sub>k</sub>(S)‖/‖Ψ<sub>k</sub>(X)‖, k = 1…5</th><th>share from D<sup>X</sup></th>
+<th>Δ / ‖Π<sub>D</sub>X‖</th><th>r²<sub>lin</sub></th><th>mechanism</th></tr>
+<tr><td>attention</td><td>0.02 / 0.06 / 0.02 / 0.02 / 0.00</td><td>0.35–1.44</td>
+<td>0.072</td><td>0.86</td>
+<td>value path r² -0.16; weight on itself 0.018</td></tr>
+<tr><td>MLP</td><td>0.32 / 0.45 / 0.42 / 0.64 / 0.29</td><td>0.92–0.98</td>
+<td>0.512</td><td>0.93</td>
+<td>secant r² 0.94; additivity r² 0.99</td></tr></table></div>
+<p>Mean principal cosine of each plane (k = 1…5) across the attention:
+1.00 / 1.00 / 1.00 / 1.00 / 1.00; across the MLP:
+0.96 / 0.94 / 0.93 / 0.92 / 0.96. Roundness (k = 1…4) entering the block:
+0.91 / 0.90 / 0.86 / 0.57; leaving it: 0.83 / 0.77 / 0.85 / 0.43.
+Largest attention heads in the value path: head 23 (0.73), head 5 (0.10), head 6 (0.06).</p>
+<p>MLP readers carrying 90% of Σ<sub><i>c</i></sub> Σ<sub><i>a</i></sub>‖Δ<sub><i>c</i></sub>‖²:</p>
+<div class="tw"><table><tr><th>reader</th><th>share</th><th>main residue of dt<sub>c</sub></th><th>dt<sub>c</sub> one-hot share</th>
+<th>secant r²</th></tr><tr><td>u70</td><td>0.79</td><td>3</td><td>0.12</td><td>0.96</td></tr><tr><td>u411</td><td>0.06</td><td>1</td><td>0.24</td><td>0.95</td></tr><tr><td>g255</td><td>0.06</td><td>1</td><td>0.37</td><td>0.93</td></tr><tr><td>u313</td><td>0.04</td><td>5</td><td>0.65</td><td>0.91</td></tr><tr><td>u275</td><td>0.03</td><td>8</td><td>0.24</td><td>0.97</td></tr><tr><td>g335</td><td>0.02</td><td>5</td><td>0.15</td><td>0.81</td></tr><tr><td>g229</td><td>0.01</td><td>6</td><td>0.26</td><td>0.63</td></tr></table></div>
+<div class="tw"><table><tr><th>MLP, per residue r</th><th>0</th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th><th>8</th><th>9</th></tr>
+<tr><td>write / input radius</td><td>0.83</td><td>0.66</td><td>0.30</td><td>0.25</td><td>0.20</td><td>0.22</td><td>0.21</td><td>0.23</td><td>0.19</td><td>0.21</td></tr>
+<tr><td>radius after / before</td><td>1.44</td><td>1.41</td><td>1.13</td><td>1.15</td><td>1.06</td><td>1.09</td><td>1.05</td><td>1.09</td><td>1.03</td><td>1.05</td></tr>
+<tr><td>spread after / mean spread</td><td>1.35</td><td>1.34</td><td>1.04</td><td>0.91</td><td>0.87</td><td>1.11</td><td>0.82</td><td>0.79</td><td>0.85</td><td>0.91</td></tr>
+</table></div>
+<p>Clouds entering → leaving the MLP: closest pair sep 3.50 (1, 2) →
+2.61 (2, 3); median sep 4.29 → 3.35;
+mean spread 0.119 → 0.172; mean radius 0.447 →
+0.505; leave-one-out accuracy 1.000 → 0.998.</p>
+<figure><img src="notebook/fig/mod10_track_b2.png"><figcaption>Block 2: every prompt's coordinates in the five
+planes P<sub>k</sub> of the residual stream entering the block (top) and leaving it (bottom), each in its own
+boundary's planes, coloured by residue, with the residue means labelled. The cross is the activation zero. For k = 5 (a line)
+the vertical axis is a.</figcaption></figure>
+<h4>Block 3</h4>
+<p>Linear (secant r² 0.97). The largest write is to residue 0 (1.23 of its radius), then 2 and 5 (0.90, 0.98); the others get 0.57–0.85. Radius grows 0.52 → 0.78, and the closest pair rises slightly (2.58 → 2.73).</p>
+<div class="tw"><table><tr><th></th><th>out gain ‖Ψ<sub>k</sub>(S)‖/‖Ψ<sub>k</sub>(X)‖, k = 1…5</th><th>share from D<sup>X</sup></th>
+<th>Δ / ‖Π<sub>D</sub>X‖</th><th>r²<sub>lin</sub></th><th>mechanism</th></tr>
+<tr><td>attention</td><td>0.03 / 0.03 / 0.05 / 0.04 / 0.03</td><td>0.90–1.10</td>
+<td>0.067</td><td>0.82</td>
+<td>value path r² 0.15; weight on itself 0.034</td></tr>
+<tr><td>MLP</td><td>0.90 / 0.77 / 0.48 / 0.55 / 0.90</td><td>0.98–1.00</td>
+<td>0.760</td><td>0.96</td>
+<td>secant r² 0.97; additivity r² 0.98</td></tr></table></div>
+<p>Mean principal cosine of each plane (k = 1…5) across the attention:
+1.00 / 1.00 / 1.00 / 1.00 / 1.00; across the MLP:
+0.88 / 0.89 / 0.92 / 0.92 / 0.89. Roundness (k = 1…4) entering the block:
+0.83 / 0.77 / 0.85 / 0.43; leaving it: 0.89 / 0.90 / 0.84 / 0.37.
+Largest attention heads in the value path: head 5 (0.44), head 7 (0.15), head 28 (0.11).</p>
+<p>MLP readers carrying 90% of Σ<sub><i>c</i></sub> Σ<sub><i>a</i></sub>‖Δ<sub><i>c</i></sub>‖²:</p>
+<div class="tw"><table><tr><th>reader</th><th>share</th><th>main residue of dt<sub>c</sub></th><th>dt<sub>c</sub> one-hot share</th>
+<th>secant r²</th></tr><tr><td>g145</td><td>0.37</td><td>8</td><td>0.12</td><td>0.96</td></tr><tr><td>g61</td><td>0.19</td><td>4</td><td>0.34</td><td>0.95</td></tr><tr><td>g67</td><td>0.16</td><td>5</td><td>0.43</td><td>0.99</td></tr><tr><td>g30</td><td>0.16</td><td>6</td><td>0.30</td><td>0.96</td></tr><tr><td>g177</td><td>0.12</td><td>8</td><td>0.30</td><td>0.96</td></tr></table></div>
+<div class="tw"><table><tr><th>MLP, per residue r</th><th>0</th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th><th>8</th><th>9</th></tr>
+<tr><td>write / input radius</td><td>1.23</td><td>0.85</td><td>0.90</td><td>0.76</td><td>0.80</td><td>0.98</td><td>0.78</td><td>0.68</td><td>0.57</td><td>0.58</td></tr>
+<tr><td>radius after / before</td><td>2.24</td><td>1.48</td><td>1.66</td><td>1.42</td><td>1.52</td><td>1.83</td><td>1.37</td><td>1.34</td><td>1.20</td><td>1.24</td></tr>
+<tr><td>spread after / mean spread</td><td>1.23</td><td>1.29</td><td>1.02</td><td>0.94</td><td>0.94</td><td>1.12</td><td>0.85</td><td>0.83</td><td>0.89</td><td>0.89</td></tr>
+</table></div>
+<p>Clouds entering → leaving the MLP: closest pair sep 2.58 (2, 3) →
+2.73 (3, 4); median sep 3.33 → 3.55;
+mean spread 0.173 → 0.250; mean radius 0.518 →
+0.778; leave-one-out accuracy 0.998 → 1.000.</p>
+<figure><img src="notebook/fig/mod10_track_b3.png"><figcaption>Block 3: every prompt's coordinates in the five
+planes P<sub>k</sub> of the residual stream entering the block (top) and leaving it (bottom), each in its own
+boundary's planes, coloured by residue, with the residue means labelled. The cross is the activation zero. For k = 5 (a line)
+the vertical axis is a.</figcaption></figure>
+<h4>Block 4</h4>
+<p>Linear (0.97). Writes are spread over all residues (0.33–0.57 of their radius). Spread grows faster than radius (0.25 → 0.35 against 0.78 → 1.05), and the closest pair falls 2.72 → 2.22; accuracy stays 1.000.</p>
+<div class="tw"><table><tr><th></th><th>out gain ‖Ψ<sub>k</sub>(S)‖/‖Ψ<sub>k</sub>(X)‖, k = 1…5</th><th>share from D<sup>X</sup></th>
+<th>Δ / ‖Π<sub>D</sub>X‖</th><th>r²<sub>lin</sub></th><th>mechanism</th></tr>
+<tr><td>attention</td><td>0.01 / 0.01 / 0.02 / 0.02 / 0.01</td><td>0.97–1.09</td>
+<td>0.030</td><td>0.85</td>
+<td>value path r² -0.42; weight on itself 0.041</td></tr>
+<tr><td>MLP</td><td>0.48 / 0.35 / 0.32 / 0.44 / 0.60</td><td>0.97–1.00</td>
+<td>0.430</td><td>0.96</td>
+<td>secant r² 0.97; additivity r² 0.99</td></tr></table></div>
+<p>Mean principal cosine of each plane (k = 1…5) across the attention:
+1.00 / 1.00 / 1.00 / 1.00 / 1.00; across the MLP:
+0.95 / 0.96 / 0.95 / 0.94 / 0.93. Roundness (k = 1…4) entering the block:
+0.89 / 0.90 / 0.84 / 0.37; leaving it: 0.80 / 0.82 / 0.91 / 0.35.
+Largest attention heads in the value path: head 26 (0.58), head 9 (0.14), head 3 (0.10).</p>
+<p>MLP readers carrying 90% of Σ<sub><i>c</i></sub> Σ<sub><i>a</i></sub>‖Δ<sub><i>c</i></sub>‖²:</p>
+<div class="tw"><table><tr><th>reader</th><th>share</th><th>main residue of dt<sub>c</sub></th><th>dt<sub>c</sub> one-hot share</th>
+<th>secant r²</th></tr><tr><td>g91</td><td>0.38</td><td>0</td><td>0.18</td><td>0.96</td></tr><tr><td>u147</td><td>0.22</td><td>5</td><td>0.12</td><td>0.99</td></tr><tr><td>u52</td><td>0.16</td><td>0</td><td>0.46</td><td>0.96</td></tr><tr><td>u94</td><td>0.16</td><td>9</td><td>0.19</td><td>0.96</td></tr><tr><td>u48</td><td>0.08</td><td>0</td><td>0.28</td><td>0.96</td></tr></table></div>
+<div class="tw"><table><tr><th>MLP, per residue r</th><th>0</th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th><th>8</th><th>9</th></tr>
+<tr><td>write / input radius</td><td>0.47</td><td>0.33</td><td>0.45</td><td>0.37</td><td>0.42</td><td>0.38</td><td>0.57</td><td>0.52</td><td>0.57</td><td>0.48</td></tr>
+<tr><td>radius after / before</td><td>1.38</td><td>0.99</td><td>1.36</td><td>1.27</td><td>1.35</td><td>1.32</td><td>1.56</td><td>1.45</td><td>1.52</td><td>1.37</td></tr>
+<tr><td>spread after / mean spread</td><td>1.29</td><td>1.21</td><td>1.02</td><td>0.94</td><td>0.98</td><td>1.07</td><td>0.85</td><td>0.83</td><td>0.93</td><td>0.88</td></tr>
+</table></div>
+<p>Clouds entering → leaving the MLP: closest pair sep 2.72 (3, 4) →
+2.22 (2, 4); median sep 3.53 → 3.10;
+mean spread 0.251 → 0.346; mean radius 0.778 →
+1.054; leave-one-out accuracy 1.000 → 1.000.</p>
+<figure><img src="notebook/fig/mod10_track_b4.png"><figcaption>Block 4: every prompt's coordinates in the five
+planes P<sub>k</sub> of the residual stream entering the block (top) and leaving it (bottom), each in its own
+boundary's planes, coloured by residue, with the residue means labelled. The cross is the activation zero. For k = 5 (a line)
+the vertical axis is a.</figcaption></figure>
+<h4>Block 5</h4>
+<p>Linear (0.96). Uniform writes (0.36–0.49). Separation keeps falling (closest pair 2.22 → 1.70), and leave-one-out accuracy drops below 1 for the first time (0.985).</p>
+<div class="tw"><table><tr><th></th><th>out gain ‖Ψ<sub>k</sub>(S)‖/‖Ψ<sub>k</sub>(X)‖, k = 1…5</th><th>share from D<sup>X</sup></th>
+<th>Δ / ‖Π<sub>D</sub>X‖</th><th>r²<sub>lin</sub></th><th>mechanism</th></tr>
+<tr><td>attention</td><td>0.00 / 0.01 / 0.01 / 0.01 / 0.01</td><td>0.90–1.01</td>
+<td>0.008</td><td>0.84</td>
+<td>value path r² 0.40; weight on itself 0.032</td></tr>
+<tr><td>MLP</td><td>0.24 / 0.38 / 0.47 / 0.58 / 0.26</td><td>0.98–1.00</td>
+<td>0.434</td><td>0.96</td>
+<td>secant r² 0.96; additivity r² 0.98</td></tr></table></div>
+<p>Mean principal cosine of each plane (k = 1…5) across the attention:
+1.00 / 1.00 / 1.00 / 1.00 / 1.00; across the MLP:
+0.97 / 0.94 / 0.91 / 0.90 / 0.97. Roundness (k = 1…4) entering the block:
+0.80 / 0.82 / 0.91 / 0.35; leaving it: 0.79 / 0.77 / 0.92 / 0.32.
+Largest attention heads in the value path: head 22 (0.73), head 13 (0.13), head 21 (0.03).</p>
+<p>MLP readers carrying 90% of Σ<sub><i>c</i></sub> Σ<sub><i>a</i></sub>‖Δ<sub><i>c</i></sub>‖²:</p>
+<div class="tw"><table><tr><th>reader</th><th>share</th><th>main residue of dt<sub>c</sub></th><th>dt<sub>c</sub> one-hot share</th>
+<th>secant r²</th></tr><tr><td>u339</td><td>0.43</td><td>8</td><td>0.18</td><td>0.98</td></tr><tr><td>u40</td><td>0.28</td><td>0</td><td>0.55</td><td>0.98</td></tr><tr><td>g22</td><td>0.21</td><td>9</td><td>0.15</td><td>0.94</td></tr><tr><td>g4</td><td>0.05</td><td>4</td><td>0.16</td><td>0.91</td></tr><tr><td>g138</td><td>0.03</td><td>8</td><td>0.17</td><td>0.84</td></tr></table></div>
+<div class="tw"><table><tr><th>MLP, per residue r</th><th>0</th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th><th>8</th><th>9</th></tr>
+<tr><td>write / input radius</td><td>0.40</td><td>0.45</td><td>0.43</td><td>0.43</td><td>0.42</td><td>0.36</td><td>0.41</td><td>0.44</td><td>0.47</td><td>0.49</td></tr>
+<tr><td>radius after / before</td><td>1.24</td><td>1.27</td><td>1.23</td><td>1.21</td><td>1.25</td><td>1.24</td><td>1.27</td><td>1.26</td><td>1.28</td><td>1.32</td></tr>
+<tr><td>spread after / mean spread</td><td>1.26</td><td>1.22</td><td>1.00</td><td>0.93</td><td>0.97</td><td>1.08</td><td>0.85</td><td>0.84</td><td>0.94</td><td>0.91</td></tr>
+</table></div>
+<p>Clouds entering → leaving the MLP: closest pair sep 2.22 (2, 4) →
+1.70 (2, 4); median sep 3.10 → 2.48;
+mean spread 0.346 → 0.469; mean radius 1.063 →
+1.336; leave-one-out accuracy 1.000 → 0.985.</p>
+<figure><img src="notebook/fig/mod10_track_b5.png"><figcaption>Block 5: every prompt's coordinates in the five
+planes P<sub>k</sub> of the residual stream entering the block (top) and leaving it (bottom), each in its own
+boundary's planes, coloured by residue, with the residue means labelled. The cross is the activation zero. For k = 5 (a line)
+the vertical axis is a.</figcaption></figure>
+<h4>Block 6</h4>
+<p>Linear (0.99). Uniform writes (0.28–0.40); closest pair 1.70 → 1.36, accuracy 0.955.</p>
+<div class="tw"><table><tr><th></th><th>out gain ‖Ψ<sub>k</sub>(S)‖/‖Ψ<sub>k</sub>(X)‖, k = 1…5</th><th>share from D<sup>X</sup></th>
+<th>Δ / ‖Π<sub>D</sub>X‖</th><th>r²<sub>lin</sub></th><th>mechanism</th></tr>
+<tr><td>attention</td><td>0.00 / 0.01 / 0.01 / 0.00 / 0.01</td><td>0.95–1.14</td>
+<td>0.008</td><td>0.93</td>
+<td>value path r² 0.08; weight on itself 0.036</td></tr>
+<tr><td>MLP</td><td>0.19 / 0.30 / 0.38 / 0.42 / 0.17</td><td>0.96–1.00</td>
+<td>0.433</td><td>0.98</td>
+<td>secant r² 0.99; additivity r² 1.00</td></tr></table></div>
+<p>Mean principal cosine of each plane (k = 1…5) across the attention:
+1.00 / 1.00 / 1.00 / 1.00 / 1.00; across the MLP:
+0.98 / 0.96 / 0.94 / 0.91 / 0.99. Roundness (k = 1…4) entering the block:
+0.79 / 0.77 / 0.92 / 0.32; leaving it: 0.79 / 0.76 / 0.94 / 0.34.
+Largest attention heads in the value path: head 8 (0.25), head 11 (0.13), head 7 (0.12).</p>
+<p>MLP readers carrying 90% of Σ<sub><i>c</i></sub> Σ<sub><i>a</i></sub>‖Δ<sub><i>c</i></sub>‖²:</p>
+<div class="tw"><table><tr><th>reader</th><th>share</th><th>main residue of dt<sub>c</sub></th><th>dt<sub>c</sub> one-hot share</th>
+<th>secant r²</th></tr><tr><td>u375</td><td>0.65</td><td>9</td><td>0.14</td><td>0.99</td></tr><tr><td>u26</td><td>0.17</td><td>0</td><td>0.33</td><td>0.99</td></tr><tr><td>u185</td><td>0.11</td><td>6</td><td>0.17</td><td>0.99</td></tr><tr><td>u567</td><td>0.08</td><td>9</td><td>0.18</td><td>0.99</td></tr></table></div>
+<div class="tw"><table><tr><th>MLP, per residue r</th><th>0</th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th><th>8</th><th>9</th></tr>
+<tr><td>write / input radius</td><td>0.28</td><td>0.37</td><td>0.36</td><td>0.36</td><td>0.34</td><td>0.31</td><td>0.33</td><td>0.36</td><td>0.35</td><td>0.40</td></tr>
+<tr><td>radius after / before</td><td>1.02</td><td>1.03</td><td>1.09</td><td>1.13</td><td>1.11</td><td>1.06</td><td>1.10</td><td>1.12</td><td>1.10</td><td>1.15</td></tr>
+<tr><td>spread after / mean spread</td><td>1.20</td><td>1.21</td><td>0.99</td><td>0.97</td><td>0.95</td><td>1.02</td><td>0.85</td><td>0.89</td><td>0.97</td><td>0.95</td></tr>
+</table></div>
+<p>Clouds entering → leaving the MLP: closest pair sep 1.70 (2, 4) →
+1.36 (2, 4); median sep 2.48 → 2.00;
+mean spread 0.469 → 0.597; mean radius 1.343 →
+1.468; leave-one-out accuracy 0.985 → 0.955.</p>
+<figure><img src="notebook/fig/mod10_track_b6.png"><figcaption>Block 6: every prompt's coordinates in the five
+planes P<sub>k</sub> of the residual stream entering the block (top) and leaving it (bottom), each in its own
+boundary's planes, coloured by residue, with the residue means labelled. The cross is the activation zero. For k = 5 (a line)
+the vertical axis is a.</figcaption></figure>
+<h4>Block 7</h4>
+<p>Linear (0.99). Residue 1 receives the largest write (0.97 of its radius, against 0.61–0.73); closest pair 1.36 → 1.12, accuracy 0.917.</p>
+<div class="tw"><table><tr><th></th><th>out gain ‖Ψ<sub>k</sub>(S)‖/‖Ψ<sub>k</sub>(X)‖, k = 1…5</th><th>share from D<sup>X</sup></th>
+<th>Δ / ‖Π<sub>D</sub>X‖</th><th>r²<sub>lin</sub></th><th>mechanism</th></tr>
+<tr><td>attention</td><td>0.01 / 0.01 / 0.01 / 0.00 / 0.00</td><td>0.99–1.10</td>
+<td>0.008</td><td>0.96</td>
+<td>value path r² 0.46; weight on itself 0.032</td></tr>
+<tr><td>MLP</td><td>0.17 / 0.13 / 0.29 / 0.25 / 0.11</td><td>0.87–0.97</td>
+<td>0.386</td><td>0.98</td>
+<td>secant r² 0.99; additivity r² 1.00</td></tr></table></div>
+<p>Mean principal cosine of each plane (k = 1…5) across the attention:
+1.00 / 1.00 / 1.00 / 1.00 / 1.00; across the MLP:
+0.99 / 0.99 / 0.96 / 0.94 / 0.99. Roundness (k = 1…4) entering the block:
+0.79 / 0.76 / 0.94 / 0.34; leaving it: 0.79 / 0.75 / 0.91 / 0.37.
+Largest attention heads in the value path: head 0 (0.86), head 5 (0.05), head 2 (0.02).</p>
+<p>MLP readers carrying 90% of Σ<sub><i>c</i></sub> Σ<sub><i>a</i></sub>‖Δ<sub><i>c</i></sub>‖²:</p>
+<div class="tw"><table><tr><th>reader</th><th>share</th><th>main residue of dt<sub>c</sub></th><th>dt<sub>c</sub> one-hot share</th>
+<th>secant r²</th></tr><tr><td>u286</td><td>0.44</td><td>9</td><td>0.14</td><td>1.00</td></tr><tr><td>u828</td><td>0.34</td><td>4</td><td>0.13</td><td>1.00</td></tr><tr><td>u198</td><td>0.10</td><td>8</td><td>0.15</td><td>1.00</td></tr><tr><td>g0</td><td>0.06</td><td>0</td><td>0.27</td><td>0.96</td></tr><tr><td>u171</td><td>0.06</td><td>8</td><td>0.17</td><td>1.00</td></tr></table></div>
+<div class="tw"><table><tr><th>MLP, per residue r</th><th>0</th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th><th>8</th><th>9</th></tr>
+<tr><td>write / input radius</td><td>0.73</td><td>0.97</td><td>0.71</td><td>0.69</td><td>0.61</td><td>0.66</td><td>0.64</td><td>0.69</td><td>0.67</td><td>0.69</td></tr>
+<tr><td>radius after / before</td><td>1.40</td><td>1.20</td><td>1.27</td><td>1.15</td><td>1.13</td><td>1.25</td><td>1.23</td><td>1.27</td><td>1.22</td><td>1.17</td></tr>
+<tr><td>spread after / mean spread</td><td>1.15</td><td>1.21</td><td>0.97</td><td>1.00</td><td>0.94</td><td>0.99</td><td>0.87</td><td>0.91</td><td>1.00</td><td>0.97</td></tr>
+</table></div>
+<p>Clouds entering → leaving the MLP: closest pair sep 1.36 (2, 4) →
+1.12 (2, 4); median sep 2.00 → 1.62;
+mean spread 0.597 → 0.756; mean radius 1.478 →
+1.816; leave-one-out accuracy 0.955 → 0.917.</p>
+<figure><img src="notebook/fig/mod10_track_b7.png"><figcaption>Block 7: every prompt's coordinates in the five
+planes P<sub>k</sub> of the residual stream entering the block (top) and leaving it (bottom), each in its own
+boundary's planes, coloured by residue, with the residue means labelled. The cross is the activation zero. For k = 5 (a line)
+the vertical axis is a.</figcaption></figure>
+<h4>Block 8</h4>
+<p>Linear (0.98). Residue 1 again receives the largest write (0.48, against 0.30–0.37); closest pair 1.11 → 1.04, accuracy 0.907.</p>
+<div class="tw"><table><tr><th></th><th>out gain ‖Ψ<sub>k</sub>(S)‖/‖Ψ<sub>k</sub>(X)‖, k = 1…5</th><th>share from D<sup>X</sup></th>
+<th>Δ / ‖Π<sub>D</sub>X‖</th><th>r²<sub>lin</sub></th><th>mechanism</th></tr>
+<tr><td>attention</td><td>0.01 / 0.01 / 0.02 / 0.03 / 0.00</td><td>0.91–1.29</td>
+<td>0.019</td><td>0.91</td>
+<td>value path r² 0.71; weight on itself 0.039</td></tr>
+<tr><td>MLP</td><td>0.14 / 0.13 / 0.26 / 0.19 / 0.08</td><td>0.91–0.98</td>
+<td>0.337</td><td>0.99</td>
+<td>secant r² 0.98; additivity r² 1.00</td></tr></table></div>
+<p>Mean principal cosine of each plane (k = 1…5) across the attention:
+1.00 / 1.00 / 1.00 / 1.00 / 1.00; across the MLP:
+0.99 / 0.99 / 0.97 / 0.96 / 1.00. Roundness (k = 1…4) entering the block:
+0.79 / 0.75 / 0.91 / 0.37; leaving it: 0.79 / 0.75 / 0.89 / 0.38.
+Largest attention heads in the value path: head 23 (0.87), head 19 (0.07), head 16 (0.04).</p>
+<p>MLP readers carrying 90% of Σ<sub><i>c</i></sub> Σ<sub><i>a</i></sub>‖Δ<sub><i>c</i></sub>‖²:</p>
+<div class="tw"><table><tr><th>reader</th><th>share</th><th>main residue of dt<sub>c</sub></th><th>dt<sub>c</sub> one-hot share</th>
+<th>secant r²</th></tr><tr><td>g109</td><td>0.80</td><td>9</td><td>0.13</td><td>0.98</td></tr><tr><td>g628</td><td>0.15</td><td>5</td><td>0.12</td><td>0.94</td></tr><tr><td>u799</td><td>0.06</td><td>5</td><td>0.13</td><td>0.97</td></tr></table></div>
+<div class="tw"><table><tr><th>MLP, per residue r</th><th>0</th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th><th>8</th><th>9</th></tr>
+<tr><td>write / input radius</td><td>0.31</td><td>0.48</td><td>0.33</td><td>0.37</td><td>0.32</td><td>0.31</td><td>0.30</td><td>0.32</td><td>0.33</td><td>0.34</td></tr>
+<tr><td>radius after / before</td><td>1.20</td><td>1.17</td><td>1.19</td><td>1.21</td><td>1.16</td><td>1.16</td><td>1.14</td><td>1.14</td><td>1.17</td><td>1.14</td></tr>
+<tr><td>spread after / mean spread</td><td>1.14</td><td>1.20</td><td>0.96</td><td>1.00</td><td>0.95</td><td>0.97</td><td>0.88</td><td>0.92</td><td>1.01</td><td>0.97</td></tr>
+</table></div>
+<p>Clouds entering → leaving the MLP: closest pair sep 1.11 (2, 4) →
+1.04 (2, 4); median sep 1.62 → 1.52;
+mean spread 0.758 → 0.811; mean radius 1.777 →
+2.077; leave-one-out accuracy 0.917 → 0.907.</p>
+<figure><img src="notebook/fig/mod10_track_b8.png"><figcaption>Block 8: every prompt's coordinates in the five
+planes P<sub>k</sub> of the residual stream entering the block (top) and leaving it (bottom), each in its own
+boundary's planes, coloured by residue, with the residue means labelled. The cross is the activation zero. For k = 5 (a line)
+the vertical axis is a.</figcaption></figure>
+<h4>Block 9</h4>
+<p>Linear (0.99). Small, uniform writes (0.14–0.20); closest pair 1.04 → 1.01, accuracy 0.912.</p>
+<div class="tw"><table><tr><th></th><th>out gain ‖Ψ<sub>k</sub>(S)‖/‖Ψ<sub>k</sub>(X)‖, k = 1…5</th><th>share from D<sup>X</sup></th>
+<th>Δ / ‖Π<sub>D</sub>X‖</th><th>r²<sub>lin</sub></th><th>mechanism</th></tr>
+<tr><td>attention</td><td>0.00 / 0.00 / 0.00 / 0.00 / 0.00</td><td>1.00–1.12</td>
+<td>0.003</td><td>0.96</td>
+<td>value path r² 0.96; weight on itself 0.039</td></tr>
+<tr><td>MLP</td><td>0.13 / 0.18 / 0.28 / 0.32 / 0.26</td><td>0.98–1.00</td>
+<td>0.299</td><td>0.99</td>
+<td>secant r² 0.99; additivity r² 1.00</td></tr></table></div>
+<p>Mean principal cosine of each plane (k = 1…5) across the attention:
+1.00 / 1.00 / 1.00 / 1.00 / 1.00; across the MLP:
+0.99 / 0.99 / 0.96 / 0.95 / 0.97. Roundness (k = 1…4) entering the block:
+0.79 / 0.75 / 0.89 / 0.38; leaving it: 0.79 / 0.75 / 0.90 / 0.37.
+Largest attention heads in the value path: head 11 (0.43), head 5 (0.21), head 15 (0.07).</p>
+<p>MLP readers carrying 90% of Σ<sub><i>c</i></sub> Σ<sub><i>a</i></sub>‖Δ<sub><i>c</i></sub>‖²:</p>
+<div class="tw"><table><tr><th>reader</th><th>share</th><th>main residue of dt<sub>c</sub></th><th>dt<sub>c</sub> one-hot share</th>
+<th>secant r²</th></tr><tr><td>g61</td><td>0.52</td><td>4</td><td>0.14</td><td>0.99</td></tr><tr><td>u33</td><td>0.31</td><td>9</td><td>0.17</td><td>1.00</td></tr><tr><td>u462</td><td>0.11</td><td>6</td><td>0.13</td><td>0.97</td></tr><tr><td>g14</td><td>0.04</td><td>0</td><td>0.55</td><td>0.95</td></tr><tr><td>g1</td><td>0.03</td><td>8</td><td>0.16</td><td>0.93</td></tr></table></div>
+<div class="tw"><table><tr><th>MLP, per residue r</th><th>0</th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th><th>8</th><th>9</th></tr>
+<tr><td>write / input radius</td><td>0.18</td><td>0.20</td><td>0.15</td><td>0.16</td><td>0.15</td><td>0.14</td><td>0.14</td><td>0.14</td><td>0.16</td><td>0.14</td></tr>
+<tr><td>radius after / before</td><td>1.04</td><td>0.85</td><td>0.95</td><td>0.97</td><td>0.93</td><td>0.94</td><td>0.94</td><td>0.94</td><td>0.98</td><td>0.90</td></tr>
+<tr><td>spread after / mean spread</td><td>1.14</td><td>1.21</td><td>0.96</td><td>1.01</td><td>0.94</td><td>0.98</td><td>0.88</td><td>0.92</td><td>1.01</td><td>0.96</td></tr>
+</table></div>
+<p>Clouds entering → leaving the MLP: closest pair sep 1.04 (2, 4) →
+1.01 (2, 4); median sep 1.52 → 1.50;
+mean spread 0.811 → 0.840; mean radius 2.016 →
+1.908; leave-one-out accuracy 0.907 → 0.912.</p>
+<figure><img src="notebook/fig/mod10_track_b9.png"><figcaption>Block 9: every prompt's coordinates in the five
+planes P<sub>k</sub> of the residual stream entering the block (top) and leaving it (bottom), each in its own
+boundary's planes, coloured by residue, with the residue means labelled. The cross is the activation zero. For k = 5 (a line)
+the vertical axis is a.</figcaption></figure>
+<h4>Block 10</h4>
+<p>Linear (0.98). The smallest writes of all blocks (0.07–0.15), radius ratios 0.98–1.00. The closest pair reaches its lowest value (1.01 → 0.95), with accuracy 0.897.</p>
+<div class="tw"><table><tr><th></th><th>out gain ‖Ψ<sub>k</sub>(S)‖/‖Ψ<sub>k</sub>(X)‖, k = 1…5</th><th>share from D<sup>X</sup></th>
+<th>Δ / ‖Π<sub>D</sub>X‖</th><th>r²<sub>lin</sub></th><th>mechanism</th></tr>
+<tr><td>attention</td><td>0.00 / 0.00 / 0.00 / 0.00 / 0.00</td><td>0.95–1.13</td>
+<td>0.003</td><td>0.93</td>
+<td>value path r² 0.96; weight on itself 0.028</td></tr>
+<tr><td>MLP</td><td>0.14 / 0.14 / 0.25 / 0.19 / 0.09</td><td>0.98</td>
+<td>0.236</td><td>0.98</td>
+<td>secant r² 0.98; additivity r² 1.00</td></tr></table></div>
+<p>Mean principal cosine of each plane (k = 1…5) across the attention:
+1.00 / 1.00 / 1.00 / 1.00 / 1.00; across the MLP:
+0.99 / 0.99 / 0.97 / 0.96 / 1.00. Roundness (k = 1…4) entering the block:
+0.79 / 0.75 / 0.90 / 0.37; leaving it: 0.79 / 0.75 / 0.89 / 0.38.
+Largest attention heads in the value path: head 10 (0.78), head 30 (0.07), head 9 (0.05).</p>
+<p>MLP readers carrying 90% of Σ<sub><i>c</i></sub> Σ<sub><i>a</i></sub>‖Δ<sub><i>c</i></sub>‖²:</p>
+<div class="tw"><table><tr><th>reader</th><th>share</th><th>main residue of dt<sub>c</sub></th><th>dt<sub>c</sub> one-hot share</th>
+<th>secant r²</th></tr><tr><td>g195</td><td>0.76</td><td>4</td><td>0.13</td><td>0.99</td></tr><tr><td>g35</td><td>0.10</td><td>0</td><td>0.17</td><td>0.96</td></tr><tr><td>u165</td><td>0.07</td><td>7</td><td>0.12</td><td>0.90</td></tr><tr><td>g20</td><td>0.07</td><td>4</td><td>0.14</td><td>0.98</td></tr></table></div>
+<div class="tw"><table><tr><th>MLP, per residue r</th><th>0</th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th><th>8</th><th>9</th></tr>
+<tr><td>write / input radius</td><td>0.07</td><td>0.15</td><td>0.10</td><td>0.10</td><td>0.11</td><td>0.09</td><td>0.10</td><td>0.10</td><td>0.10</td><td>0.12</td></tr>
+<tr><td>radius after / before</td><td>1.00</td><td>0.99</td><td>0.98</td><td>0.99</td><td>0.99</td><td>1.00</td><td>0.98</td><td>0.98</td><td>0.98</td><td>0.98</td></tr>
+<tr><td>spread after / mean spread</td><td>1.12</td><td>1.20</td><td>0.96</td><td>1.01</td><td>0.94</td><td>0.97</td><td>0.88</td><td>0.93</td><td>1.02</td><td>0.96</td></tr>
+</table></div>
+<p>Clouds entering → leaving the MLP: closest pair sep 1.01 (2, 4) →
+0.95 (2, 4); median sep 1.50 → 1.42;
+mean spread 0.840 → 0.891; mean radius 1.829 →
+1.805; leave-one-out accuracy 0.912 → 0.897.</p>
+<figure><img src="notebook/fig/mod10_track_b10.png"><figcaption>Block 10: every prompt's coordinates in the five
+planes P<sub>k</sub> of the residual stream entering the block (top) and leaving it (bottom), each in its own
+boundary's planes, coloured by residue, with the residue means labelled. The cross is the activation zero. For k = 5 (a line)
+the vertical axis is a.</figcaption></figure>
+<h4>Block 11</h4>
+<p>Still linear (secant 0.94, additivity 0.99), but the first block since block 0 with a large write (gain up to 0.81). Residue 1 is moved most (0.68 of its radius, against 0.19–0.38). Separation starts to recover: median 1.42 → 1.82, accuracy 0.897 → 0.945.</p>
+<div class="tw"><table><tr><th></th><th>out gain ‖Ψ<sub>k</sub>(S)‖/‖Ψ<sub>k</sub>(X)‖, k = 1…5</th><th>share from D<sup>X</sup></th>
+<th>Δ / ‖Π<sub>D</sub>X‖</th><th>r²<sub>lin</sub></th><th>mechanism</th></tr>
+<tr><td>attention</td><td>0.00 / 0.00 / 0.00 / 0.00 / 0.00</td><td>0.68–1.86</td>
+<td>0.002</td><td>0.79</td>
+<td>value path r² -0.08; weight on itself 0.025</td></tr>
+<tr><td>MLP</td><td>0.81 / 0.59 / 0.61 / 0.44 / 0.33</td><td>0.99–1.01</td>
+<td>0.344</td><td>0.95</td>
+<td>secant r² 0.94; additivity r² 0.99</td></tr></table></div>
+<p>Mean principal cosine of each plane (k = 1…5) across the attention:
+1.00 / 1.00 / 1.00 / 1.00 / 1.00; across the MLP:
+0.85 / 0.89 / 0.88 / 0.92 / 0.95. Roundness (k = 1…4) entering the block:
+0.79 / 0.75 / 0.89 / 0.38; leaving it: 0.71 / 0.72 / 0.76 / 0.36.
+Largest attention heads in the value path: head 4 (0.41), head 16 (0.13), head 19 (0.07).</p>
+<p>MLP readers carrying 90% of Σ<sub><i>c</i></sub> Σ<sub><i>a</i></sub>‖Δ<sub><i>c</i></sub>‖² (2 more readers not listed):</p>
+<div class="tw"><table><tr><th>reader</th><th>share</th><th>main residue of dt<sub>c</sub></th><th>dt<sub>c</sub> one-hot share</th>
+<th>secant r²</th></tr><tr><td>g18</td><td>0.28</td><td>1</td><td>0.33</td><td>0.95</td></tr><tr><td>g32</td><td>0.24</td><td>5</td><td>0.46</td><td>0.95</td></tr><tr><td>g43</td><td>0.19</td><td>0</td><td>0.57</td><td>0.91</td></tr><tr><td>u86</td><td>0.10</td><td>9</td><td>0.15</td><td>0.95</td></tr><tr><td>u47</td><td>0.06</td><td>8</td><td>0.52</td><td>0.90</td></tr><tr><td>u395</td><td>0.04</td><td>4</td><td>0.16</td><td>0.87</td></tr><tr><td>g3</td><td>0.02</td><td>5</td><td>0.16</td><td>0.89</td></tr><tr><td>g837</td><td>0.02</td><td>7</td><td>0.46</td><td>0.95</td></tr></table></div>
+<div class="tw"><table><tr><th>MLP, per residue r</th><th>0</th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th><th>8</th><th>9</th></tr>
+<tr><td>write / input radius</td><td>0.19</td><td>0.68</td><td>0.38</td><td>0.31</td><td>0.29</td><td>0.34</td><td>0.29</td><td>0.30</td><td>0.27</td><td>0.29</td></tr>
+<tr><td>radius after / before</td><td>1.13</td><td>1.67</td><td>1.32</td><td>1.28</td><td>1.25</td><td>1.25</td><td>1.23</td><td>1.26</td><td>1.20</td><td>1.27</td></tr>
+<tr><td>spread after / mean spread</td><td>1.11</td><td>1.20</td><td>0.97</td><td>1.01</td><td>0.96</td><td>0.99</td><td>0.88</td><td>0.93</td><td>1.00</td><td>0.96</td></tr>
+</table></div>
+<p>Clouds entering → leaving the MLP: closest pair sep 0.95 (2, 4) →
+1.05 (7, 9); median sep 1.42 → 1.82;
+mean spread 0.891 → 0.904; mean radius 1.818 →
+2.297; leave-one-out accuracy 0.897 → 0.945.</p>
+<figure><img src="notebook/fig/mod10_track_b11.png"><figcaption>Block 11: every prompt's coordinates in the five
+planes P<sub>k</sub> of the residual stream entering the block (top) and leaving it (bottom), each in its own
+boundary's planes, coloured by residue, with the residue means labelled. The cross is the activation zero. For k = 5 (a line)
+the vertical axis is a.</figcaption></figure>
+<h4>Block 12</h4>
+<p>The first block where the MLP's period-10 action is no longer a sum of independent linear reader paths: secant r² 0.76 and additivity 0.81, while the linear fit on z is still 0.92. The k = 3 plane turns most (cosine 0.70) and becomes round (0.76 → 0.98). The clouds tighten (spread 0.90 → 0.83) and separate (median 1.82 → 2.70; accuracy 0.988). Residues 1 and 9 are moved most (0.49, 0.45, against 0.19–0.27).</p>
+<div class="tw"><table><tr><th></th><th>out gain ‖Ψ<sub>k</sub>(S)‖/‖Ψ<sub>k</sub>(X)‖, k = 1…5</th><th>share from D<sup>X</sup></th>
+<th>Δ / ‖Π<sub>D</sub>X‖</th><th>r²<sub>lin</sub></th><th>mechanism</th></tr>
+<tr><td>attention</td><td>0.00 / 0.01 / 0.00 / 0.01 / 0.01</td><td>0.91–1.17</td>
+<td>0.008</td><td>0.88</td>
+<td>value path r² 0.77; weight on itself 0.060</td></tr>
+<tr><td>MLP</td><td>0.67 / 0.62 / 1.17 / 0.72 / 0.45</td><td>0.97–1.01</td>
+<td>0.573</td><td>0.92</td>
+<td>secant r² 0.76; additivity r² 0.81</td></tr></table></div>
+<p>Mean principal cosine of each plane (k = 1…5) across the attention:
+1.00 / 1.00 / 1.00 / 1.00 / 1.00; across the MLP:
+0.88 / 0.88 / 0.70 / 0.80 / 0.92. Roundness (k = 1…4) entering the block:
+0.71 / 0.72 / 0.76 / 0.36; leaving it: 0.76 / 0.77 / 0.98 / 0.39.
+Largest attention heads in the value path: head 12 (0.74), head 20 (0.14), head 3 (0.06).</p>
+<p>MLP readers carrying 90% of Σ<sub><i>c</i></sub> Σ<sub><i>a</i></sub>‖Δ<sub><i>c</i></sub>‖² (1 more readers not listed):</p>
+<div class="tw"><table><tr><th>reader</th><th>share</th><th>main residue of dt<sub>c</sub></th><th>dt<sub>c</sub> one-hot share</th>
+<th>secant r²</th></tr><tr><td>g10</td><td>0.24</td><td>2</td><td>0.23</td><td>0.73</td></tr><tr><td>g20</td><td>0.17</td><td>8</td><td>0.21</td><td>0.80</td></tr><tr><td>g33</td><td>0.16</td><td>6</td><td>0.36</td><td>0.81</td></tr><tr><td>g37</td><td>0.15</td><td>3</td><td>0.35</td><td>0.82</td></tr><tr><td>g26</td><td>0.08</td><td>0</td><td>0.39</td><td>0.65</td></tr><tr><td>g381</td><td>0.07</td><td>9</td><td>0.14</td><td>0.98</td></tr><tr><td>u26</td><td>0.05</td><td>0</td><td>0.62</td><td>0.57</td></tr><tr><td>g11</td><td>0.05</td><td>7</td><td>0.29</td><td>0.74</td></tr></table></div>
+<div class="tw"><table><tr><th>MLP, per residue r</th><th>0</th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th><th>8</th><th>9</th></tr>
+<tr><td>write / input radius</td><td>0.24</td><td>0.49</td><td>0.19</td><td>0.27</td><td>0.22</td><td>0.21</td><td>0.27</td><td>0.24</td><td>0.21</td><td>0.45</td></tr>
+<tr><td>radius after / before</td><td>0.94</td><td>0.90</td><td>0.87</td><td>0.87</td><td>0.88</td><td>0.89</td><td>0.94</td><td>0.87</td><td>0.82</td><td>1.00</td></tr>
+<tr><td>spread after / mean spread</td><td>1.14</td><td>1.18</td><td>0.98</td><td>1.03</td><td>0.97</td><td>1.01</td><td>0.87</td><td>0.90</td><td>0.96</td><td>0.96</td></tr>
+</table></div>
+<p>Clouds entering → leaving the MLP: closest pair sep 1.05 (7, 9) →
+1.45 (2, 3); median sep 1.82 → 2.70;
+mean spread 0.903 → 0.829; mean radius 2.335 →
+2.096; leave-one-out accuracy 0.945 → 0.988.</p>
+<figure><img src="notebook/fig/mod10_track_b12.png"><figcaption>Block 12: every prompt's coordinates in the five
+planes P<sub>k</sub> of the residual stream entering the block (top) and leaving it (bottom), each in its own
+boundary's planes, coloured by residue, with the residue means labelled. The cross is the activation zero. For k = 5 (a line)
+the vertical axis is a.</figcaption></figure>
+<h4>Block 13</h4>
+<p>The most non-linear block: linear fit 0.70, secant 0.51, additivity 0.75; its main readers are less one-hot (0.12–0.59) and individually non-linear (secant r² 0.34–0.54). Planes k = 3, 4 turn (cosine 0.66, 0.65), and k = 4 becomes rounder (0.39 → 0.70). The clouds tighten (spread 0.83 → 0.67) and separate sharply: closest pair 1.45 → 3.06, median 2.70 → 4.21, accuracy 1.000. Residues 3, 7 and 8 are moved most (0.59, 0.65, 0.52, against 0.21–0.45).</p>
+<div class="tw"><table><tr><th></th><th>out gain ‖Ψ<sub>k</sub>(S)‖/‖Ψ<sub>k</sub>(X)‖, k = 1…5</th><th>share from D<sup>X</sup></th>
+<th>Δ / ‖Π<sub>D</sub>X‖</th><th>r²<sub>lin</sub></th><th>mechanism</th></tr>
+<tr><td>attention</td><td>0.00 / 0.00 / 0.00 / 0.00 / 0.00</td><td>0.71–1.09</td>
+<td>0.003</td><td>0.92</td>
+<td>value path r² 0.98; weight on itself 0.041</td></tr>
+<tr><td>MLP</td><td>0.52 / 0.63 / 1.22 / 0.96 / 0.49</td><td>1.00</td>
+<td>0.537</td><td>0.70</td>
+<td>secant r² 0.51; additivity r² 0.75</td></tr></table></div>
+<p>Mean principal cosine of each plane (k = 1…5) across the attention:
+1.00 / 1.00 / 1.00 / 1.00 / 1.00; across the MLP:
+0.92 / 0.89 / 0.66 / 0.65 / 0.92. Roundness (k = 1…4) entering the block:
+0.76 / 0.77 / 0.98 / 0.39; leaving it: 0.87 / 0.81 / 0.90 / 0.70.
+Largest attention heads in the value path: head 28 (0.80), head 7 (0.07), head 19 (0.06).</p>
+<p>MLP readers carrying 90% of Σ<sub><i>c</i></sub> Σ<sub><i>a</i></sub>‖Δ<sub><i>c</i></sub>‖² (2 more readers not listed):</p>
+<div class="tw"><table><tr><th>reader</th><th>share</th><th>main residue of dt<sub>c</sub></th><th>dt<sub>c</sub> one-hot share</th>
+<th>secant r²</th></tr><tr><td>g9</td><td>0.19</td><td>7</td><td>0.59</td><td>0.53</td></tr><tr><td>g11</td><td>0.16</td><td>5</td><td>0.53</td><td>0.43</td></tr><tr><td>g14</td><td>0.13</td><td>3</td><td>0.41</td><td>0.39</td></tr><tr><td>g10</td><td>0.12</td><td>8</td><td>0.27</td><td>0.34</td></tr><tr><td>g114</td><td>0.11</td><td>8</td><td>0.12</td><td>0.54</td></tr><tr><td>g46</td><td>0.09</td><td>0</td><td>0.47</td><td>0.59</td></tr><tr><td>u52</td><td>0.08</td><td>0</td><td>0.49</td><td>0.59</td></tr><tr><td>g53</td><td>0.07</td><td>7</td><td>0.39</td><td>0.34</td></tr></table></div>
+<div class="tw"><table><tr><th>MLP, per residue r</th><th>0</th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th><th>8</th><th>9</th></tr>
+<tr><td>write / input radius</td><td>0.21</td><td>0.29</td><td>0.32</td><td>0.59</td><td>0.40</td><td>0.45</td><td>0.22</td><td>0.65</td><td>0.52</td><td>0.31</td></tr>
+<tr><td>radius after / before</td><td>1.04</td><td>0.97</td><td>1.06</td><td>1.18</td><td>1.12</td><td>1.14</td><td>0.99</td><td>1.19</td><td>1.19</td><td>1.07</td></tr>
+<tr><td>spread after / mean spread</td><td>1.18</td><td>1.14</td><td>1.03</td><td>1.00</td><td>0.98</td><td>1.07</td><td>0.83</td><td>0.87</td><td>0.95</td><td>0.95</td></tr>
+</table></div>
+<p>Clouds entering → leaving the MLP: closest pair sep 1.45 (2, 3) →
+3.06 (2, 3); median sep 2.70 → 4.21;
+mean spread 0.829 → 0.667; mean radius 2.057 →
+2.250; leave-one-out accuracy 0.988 → 1.000.</p>
+<figure><img src="notebook/fig/mod10_track_b13.png"><figcaption>Block 13: every prompt's coordinates in the five
+planes P<sub>k</sub> of the residual stream entering the block (top) and leaving it (bottom), each in its own
+boundary's planes, coloured by residue, with the residue means labelled. The cross is the activation zero. For k = 5 (a line)
+the vertical axis is a.</figcaption></figure>
+<h4>Block 14</h4>
+<p>Non-linear (linear fit 0.73, secant 0.64, additivity 0.83). The writes split the residues into two groups: 1, 2, 4, 6 and 9 receive 0.38–0.43 of their radius, and 0, 3, 5, 7 and 8 receive 0.17. Separation increases further (closest pair 3.06 → 4.12, median 4.22 → 5.09).</p>
+<div class="tw"><table><tr><th></th><th>out gain ‖Ψ<sub>k</sub>(S)‖/‖Ψ<sub>k</sub>(X)‖, k = 1…5</th><th>share from D<sup>X</sup></th>
+<th>Δ / ‖Π<sub>D</sub>X‖</th><th>r²<sub>lin</sub></th><th>mechanism</th></tr>
+<tr><td>attention</td><td>0.00 / 0.00 / 0.00 / 0.00 / 0.00</td><td>0.98–1.14</td>
+<td>0.003</td><td>0.66</td>
+<td>value path r² -0.68; weight on itself 0.040</td></tr>
+<tr><td>MLP</td><td>0.42 / 0.48 / 0.68 / 0.65 / 0.53</td><td>0.99–1.00</td>
+<td>0.568</td><td>0.73</td>
+<td>secant r² 0.64; additivity r² 0.83</td></tr></table></div>
+<p>Mean principal cosine of each plane (k = 1…5) across the attention:
+1.00 / 1.00 / 1.00 / 1.00 / 1.00; across the MLP:
+0.92 / 0.92 / 0.83 / 0.86 / 0.91. Roundness (k = 1…4) entering the block:
+0.87 / 0.81 / 0.90 / 0.70; leaving it: 0.89 / 0.92 / 0.91 / 0.66.
+Largest attention heads in the value path: head 26 (0.50), head 8 (0.22), head 18 (0.06).</p>
+<p>MLP readers carrying 90% of Σ<sub><i>c</i></sub> Σ<sub><i>a</i></sub>‖Δ<sub><i>c</i></sub>‖² (2 more readers not listed):</p>
+<div class="tw"><table><tr><th>reader</th><th>share</th><th>main residue of dt<sub>c</sub></th><th>dt<sub>c</sub> one-hot share</th>
+<th>secant r²</th></tr><tr><td>g98</td><td>0.19</td><td>8</td><td>0.26</td><td>0.63</td></tr><tr><td>g23</td><td>0.18</td><td>2</td><td>0.62</td><td>0.45</td></tr><tr><td>g24</td><td>0.13</td><td>4</td><td>0.89</td><td>0.84</td></tr><tr><td>g40</td><td>0.12</td><td>9</td><td>0.63</td><td>0.69</td></tr><tr><td>u83</td><td>0.11</td><td>8</td><td>0.12</td><td>0.44</td></tr><tr><td>u63</td><td>0.10</td><td>6</td><td>0.60</td><td>0.68</td></tr><tr><td>g63</td><td>0.06</td><td>6</td><td>0.79</td><td>0.72</td></tr><tr><td>u38</td><td>0.05</td><td>0</td><td>0.48</td><td>0.83</td></tr></table></div>
+<div class="tw"><table><tr><th>MLP, per residue r</th><th>0</th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th><th>8</th><th>9</th></tr>
+<tr><td>write / input radius</td><td>0.17</td><td>0.43</td><td>0.40</td><td>0.17</td><td>0.42</td><td>0.17</td><td>0.38</td><td>0.17</td><td>0.17</td><td>0.39</td></tr>
+<tr><td>radius after / before</td><td>0.97</td><td>1.25</td><td>1.12</td><td>1.03</td><td>1.18</td><td>1.03</td><td>1.19</td><td>1.06</td><td>1.04</td><td>1.19</td></tr>
+<tr><td>spread after / mean spread</td><td>1.28</td><td>1.09</td><td>1.01</td><td>0.98</td><td>0.97</td><td>1.12</td><td>0.84</td><td>0.84</td><td>0.95</td><td>0.91</td></tr>
+</table></div>
+<p>Clouds entering → leaving the MLP: closest pair sep 3.06 (2, 3) →
+4.12 (5, 6); median sep 4.22 → 5.09;
+mean spread 0.667 → 0.642; mean radius 2.244 →
+2.469; leave-one-out accuracy 1.000 → 1.000.</p>
+<figure><img src="notebook/fig/mod10_track_b14.png"><figcaption>Block 14: every prompt's coordinates in the five
+planes P<sub>k</sub> of the residual stream entering the block (top) and leaving it (bottom), each in its own
+boundary's planes, coloured by residue, with the residue means labelled. The cross is the activation zero. For k = 5 (a line)
+the vertical axis is a.</figcaption></figure>
+<h4>Block 15</h4>
+<p>Additive over readers again (0.97) but not linear per reader (secant 0.75, linear fit 0.74). Writes are small (0.08–0.20). Spread grows (0.64 → 0.71), and the closest pair falls slightly (4.12 → 3.89).</p>
+<div class="tw"><table><tr><th></th><th>out gain ‖Ψ<sub>k</sub>(S)‖/‖Ψ<sub>k</sub>(X)‖, k = 1…5</th><th>share from D<sup>X</sup></th>
+<th>Δ / ‖Π<sub>D</sub>X‖</th><th>r²<sub>lin</sub></th><th>mechanism</th></tr>
+<tr><td>attention</td><td>0.00 / 0.01 / 0.00 / 0.00 / 0.01</td><td>0.98–1.03</td>
+<td>0.006</td><td>0.90</td>
+<td>value path r² 0.28; weight on itself 0.048</td></tr>
+<tr><td>MLP</td><td>0.34 / 0.32 / 0.28 / 0.35 / 0.27</td><td>0.94–0.99</td>
+<td>0.395</td><td>0.74</td>
+<td>secant r² 0.75; additivity r² 0.97</td></tr></table></div>
+<p>Mean principal cosine of each plane (k = 1…5) across the attention:
+1.00 / 1.00 / 1.00 / 1.00 / 1.00; across the MLP:
+0.95 / 0.95 / 0.96 / 0.96 / 0.97. Roundness (k = 1…4) entering the block:
+0.89 / 0.92 / 0.91 / 0.66; leaving it: 0.90 / 0.86 / 0.90 / 0.62.
+Largest attention heads in the value path: head 6 (0.32), head 0 (0.16), head 13 (0.09).</p>
+<p>MLP readers carrying 90% of Σ<sub><i>c</i></sub> Σ<sub><i>a</i></sub>‖Δ<sub><i>c</i></sub>‖² (4 more readers not listed):</p>
+<div class="tw"><table><tr><th>reader</th><th>share</th><th>main residue of dt<sub>c</sub></th><th>dt<sub>c</sub> one-hot share</th>
+<th>secant r²</th></tr><tr><td>g67</td><td>0.40</td><td>7</td><td>0.14</td><td>0.81</td></tr><tr><td>u111</td><td>0.16</td><td>0</td><td>0.25</td><td>0.88</td></tr><tr><td>g268</td><td>0.09</td><td>1</td><td>0.22</td><td>0.59</td></tr><tr><td>u399</td><td>0.06</td><td>1</td><td>0.23</td><td>0.75</td></tr><tr><td>u176</td><td>0.06</td><td>9</td><td>0.68</td><td>0.65</td></tr><tr><td>g5</td><td>0.04</td><td>0</td><td>0.29</td><td>0.87</td></tr><tr><td>u324</td><td>0.04</td><td>0</td><td>0.36</td><td>0.49</td></tr><tr><td>g230</td><td>0.04</td><td>9</td><td>0.85</td><td>0.72</td></tr></table></div>
+<div class="tw"><table><tr><th>MLP, per residue r</th><th>0</th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th><th>8</th><th>9</th></tr>
+<tr><td>write / input radius</td><td>0.20</td><td>0.08</td><td>0.12</td><td>0.18</td><td>0.17</td><td>0.17</td><td>0.17</td><td>0.17</td><td>0.19</td><td>0.16</td></tr>
+<tr><td>radius after / before</td><td>1.08</td><td>0.97</td><td>1.05</td><td>1.12</td><td>1.13</td><td>1.07</td><td>1.08</td><td>1.07</td><td>1.12</td><td>1.08</td></tr>
+<tr><td>spread after / mean spread</td><td>1.25</td><td>1.02</td><td>1.00</td><td>1.01</td><td>1.01</td><td>1.14</td><td>0.89</td><td>0.83</td><td>0.96</td><td>0.89</td></tr>
+</table></div>
+<p>Clouds entering → leaving the MLP: closest pair sep 4.12 (5, 6) →
+3.89 (2, 3); median sep 5.09 → 4.72;
+mean spread 0.642 → 0.707; mean radius 2.465 →
+2.658; leave-one-out accuracy 1.000 → 1.000.</p>
+<figure><img src="notebook/fig/mod10_track_b15.png"><figcaption>Block 15: every prompt's coordinates in the five
+planes P<sub>k</sub> of the residual stream entering the block (top) and leaving it (bottom), each in its own
+boundary's planes, coloured by residue, with the residue means labelled. The cross is the activation zero. For k = 5 (a line)
+the vertical axis is a.</figcaption></figure>
+<h4>Block 16</h4>
+<p>Additive (0.95), secant 0.77, linear fit 0.79. Residue 1 is moved most (0.47, against 0.11–0.29). Spread grows (0.71 → 0.88) faster than radius (2.69 → 3.21), and the closest pair falls 3.88 → 3.52.</p>
+<div class="tw"><table><tr><th></th><th>out gain ‖Ψ<sub>k</sub>(S)‖/‖Ψ<sub>k</sub>(X)‖, k = 1…5</th><th>share from D<sup>X</sup></th>
+<th>Δ / ‖Π<sub>D</sub>X‖</th><th>r²<sub>lin</sub></th><th>mechanism</th></tr>
+<tr><td>attention</td><td>0.04 / 0.04 / 0.03 / 0.02 / 0.04</td><td>0.99–1.00</td>
+<td>0.039</td><td>0.95</td>
+<td>value path r² 0.86; weight on itself 0.066</td></tr>
+<tr><td>MLP</td><td>0.32 / 0.40 / 0.38 / 0.50 / 0.36</td><td>0.95–0.99</td>
+<td>0.398</td><td>0.79</td>
+<td>secant r² 0.77; additivity r² 0.95</td></tr></table></div>
+<p>Mean principal cosine of each plane (k = 1…5) across the attention:
+1.00 / 1.00 / 1.00 / 1.00 / 1.00; across the MLP:
+0.95 / 0.94 / 0.95 / 0.91 / 0.95. Roundness (k = 1…4) entering the block:
+0.90 / 0.86 / 0.90 / 0.62; leaving it: 0.89 / 0.86 / 0.92 / 0.69.
+Largest attention heads in the value path: head 22 (0.47), head 30 (0.44), head 5 (0.02).</p>
+<p>MLP readers carrying 90% of Σ<sub><i>c</i></sub> Σ<sub><i>a</i></sub>‖Δ<sub><i>c</i></sub>‖² (5 more readers not listed):</p>
+<div class="tw"><table><tr><th>reader</th><th>share</th><th>main residue of dt<sub>c</sub></th><th>dt<sub>c</sub> one-hot share</th>
+<th>secant r²</th></tr><tr><td>g51</td><td>0.30</td><td>1</td><td>0.18</td><td>0.85</td></tr><tr><td>g48</td><td>0.16</td><td>8</td><td>0.65</td><td>0.80</td></tr><tr><td>g348</td><td>0.16</td><td>0</td><td>0.25</td><td>0.81</td></tr><tr><td>u134</td><td>0.09</td><td>7</td><td>0.89</td><td>0.91</td></tr><tr><td>u413</td><td>0.06</td><td>3</td><td>0.76</td><td>0.87</td></tr><tr><td>u207</td><td>0.05</td><td>1</td><td>0.14</td><td>0.48</td></tr><tr><td>g62</td><td>0.04</td><td>4</td><td>0.20</td><td>0.83</td></tr><tr><td>u666</td><td>0.04</td><td>0</td><td>0.26</td><td>0.54</td></tr></table></div>
+<div class="tw"><table><tr><th>MLP, per residue r</th><th>0</th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th><th>8</th><th>9</th></tr>
+<tr><td>write / input radius</td><td>0.11</td><td>0.47</td><td>0.17</td><td>0.21</td><td>0.16</td><td>0.21</td><td>0.27</td><td>0.27</td><td>0.29</td><td>0.16</td></tr>
+<tr><td>radius after / before</td><td>0.96</td><td>1.43</td><td>1.16</td><td>1.17</td><td>1.14</td><td>1.19</td><td>1.25</td><td>1.23</td><td>1.25</td><td>1.17</td></tr>
+<tr><td>spread after / mean spread</td><td>1.26</td><td>1.06</td><td>1.02</td><td>0.98</td><td>1.01</td><td>1.07</td><td>0.89</td><td>0.83</td><td>1.01</td><td>0.88</td></tr>
+</table></div>
+<p>Clouds entering → leaving the MLP: closest pair sep 3.88 (2, 3) →
+3.52 (2, 3); median sep 4.70 → 4.31;
+mean spread 0.711 → 0.877; mean radius 2.691 →
+3.205; leave-one-out accuracy 1.000 → 1.000.</p>
+<figure><img src="notebook/fig/mod10_track_b16.png"><figcaption>Block 16: every prompt's coordinates in the five
+planes P<sub>k</sub> of the residual stream entering the block (top) and leaving it (bottom), each in its own
+boundary's planes, coloured by residue, with the residue means labelled. The cross is the activation zero. For k = 5 (a line)
+the vertical axis is a.</figcaption></figure><!-- track:end -->
 `
 },
 ];
