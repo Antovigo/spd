@@ -115,7 +115,7 @@ def main() -> None:
     rho = np.sqrt((r_mid**2).mean(1) + 1e-5)
     res["rho_min_max_over_mean"] = [float(rho.min() / rho.mean()), float(rho.max() / rho.mean())]
     res["W_singular_values"] = np.linalg.svd(Vc @ K.T, compute_uv=False)[:12].tolist()
-    np.savez(OUT / "linear.npz", K=K, Vc=Vc, main_r=main_r)
+    np.savez(OUT / "linear.npz", K=K, Vc=Vc, main_r=main_r, dC=dC, W_x=W_x, tC=tC)
     (OUT / "linear.json").write_text(json.dumps(res, indent=1))
     print(json.dumps(res, indent=1))
 

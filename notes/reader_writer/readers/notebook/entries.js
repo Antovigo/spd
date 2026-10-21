@@ -249,6 +249,75 @@ reader's <i>s<sub>c</sub></i> <i>t<sub>c</sub></i>, where <i>t<sub>c</sub></i> =
 activation and <i>x</i> the block-0 MLP input. Next come its kept writers' <i>t<sub>w</sub></i>, in raw gauge, titled with
 the reader fraction and φ. The colour scale is symmetric about zero in each panel (red positive, blue negative),
 with the limit in the title.</figcaption></figure>
+
+<h3>7. What the block-0 MLP does to the representation</h3>
+<p>Only the MLP's component activations are stored, so block 0 of the alive-only model (attention and MLP, weight delta
+off) was rebuilt in float64 from the checkpoint. It matches the stored gate and up activations to 0.4% and the writer
+activations to 1%. Scripts: <code>mlp0_mod10.py</code>, <code>mlp0_linear.py</code>, <code>mlp0_linear_fig.py</code> (same folder).</p>
+<ul>
+<li><b>Fields.</b> <i>r</i><sub>mid</sub>(<i>a</i>) ∈ ℝ<sup>4096</sup> is the residual stream entering the MLP, <i>m</i>(<i>a</i>) the MLP
+output, and <i>r</i><sub>out</sub> = <i>r</i><sub>mid</sub> + <i>m</i>. The MLP input is <i>x</i> = γ ⊙ <i>r</i><sub>mid</sub> / ρ, where
+γ ∈ ℝ<sup>4096</sup> is the post-attention RMSNorm weight and ρ(<i>a</i>) &gt; 0 the root-mean-square of <i>r</i><sub>mid</sub>(<i>a</i>).</li>
+<li><b>Fourier components.</b> Ψ<sub><i>k</i></sub><sup><i>X</i></sup> is defined as in the setup, from the residue means of a field <i>X</i>.
+<i>D<sub>x</sub></i> is the 9-dimensional span of the frequency 1–5 planes of <i>x</i>, and Π<sub><i>D<sub>x</sub></i></sub> the
+orthogonal projection onto it.</li>
+<li><b>Neurons.</b> <i>n</i> ∈ {0, …, 14335} indexes the neurons, and <i>U</i><sub>g,<i>c</i>,<i>n</i></sub> and <i>U</i><sub>u,<i>c</i>,<i>n</i></sub>
+are gate or up reader <i>c</i>'s writes to neuron <i>n</i>. ω<sub><i>n</i></sub> ∈ ℝ<sup>4096</sup> is neuron <i>n</i>'s write vector,
+summed over the alive writers.</li>
+<li><b>C</b> is the set of the 10 period-10 readers of section 2, with u31 left out. In C, every residue has exactly one reader.</li>
+</ul>
+<p><b>Attention adds no period-10 structure.</b> At frequencies 1–5, block-0 attention's output has Fourier amplitudes
+0.001–0.004, against 0.39–0.61 for the embedding. The representation entering the MLP is the embedding's.</p>
+<p><b>The MLP does not erase it.</b> Write the MLP output's frequency-<i>k</i> component as β<sub><i>k</i></sub> Ψ<sub><i>k</i></sub><sup>mid</sup>
+plus a part outside the input plane, with β<sub><i>k</i></sub> a complex number. Re β<sub><i>k</i></sub> is positive at every frequency:
+0.68, 0.71, 0.09, 0.32 and 0.82 for <i>k</i> = 1 … 5. The MLP adds along the original direction. After the block, the component
+inside the original plane is 1.09–1.82 times the input's. Most of the MLP's frequency-<i>k</i> output is written to new
+directions: only 1–24% of ‖Ψ<sub><i>k</i></sub><sup><i>m</i></sup>‖² lies in the input's plane.</p>
+<p><b>The SwiGLU in closed form.</b> With <i>t<sub>c</sub></i>(<i>a</i>) = <i>x</i>(<i>a</i>) · <i>V<sub>c</sub></i> for every reader <i>c</i>:</p>
+<p style="padding-left:2em">
+<i>h</i><sub>g,<i>n</i></sub> = Σ<sub><i>c</i></sub> <i>t<sub>c</sub></i> <i>U</i><sub>g,<i>c</i>,<i>n</i></sub>, &nbsp;
+<i>h</i><sub>u,<i>n</i></sub> = Σ<sub><i>c</i></sub> <i>t<sub>c</sub></i> <i>U</i><sub>u,<i>c</i>,<i>n</i></sub>, &nbsp;
+<i>o<sub>n</sub></i> = SiLU(<i>h</i><sub>g,<i>n</i></sub>) <i>h</i><sub>u,<i>n</i></sub>, &nbsp;
+<i>m</i> = Σ<sub><i>n</i></sub> <i>o<sub>n</sub></i> ω<sub><i>n</i></sub>.</p>
+<p>Let <i>m</i><sup>0</sup>(<i>a</i>) be the output with <i>t<sub>c</sub></i> set to 0 for every <i>c</i> in C (all other readers
+unchanged), and <i>m</i><sup><i>c</i>→0</sup>(<i>a</i>) the output with only <i>t<sub>c</sub></i> set to 0. The <b>period-10 path</b> is
+Δ<sub>C</sub>(<i>a</i>) = <i>m</i>(<i>a</i>) − <i>m</i><sup>0</sup>(<i>a</i>), and Δ<sub><i>c</i></sub>(<i>a</i>) = <i>m</i>(<i>a</i>) − <i>m</i><sup><i>c</i>→0</sup>(<i>a</i>).
+Σ<sub><i>a</i></sub>‖Δ<sub>C</sub>‖² is 3.5% of Σ<sub><i>a</i></sub>‖<i>m</i>‖².</p>
+<p><b>The gates are not in a linear regime.</b> The components are not neuron-aligned. Each spreads over about 5,700
+neurons, which together hold 90% of ‖<i>U<sub>c</sub></i>‖². On the data, the gate pre-activations of the neurons they
+reach span −2.07 to +1.56. On that range, SiLU is neither off nor linear (panel a), and even its quadratic
+approximation <i>h</i>/2 + <i>h</i>²/4 misses it by up to 0.27.</p>
+<p><b>The readers are one-hot, and that makes the path linear.</b> Each <i>t<sub>c</sub></i> puts 71–99.5% of
+Σ<sub><i>a</i></sub> <i>t<sub>c</sub></i>² on its own residue. The lowest is g69 at 0.71, because of its lobe at <i>r</i> = 5.
+Δ<sub>C</sub> is a function of the ten <i>t<sub>c</sub></i> that is zero when they are all zero. If each <i>t<sub>c</sub></i> took
+only the values 0 and one fixed value, and only one reader were non-zero at a time, any such function would be exactly
+Σ<sub><i>c</i></sub> κ<sub><i>c</i></sub> <i>t<sub>c</sub></i>, whatever the nonlinearity in between. Here κ<sub><i>c</i></sub> ∈ ℝ<sup>4096</sup> is
+the secant, the least-squares slope of Δ<sub><i>c</i></sub>(<i>a</i>) on <i>t<sub>c</sub></i>(<i>a</i>). Hence</p>
+<p style="padding-left:2em">Δ<sub>C</sub>(<i>a</i>) ≈ Σ<sub><i>c</i>∈C</sub> κ<sub><i>c</i></sub> <i>V<sub>c</sub></i><sup>T</sup> <i>x</i>(<i>a</i>) = <i>W</i> <i>x</i>(<i>a</i>),
+&nbsp; <i>W</i> = Σ<sub><i>c</i>∈C</sub> κ<sub><i>c</i></sub> <i>V<sub>c</sub></i><sup>T</sup> (a 4096 × 4096 matrix of rank 10; singular values
+0.019–0.177).</p>
+<p>How well each step holds, as uncentred r² = 1 − Σ<sub><i>a</i></sub>‖<i>Y</i> − <i>Ŷ</i>‖² / Σ<sub><i>a</i></sub>‖<i>Y</i>‖²:</p>
+<div class="tw"><table><tr><th>step</th><th>r²</th></tr>
+<tr><td>each reader: Δ<sub><i>c</i></sub> ≈ κ<sub><i>c</i></sub> <i>t<sub>c</sub></i></td><td>0.85–0.97 (g69 0.85, u794 0.88)</td></tr>
+<tr><td>additivity: Δ<sub>C</sub> ≈ Σ<sub><i>c</i></sub> Δ<sub><i>c</i></sub></td><td>0.985</td></tr>
+<tr><td>one linear map: Δ<sub>C</sub> ≈ <i>W x</i></td><td>0.943</td></tr>
+<tr><td>the same map reading only <i>D<sub>x</sub></i>: Δ<sub>C</sub> ≈ <i>W</i> Π<sub><i>D<sub>x</sub></i></sub><i>x</i></td><td>0.886</td></tr></table></div>
+<p>71–84% of each ‖<i>V<sub>c</sub></i>‖² lies in <i>D<sub>x</sub></i>. Here <i>D<sub>x</sub></i> is measured in the full MLP input,
+whereas section 3's 86–97% was measured inside span{<i>V<sub>c</sub></i>}. At the level of the period-10 content, <i>W x</i>
+reproduces Δ<sub>C</sub>'s Fourier components with amplitude ratio 0.90–1.04 and overlap
+Re⟨Ψ<sub><i>k</i></sub><sup>Δ</sup>, Ψ<sub><i>k</i></sub><sup><i>Wx</i></sup>⟩ / ‖Ψ<sub><i>k</i></sub><sup>Δ</sup>‖² of 0.89–1.04. The lowest values
+are <i>k</i> = 3 (0.90) and <i>k</i> = 4 (0.94).</p>
+<p><b>With the residual connection:</b> <i>r</i><sub>out</sub>(<i>a</i>) = <i>r</i><sub>mid</sub>(<i>a</i>) + <i>m</i><sup>0</sup>(<i>a</i>) +
+<i>W</i> diag(γ) <i>r</i><sub>mid</sub>(<i>a</i>) / ρ(<i>a</i>) + ε(<i>a</i>). Here diag(γ) is the diagonal matrix with γ on its diagonal,
+and ε(<i>a</i>) is the remainder (r² above). The path is linear in <i>r</i><sub>mid</sub> except for the RMSNorm's per-prompt
+factor 1/ρ(<i>a</i>), where ρ ranges from 0.70 to 1.10 times its mean over <i>a</i>. So the MLP's period-10 path rewrites the
+representation through a single rank-10 linear map. It reaches 94% of the path's energy, and the remainder comes from
+imperfect one-hotness.</p>
+<figure><img src="notebook/fig/mod10_mlp_linear.png"><figcaption>(a) SiLU over the range of gate pre-activations met on
+the data (shaded), with ReLU and the tangent at zero for comparison. (b) For each reader of C: share of
+Σ<sub><i>a</i></sub> <i>t<sub>c</sub></i>² on its own residue (bars) and r² of the secant fit Δ<sub><i>c</i></sub> ≈ κ<sub><i>c</i></sub> <i>t<sub>c</sub></i>
+(dots). (c) Fourier amplitudes ‖Ψ<sub><i>k</i></sub>‖ of Δ<sub>C</sub> and of <i>W x</i>. (d) ‖Δ<sub>C</sub>(<i>a</i>)‖ and the
+per-prompt error ‖Δ<sub>C</sub>(<i>a</i>) − <i>W x</i>(<i>a</i>)‖, for <i>a</i> = 1 … 400.</figcaption></figure>
 `
 },
 ];
