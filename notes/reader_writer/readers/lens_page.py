@@ -24,6 +24,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from mod10_L0 import A
 from scipy.stats import gaussian_kde
+from sklearn.model_selection import StratifiedKFold
 from track_build import OUT, load_blocks, rmsnorm
 
 R = A % 10
@@ -34,6 +35,51 @@ ON, OFF = "#c0392b", "#2a5db0"
 
 def dprime(on: np.ndarray, off: np.ndarray) -> float:
     return float(abs(on.mean() - off.mean()) / np.sqrt((on.var() + off.var()) / 2))
+
+
+def ridge_lda(Z: np.ndarray, on: np.ndarray, lam: float) -> np.ndarray:
+    """w = (S_w + lam * tr(S_w)/d * I)^-1 (m_on - m_off), S_w the pooled within-class scatter, computed in sample
+    space (Woodbury) so the 4096 x 4096 matrix is never formed."""
+    m1, m0 = Z[on].mean(0), Z[~on].mean(0)
+    C = np.concatenate([Z[on] - m1, Z[~on] - m0]) / np.sqrt(len(Z))
+    d = C.shape[1]
+    reg = lam * (C**2).sum() / d
+    dm = m1 - m0
+    K = C @ C.T + reg * np.eye(len(C))
+    return (dm - C.T @ np.linalg.solve(K, C @ dm)) / reg
+
+
+def heldout_lda(Z: np.ndarray, on: np.ndarray) -> dict:
+    """Optimal linear discriminant of on vs off (ridge-regularised Fisher LDA; the ridge strength is chosen by an
+    inner 4-fold cross-validation on the training prompts), evaluated by 5-fold cross-validation. Each held-out fold is
+    projected on the direction w trained on the other folds, scaled so that the training gap between the on and off
+    means is 1 and shifted so that the training off mean is 0 (one affine map per fold, fixed on the training prompts,
+    so that the five folds share one axis; the raw w . Z off means are kept in off_mean_by_fold)."""
+    lams = (1e-3, 1e-2, 1e-1, 1.0)
+    score = np.zeros(len(Z))
+    dps, aucs, offs, chosen = [], [], [], []
+    for tr, te in StratifiedKFold(5, shuffle=True, random_state=0).split(Z, on):
+        inner = []
+        for lam in lams:
+            v = []
+            for itr, ite in StratifiedKFold(4, shuffle=True, random_state=1).split(Z[tr], on[tr]):
+                w = ridge_lda(Z[tr][itr], on[tr][itr], lam)
+                sv = Z[tr][ite] @ w
+                v.append(dprime(sv[on[tr][ite]], sv[~on[tr][ite]]))
+            inner.append(np.mean(v))
+        lam = lams[int(np.argmax(inner))]
+        chosen.append(lam)
+        w = ridge_lda(Z[tr], on[tr], lam)
+        w = w / ((Z[tr][on[tr]] @ w).mean() - (Z[tr][~on[tr]] @ w).mean())
+        off_tr = (Z[tr][~on[tr]] @ w).mean()
+        sc = Z[te] @ w - off_tr  # this fold's training off mean at 0, training on mean at 1
+        score[te] = sc
+        a, b = sc[on[te]], sc[~on[te]]
+        dps.append(dprime(a, b))
+        aucs.append(float((a[:, None] > b[None, :]).mean()))
+        offs.append(float(off_tr))
+    return {"score": score, "dprime": float(np.mean(dps)), "auc": float(np.mean(aucs)), "off_mean_by_fold": offs,
+            "ridge_chosen": chosen}  # fmt: skip
 
 
 def density(ax, on: np.ndarray, off: np.ndarray, xlabel: str) -> None:  # noqa: ANN001
@@ -63,6 +109,7 @@ def main() -> None:
     X = st["mid_13"].astype(np.float64)
     x = rmsnorm(X, blk.g2)
     tg, tu = blk.readers(X)
+    mlp_out = blk.mlp(X)
     hg, hu = tg @ blk.m["U_gate"], tu @ blk.m["U_up"]
     mu = np.stack([x[r == R].mean(0) for r in range(10)])
     dual = np.linalg.pinv(mu.T)  # (10, 4096): dual[r] . mu[r'] = delta
@@ -79,9 +126,16 @@ def main() -> None:
         j = gid.index(int(reader[1:]))
         share = float(np.abs(tg[:, j] * blk.m["U_gate"][j, n]).mean() / np.abs(g).mean())
         ax = axes[i]
-        density(ax[0], p[on], p[off], f"p(a) = μ*_{r0} · x(a)")
+        before = heldout_lda(X, on)
+        after = heldout_lda(X + mlp_out, on)
+        density(
+            ax[0],
+            before["score"][on],
+            before["score"][off],
+            "held-out score w · X (stream entering the MLP)",
+        )
         ax[0].set_title(
-            f"neuron {n} (r₀ = {r0}) — A: input along μ*_{r0}, d′ = {dprime(p[on], p[off]):.1f}",
+            f"{n} (r₀ = {r0}) A: before MLP, d′ = {before['dprime']:.1f}, AUC = {before['auc']:.3f}",
             fontsize=9,
         )
         lim = np.abs(u).max() * 1.15
@@ -105,12 +159,21 @@ def main() -> None:
             f"C: gate arm, h_g spread on {g[on].std():.2f} → SiLU {sg[on].std():.2f}; off {g[off].std():.2f} → {sg[off].std():.2f}",
             fontsize=9,
         )
-        density(ax[3], o[on], o[off], "neuron output o = SiLU(h_g) · h_u")
-        ax[3].set_title(f"D: neuron output, d′ = {dprime(o[on], o[off]):.1f}", fontsize=9)
+        density(
+            ax[3],
+            after["score"][on],
+            after["score"][off],
+            "held-out score w · X′ (stream leaving the MLP)",
+        )
+        ax[3].set_title(
+            f"D: after MLP, d′ = {after['dprime']:.1f}, AUC = {after['auc']:.3f}", fontsize=9
+        )
         stats[n] = {"reader": reader, "share": share, "r0": r0, "p": [p[on].mean(), p[on].std(), p[off].mean(), p[off].std(), dprime(p[on], p[off])],
                     "hg": [g[on].mean(), g[on].std(), g[off].mean(), g[off].std(), dprime(g[on], g[off])], "hu": [u[on].mean(), u[on].std(), u[off].mean(), u[off].std()],
                     "silu": [sg[on].mean(), sg[on].std(), sg[off].mean(), sg[off].std()],
-                    "o": [o[on].mean(), o[on].std(), o[off].mean(), o[off].std(), dprime(o[on], o[off])]}  # fmt: skip
+                    "o": [o[on].mean(), o[on].std(), o[off].mean(), o[off].std(), dprime(o[on], o[off])],
+                    "lda_before": {k: v for k, v in before.items() if k != "score"},
+                    "lda_after": {k: v for k, v in after.items() if k != "score"}}  # fmt: skip
         s = stats[n]
         rows.append(f"<tr><td>{n}</td><td>{reader} ({share:.2f})</td><td>{r0}</td>"
                     f"<td>{s['p'][0]:.2f} ± {s['p'][1]:.2f} / {s['p'][2]:.2f} ± {s['p'][3]:.2f} (d′ {s['p'][4]:.1f})</td>"
@@ -128,6 +191,9 @@ def main() -> None:
     off_in = [stats[n]["hg"][3] for n in NEURONS]
     off_out = [stats[n]["silu"][3] for n in NEURONS]
     dg = [stats[n]["hg"][4] for n in NEURONS]
+    lb = [stats[n]["lda_before"]["dprime"] for n in NEURONS]
+    la = [stats[n]["lda_after"]["dprime"] for n in NEURONS]
+    gain = [b / a for a, b in zip(lb, la, strict=True)]
     soff = [stats[n]["silu"][2] for n in NEURONS]
     html = f"""{BEGIN}
 <h3>9. Block 13's MLP: a SiLU lens</h3>
@@ -159,15 +225,28 @@ but SiLU(<i>h</i><sub>g</sub>) spreads by only {min(off_out):.2f}–{max(off_out
 same small value. On, the spread passes through about unchanged. So the output is not near zero off: it is a small,
 almost constant value, SiLU(<i>h</i><sub>g</sub>) ≈ {min(soff):.2f} to {max(soff):.2f} times <i>h</i><sub>u</sub>, with the opposite sign
 to <i>h</i><sub>u</sub>.</li>
-<li><b>Result.</b> Along the dual vector, the input separates on from off with d′ = {min(dp):.1f}–{max(dp):.1f} (panel A). The gate
-pre-activation already separates them better, d′ = {min(dg):.1f}–{max(dg):.1f}, because the gate readers do not read along
-μ*<sub><i>r</i>₀</sub> alone (section 8). The neuron's output separates them with d′ = {min(do):.1f}–{max(do):.1f} (panel D). Each such neuron writes, through its writers, an almost noise-free one-hot
-signal for its residue. Adding one per residue moves the residue centres apart while adding little spread.</li>
+<li><b>What the neuron does to its own signal.</b> Along the dual vector μ*<sub><i>r</i>₀</sub>, the MLP input separates on from off with
+d′ = {min(dp):.1f}–{max(dp):.1f}. The gate pre-activation separates them better, d′ = {min(dg):.1f}–{max(dg):.1f}, because the gate
+readers do not read along μ*<sub><i>r</i>₀</sub> alone. The neuron's output separates them with d′ = {min(do):.1f}–{max(do):.1f}.</li>
+<li><b>What the whole MLP does to the stream (panels A and D).</b> A neuron's output is one direction; the question is whether the stream
+is better separated after the MLP. Panels A and D project the residual stream entering and leaving block 13's MLP
+(<i>X</i> and <i>X′</i> = <i>X</i> + MLP(<i>X</i>)) on its optimal linear discriminant of on against off: a ridge-regularised Fisher
+discriminant in the full 4096 dimensions, trained and scored by 5-fold cross-validation, with the ridge strength chosen inside
+each training set. Before the MLP the pools are already perfectly linearly separable on held-out prompts (AUC 1.000, d′
+{min(lb):.1f}–{max(lb):.1f}). After the MLP, d′ is {min(la):.1f}–{max(la):.1f}: {min(gain):.2f}–{max(gain):.2f} times larger
+(AUC 1.000). So the MLP does not create the separation; it enlarges an existing one, modestly by the optimal linear
+measure. What changes more is where the separation sits. Before, it needs a tuned direction in 4096 dimensions: along the dual vector the pools overlap (d′
+{min(dp):.1f}–{max(dp):.1f}). Off-residue prompts are also tighter after the MLP: their spread on the held-out discriminant falls
+from 0.04–0.07 to 0.02–0.03 of the on/off gap. After, each lensing neuron has written a near
+noise-free one-hot signal along its own write direction, and the clouds in the period-10 subspace separate (closest pair 1.79 →
+3.06, section 8).</li>
 </ul>
-<figure><img src="notebook/fig/mod10_lens.png"><figcaption>Four block-13 neurons, one per row (residues 7, 3, 5, 8). (A) Density of
-<i>p</i>(<i>a</i>) = μ*<sub><i>r</i>₀</sub> · <i>x</i>(<i>a</i>), on (red) and off (blue). (B) Up arm: <i>h</i><sub>u</sub> against itself, on
-the line <i>y</i> = <i>x</i>. (C) Gate arm: SiLU(<i>h</i><sub>g</sub>) against <i>h</i><sub>g</sub>, on the SiLU curve. (D) Density of the
-neuron's output <i>o</i> = SiLU(<i>h</i><sub>g</sub>) <i>h</i><sub>u</sub>. Legends give mean ± standard deviation.</figcaption></figure>
+<figure><img src="notebook/fig/mod10_lens.png"><figcaption>Four block-13 neurons, one per row (residues 7, 3, 5, 8). (A) Held-out score of
+the residual stream entering the MLP on its optimal linear discriminant of on (red) against off (blue). (B) Up arm: <i>h</i><sub>u</sub>
+against itself, on the line <i>y</i> = <i>x</i>. (C) Gate arm: SiLU(<i>h</i><sub>g</sub>) against <i>h</i><sub>g</sub>, on the SiLU curve.
+(D) The same as (A) for the stream leaving the MLP. In (A) and (D) the discriminant of each of the five folds is scaled and
+shifted so that its training off and on means sit at 0 and 1, and its held-out prompts are pooled. Titles give the mean
+held-out d′ and the AUC over the folds; legends give mean ± standard deviation.</figcaption></figure>
 {END}"""
     p = args.out / "entries.js"
     s = p.read_text()

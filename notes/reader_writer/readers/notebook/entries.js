@@ -953,15 +953,28 @@ but SiLU(<i>h</i><sub>g</sub>) spreads by only 0.04–0.05. The nine other resid
 same small value. On, the spread passes through about unchanged. So the output is not near zero off: it is a small,
 almost constant value, SiLU(<i>h</i><sub>g</sub>) ≈ -0.24 to -0.23 times <i>h</i><sub>u</sub>, with the opposite sign
 to <i>h</i><sub>u</sub>.</li>
-<li><b>Result.</b> Along the dual vector, the input separates on from off with d′ = 1.0–2.6 (panel A). The gate
-pre-activation already separates them better, d′ = 5.2–6.3, because the gate readers do not read along
-μ*<sub><i>r</i>₀</sub> alone (section 8). The neuron's output separates them with d′ = 11.3–15.1 (panel D). Each such neuron writes, through its writers, an almost noise-free one-hot
-signal for its residue. Adding one per residue moves the residue centres apart while adding little spread.</li>
+<li><b>What the neuron does to its own signal.</b> Along the dual vector μ*<sub><i>r</i>₀</sub>, the MLP input separates on from off with
+d′ = 1.0–2.6. The gate pre-activation separates them better, d′ = 5.2–6.3, because the gate
+readers do not read along μ*<sub><i>r</i>₀</sub> alone. The neuron's output separates them with d′ = 11.3–15.1.</li>
+<li><b>What the whole MLP does to the stream (panels A and D).</b> A neuron's output is one direction; the question is whether the stream
+is better separated after the MLP. Panels A and D project the residual stream entering and leaving block 13's MLP
+(<i>X</i> and <i>X′</i> = <i>X</i> + MLP(<i>X</i>)) on its optimal linear discriminant of on against off: a ridge-regularised Fisher
+discriminant in the full 4096 dimensions, trained and scored by 5-fold cross-validation, with the ridge strength chosen inside
+each training set. Before the MLP the pools are already perfectly linearly separable on held-out prompts (AUC 1.000, d′
+14.1–17.9). After the MLP, d′ is 16.6–20.9: 1.05–1.40 times larger
+(AUC 1.000). So the MLP does not create the separation; it enlarges an existing one, modestly by the optimal linear
+measure. What changes more is where the separation sits. Before, it needs a tuned direction in 4096 dimensions: along the dual vector the pools overlap (d′
+1.0–2.6). Off-residue prompts are also tighter after the MLP: their spread on the held-out discriminant falls
+from 0.04–0.07 to 0.02–0.03 of the on/off gap. After, each lensing neuron has written a near
+noise-free one-hot signal along its own write direction, and the clouds in the period-10 subspace separate (closest pair 1.79 →
+3.06, section 8).</li>
 </ul>
-<figure><img src="notebook/fig/mod10_lens.png"><figcaption>Four block-13 neurons, one per row (residues 7, 3, 5, 8). (A) Density of
-<i>p</i>(<i>a</i>) = μ*<sub><i>r</i>₀</sub> · <i>x</i>(<i>a</i>), on (red) and off (blue). (B) Up arm: <i>h</i><sub>u</sub> against itself, on
-the line <i>y</i> = <i>x</i>. (C) Gate arm: SiLU(<i>h</i><sub>g</sub>) against <i>h</i><sub>g</sub>, on the SiLU curve. (D) Density of the
-neuron's output <i>o</i> = SiLU(<i>h</i><sub>g</sub>) <i>h</i><sub>u</sub>. Legends give mean ± standard deviation.</figcaption></figure>
+<figure><img src="notebook/fig/mod10_lens.png"><figcaption>Four block-13 neurons, one per row (residues 7, 3, 5, 8). (A) Held-out score of
+the residual stream entering the MLP on its optimal linear discriminant of on (red) against off (blue). (B) Up arm: <i>h</i><sub>u</sub>
+against itself, on the line <i>y</i> = <i>x</i>. (C) Gate arm: SiLU(<i>h</i><sub>g</sub>) against <i>h</i><sub>g</sub>, on the SiLU curve.
+(D) The same as (A) for the stream leaving the MLP. In (A) and (D) the discriminant of each of the five folds is scaled and
+shifted so that its training off and on means sit at 0 and 1, and its held-out prompts are pooled. Titles give the mean
+held-out d′ and the AUC over the folds; legends give mean ± standard deviation.</figcaption></figure>
 <!-- lens:end -->
 `
 },
