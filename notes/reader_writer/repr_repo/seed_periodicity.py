@@ -30,10 +30,12 @@ Notation:
   smooth_r2  uncentred share of E explained by a degree-3 polynomial in x (a slow trend in x puts energy in
              P_100, P_50, ... as a sawtooth; a large smooth_r2 next to a tau = 50 or 100 label flags that)
 
-Label: periods = [tau > 1 with share_tau >= THRESH (= meta.response_threshold), share_tau > null_tau, and, for
-tau in {20, 25, 50, 100}, share_tau > align_tau].
-A reader is listed under every such tau (a set of additive parts, not one period): the indicator of x mod 10 = 3
-has parts of exact period 2, 5 and 10 and is listed under all three; minimal_period is their lcm.
+exact_periods = [tau > 1 with share_tau >= THRESH (= meta.response_threshold), share_tau > null_tau, and, for
+tau in {20, 25, 50, 100}, share_tau > align_tau]: the exact-period parts that are present.
+Label: periods = the members of exact_periods that divide no other member: the fewest periods whose periodic
+functions add up to every present part (a function of period tau holds parts of exact period every divisor of tau).
+The indicator of x mod 10 = 3 has parts of exact period 2, 5 and 10 (energy 1 : 4 : 4) and is labelled [10];
+[x mod 2 = 0] + [x mod 5 = 3] has parts 2 and 5 only and is labelled [2, 5]. minimal_period = lcm(periods).
 
     python seed_periodicity.py
 """
@@ -124,13 +126,17 @@ def main() -> None:
             coef, *_ = np.linalg.lstsq(POLY, F, rcond=None)
             smooth = 1 - ((F - POLY @ coef) ** 2).sum(0) / (F**2).sum(0)
             for j, rd in enumerate(rds):
-                periods = [tau for i, tau in enumerate(TAUS)
+                exact = [tau for i, tau in enumerate(TAUS)
                            if tau > 1 and S[i, j] >= thresh and S[i, j] > Q[i, j]
                            and (tau not in ALIGN_TAUS or S[i, j] > QA[i, j])]  # fmt: skip
+                periods = [
+                    tau for tau in exact if not any(u != tau and u % tau == 0 for u in exact)
+                ]
                 entry = readers.setdefault(rd["id"], {"block": b, "kind": rd["kind"],
                                                       "component": rd["component"], "positions": {}})  # fmt: skip
                 entry["positions"][str(t)] = {
                     "periods": periods,
+                    "exact_periods": exact,
                     "minimal_period": lcm(*periods) if periods else None,
                     "share": {str(tau): float(S[i, j]) for i, tau in enumerate(TAUS)},
                     "share_rest": float(S[-1, j]),
