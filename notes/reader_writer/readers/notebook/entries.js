@@ -923,6 +923,46 @@ mean spread 0.711 → 0.877; mean radius 2.691 →
 planes P<sub>k</sub> of the residual stream entering the block (top) and leaving it (bottom), each in its own
 boundary's planes, coloured by residue, with the residue means labelled. The cross is the activation zero. For k = 5 (a line)
 the vertical axis is a.</figcaption></figure><!-- track:end -->
+<!-- lens:begin -->
+<h3>9. Block 13's MLP: a SiLU lens</h3>
+<p>Block 13's MLP is the largest single sharpening step (section 8). Without it, the closest-pair separation of the clouds
+leaving the block would be 1.79. With only the part of its period-10 write that is linear in the
+input's period-10 coordinates, it would be 2.05. With the full MLP it is
+3.06 (<code>mlp_sharpen.py</code>). A purely linear path cannot do better, because it writes each
+prompt's position with the same signal-to-noise ratio as it reads it. The non-linear part comes from neurons like the four below.
+Script: <code>lens_page.py</code>.</p>
+<ul>
+<li><b>Notation.</b> <i>x</i>(<i>a</i>) is block 13's MLP input. μ<sub><i>r</i></sub> is its mean over the 40 values of <i>a</i> with <i>a</i> mod 10 = <i>r</i>,
+and μ*<sub><i>r</i></sub> the dual vectors (μ*<sub><i>r</i></sub> · μ<sub><i>r′</i></sub> = 1 if <i>r</i> = <i>r′</i>, 0 otherwise).
+<i>p</i>(<i>a</i>) = μ*<sub><i>r</i>₀</sub> · <i>x</i>(<i>a</i>) is the input along the representation of the neuron's residue <i>r</i>₀. A neuron <i>n</i> has
+gate and up pre-activations <i>h</i><sub>g</sub> and <i>h</i><sub>u</sub> and output <i>o</i> = SiLU(<i>h</i><sub>g</sub>) <i>h</i><sub>u</sub>.
+"On" means <i>a</i> mod 10 = <i>r</i>₀ (40 prompts) and "off" the other 360. d′ = |mean<sub>on</sub> − mean<sub>off</sub>| /
+√((var<sub>on</sub> + var<sub>off</sub>)/2). Values below are mean ± standard deviation over the on / off prompts.</li>
+</ul>
+<div class="tw"><table><tr><th>neuron</th><th>main gate reader (share of |h<sub>g</sub>|)</th><th>r₀</th><th>p on / off</th>
+<th>h<sub>u</sub> on / off</th><th>h<sub>g</sub> on / off</th><th>SiLU(h<sub>g</sub>) on / off</th><th>o on / off</th></tr><tr><td>1653</td><td>g9 (0.47)</td><td>7</td><td>1.00 ± 0.63 / -0.00 ± 0.73 (d′ 1.5)</td><td>-1.18 ± 0.07 / -1.12 ± 0.10</td><td>+1.97 ± 0.16 / -1.41 ± 0.90</td><td>+1.73 ± 0.17 / -0.23 ± 0.05</td><td>-2.04 ± 0.21 / +0.25 ± 0.06 (d′ 14.6)</td></tr><tr><td>10984</td><td>g14 (0.52)</td><td>3</td><td>1.00 ± 1.05 / 0.00 ± 0.89 (d′ 1.0)</td><td>+1.09 ± 0.08 / +1.13 ± 0.09</td><td>+2.07 ± 0.19 / -1.47 ± 0.84</td><td>+1.84 ± 0.21 / -0.23 ± 0.05</td><td>+2.00 ± 0.28 / -0.26 ± 0.06 (d′ 11.3)</td></tr><tr><td>9765</td><td>g11 (0.48)</td><td>5</td><td>1.00 ± 0.39 / 0.00 ± 0.38 (d′ 2.6)</td><td>+1.11 ± 0.11 / +1.24 ± 0.12</td><td>+1.81 ± 0.21 / -1.35 ± 0.68</td><td>+1.55 ± 0.22 / -0.24 ± 0.04</td><td>+1.70 ± 0.21 / -0.30 ± 0.05 (d′ 13.2)</td></tr><tr><td>8597</td><td>g10 (0.40)</td><td>8</td><td>1.00 ± 0.41 / -0.00 ± 0.44 (d′ 2.3)</td><td>+1.17 ± 0.07 / +1.11 ± 0.09</td><td>+1.88 ± 0.14 / -1.40 ± 0.78</td><td>+1.63 ± 0.16 / -0.23 ± 0.05</td><td>+1.90 ± 0.19 / -0.26 ± 0.06 (d′ 15.1)</td></tr></table></div>
+<p><b>The mechanism, in SwiGLU terms.</b></p>
+<ul>
+<li><b>The up arm is a constant.</b> For each neuron, <i>h</i><sub>u</sub> is about the same on and off (panel B), so the neuron
+acts as SiLU(<i>h</i><sub>g</sub>) times a fixed number.</li>
+<li><b>The gate is far up on its residue and far down elsewhere.</b> On, <i>h</i><sub>g</sub> is +1.8 to +2.1, where SiLU is
+nearly linear: SiLU(<i>h</i><sub>g</sub>) is +1.5 to +1.8, and the output is large, with the sign of <i>h</i><sub>u</sub>. Off,
+<i>h</i><sub>g</sub> is around −1.4, near SiLU's minimum (<i>h</i> ≈ −1.28, SiLU ≈ −0.28), where the curve is flat (panel C).</li>
+<li><b>The flat bottom absorbs the off-residue noise.</b> Off, the gate pre-activation spreads by 0.68–0.90,
+but SiLU(<i>h</i><sub>g</sub>) spreads by only 0.04–0.05. The nine other residues all land on nearly the
+same small value. On, the spread passes through about unchanged. So the output is not near zero off: it is a small,
+almost constant value, SiLU(<i>h</i><sub>g</sub>) ≈ -0.24 to -0.23 times <i>h</i><sub>u</sub>, with the opposite sign
+to <i>h</i><sub>u</sub>.</li>
+<li><b>Result.</b> Along the dual vector, the input separates on from off with d′ = 1.0–2.6 (panel A). The gate
+pre-activation already separates them better, d′ = 5.2–6.3, because the gate readers do not read along
+μ*<sub><i>r</i>₀</sub> alone (section 8). The neuron's output separates them with d′ = 11.3–15.1 (panel D). Each such neuron writes, through its writers, an almost noise-free one-hot
+signal for its residue. Adding one per residue moves the residue centres apart while adding little spread.</li>
+</ul>
+<figure><img src="notebook/fig/mod10_lens.png"><figcaption>Four block-13 neurons, one per row (residues 7, 3, 5, 8). (A) Density of
+<i>p</i>(<i>a</i>) = μ*<sub><i>r</i>₀</sub> · <i>x</i>(<i>a</i>), on (red) and off (blue). (B) Up arm: <i>h</i><sub>u</sub> against itself, on
+the line <i>y</i> = <i>x</i>. (C) Gate arm: SiLU(<i>h</i><sub>g</sub>) against <i>h</i><sub>g</sub>, on the SiLU curve. (D) Density of the
+neuron's output <i>o</i> = SiLU(<i>h</i><sub>g</sub>) <i>h</i><sub>u</sub>. Legends give mean ± standard deviation.</figcaption></figure>
+<!-- lens:end -->
 `
 },
 {
