@@ -925,4 +925,115 @@ boundary's planes, coloured by residue, with the residue means labelled. The cro
 the vertical axis is a.</figcaption></figure><!-- track:end -->
 `
 },
+{
+id: "mod10_p3",
+title: "Mod 10 representations at b (position 3)",
+date: "2026-10-22",
+html: `
+<p><b>Summary.</b> At the token <i>b</i> (position 3), block 0 holds the same mod-10 representation as at the token
+<i>a</i>: the same five Fourier planes (principal cosines ≥ 0.9996), read by the same 11 readers, which feed the
+same writers. Two things differ. (1) Its amplitude at the MLP input is 0.87–0.87 times
+position 1's, because block-0 attention at position 3 adds a larger vector to the stream and the RMSNorm then divides
+by a larger norm. (2) From block 0 on, attention brings the operation and <i>a</i> into position 3. Over blocks 2–10, attention and
+the MLPs turn them into an offset of the whole <i>b</i> circle inside its own subspace, one offset per context (operation, <i>a</i>).
+Pooled over contexts, the <i>b</i> clouds then overlap: by block 11 no residue is linearly separable from the others
+(position 1: all ten at every block). Within a single context, at least 8 of the 10 still are, and all 10
+up to block 7 and from block 13. The MLPs of blocks 12–14
+shrink the operation offset and enlarge the circle, and separability comes back (9 of 10 from block 14).</p>
+
+<h3>Setup</h3>
+<p>Run p-ba8b0c08, step 40000, alive-only model, prompts <code>&lt;BOS&gt; a op b =</code> (tokenized without spaces, as
+in the pool). The token <i>b</i> is the same token as the number <i>b</i> at position 1, so the two positions start from the
+same embedding rows. Position 3 attends to &lt;BOS&gt;, <i>a</i>, the operation and itself, so its stream depends on
+(<i>a</i>, op, <i>b</i>). The residue is <i>r</i> = <i>b</i> mod 10. Block-0 numbers use the stored activations of all 320,000 prompts
+(<code>mod10_p3_L0.py</code>). The tracking through block 16 uses a float64 rebuild of positions 0–3 (<code>track_build_p3.py</code>;
+max relative error against the stored activations 2.3%) on 8,000 prompts: the operands <i>a</i> = 7, 48, 89, 130, 171, 212,
+253, 294, 335, 376 (one per residue of <i>a</i>), every <i>b</i> = 1 … 400 and both operations; a <b>context</b> is one
+(operation, <i>a</i>) pair, 20 in all, and each residue class pools 800 prompts over the 20 contexts. All quantities are
+defined as in the "Mod 10 representations" page (sections 1–8), with <i>a</i> mod 10 replaced by <i>b</i> mod 10. The
+per-reader mechanism of each MLP runs on 1,600 of the prompts (<i>a</i> = 7 and 171). Nothing is centred.
+Scripts: <code>track_p3.py</code>, <code>p3_page.py</code>.</p>
+
+<h3>1. Block 0: the same representation, smaller</h3>
+<ul>
+<li><b>Same planes.</b> In the readers' span, the five planes of <i>b</i> mod 10 at position 3 and of <i>a</i> mod 10 at position 1
+have principal cosines 0.9996–1.0000. Circulant statistic: 0.045 (position 1: 0.047).</li>
+<li><b>Same readers.</b> The readers with r²<sub><i>D</i></sub> ≥ 0.5 are the same 11 (g69, g59, u60, g47, g58, u54, g62, u52, g43,
+u794, u31), with r² 0.53–0.98.
+The position-1 subspace explains them equally well
+(0.50–0.98).
+Their activation hardly depends on the context: the part that varies with (<i>a</i>, op) at fixed <i>b</i> holds
+0.04% or less of Σ <i>f</i>² (u31: 0.56%).</li>
+<li><b>Same writers.</b> Each reader's main writer (variance split at position 3) is the same as at position 1, with
+reader fractions 0.62–0.88: g43 → d43, g47 → d47, g58 → d58, g59 → d59, g62 → d62, g69 → d69, u52 → d52, u54 → d54,
+u60 → d60, u794 → d41, u31 → d41.</li>
+<li><b>Smaller amplitude, from the RMSNorm.</b> ‖Ψ<sub><i>k</i></sub>‖ in the readers' span is
+0.87–0.87 times position 1's. Block-0 attention adds a vector of mean norm 0.47 at position 3
+against 0.22 at position 1, so the stream entering the MLP has mean norm 0.80 against 0.70. The same embedding structure is
+therefore divided by a 1.16 times larger norm. Block-0 MLP's period-10 gain is correspondingly lower: 1.08–1.51 against
+1.37–1.86.</li>
+</ul>
+
+<h3>2. Through blocks 0–16: what is the same</h3>
+<ul>
+<li>Attention never acts on the <i>b</i> representation itself (period-10 gain ≤ 0.07). Position 3 puts 79–93% of its attention
+on &lt;BOS&gt;, 1–8% on <i>a</i>, 3–11% on the operation and 1–8% on itself.</li>
+<li>The MLPs rewrite the representation as at position 1: their gains follow the same pattern (block 0, then blocks 3–4,
+11–14), they are near-additive over readers (≥ 0.92 in blocks 0–12), and blocks 12–14 are the least linear (secant r²
+0.80, 0.53, 0.67; additivity 0.92, 0.80, 0.81), as at position 1 (0.76, 0.51, 0.64).</li>
+<li>The planes drift from the embedding's at the same pace (mean principal cosine leaving block 16: 0.23–0.37, against
+0.20–0.34).</li>
+</ul>
+
+<h3>3. What differs: the context moves the <i>b</i> circle</h3>
+<p><b><i>a</i> and the operation arrive at position 3.</b> The Fourier amplitude of the means over <i>a</i> mod 10 at position 3 is
+0 in the embedding and grows from block 0's attention on (0.2 after block 0's attention, 1.2 after block 1's, 2.6 entering
+block 3, 7.2 entering block 11, 9.0 leaving block 16),
+larger than <i>b</i>'s own. At most 6% of it lies in <i>b</i>'s subspace <i>D</i>. The difference between the + and − means grows from 0.3
+(after block-0 attention) to 4.9 entering block 11.</p>
+<p><b>Inside <i>D</i>, the context translates the circle.</b> For each context <i>k</i>, let <i>C<sub>k,r</sub></i> be the mean of the
+<i>D</i> coordinates over that context's prompts with <i>b</i> mod 10 = <i>r</i>. From block 2 to block 16, one offset vector
+per context reproduces 0.84–0.99 of the variation of <i>C<sub>k,r</sub></i> across contexts. Each context
+therefore has its own copy of the circle, shifted as a whole. Most of the shift is between the two operations
+(panel d: the offset between the + and − circles reaches 1.10 entering block 11, against a circle radius of 0.89). The
+shift builds up over blocks 2–10. Block-2 attention takes it from 0.04 to 0.16; the attention of blocks 4–9 adds 0.03–0.07
+each; the MLPs add 0.02–0.07 each, except block 7's, which adds 0.36. The MLPs' period-10
+output at position 3 is less tied to <i>D</i> than at position 1: in blocks 2–10, 0.77–1.00 of it comes from <i>D</i>
+(position 1: 0.87–1.00).</p>
+<p><b>Pooled clouds overlap; each context stays separable.</b> With the 20 contexts pooled, the closest-pair separation falls
+to 0.73 entering block 11 (position 1: 0.95) and leave-one-out accuracy to 0.764 (position 1: 0.897). Linear separability
+in <i>D</i>, which holds at every block at position 1, is lost: 9 residues separable entering block 5, 5 entering block 7, 0
+entering block 11. Within a single context, the residues stay far more separable: the worst of the 20 contexts has all ten separable up to
+block 7 and from block 13, and 8 or 9 in between (panel c, green).</p>
+<p><b>Blocks 12–14 undo the shift.</b> The operation offset falls from 1.09 to 0.57 entering block 14 while the circle's
+radius grows from 0.96 to 1.44. Separation returns to 2.52–3.07 entering blocks 14–15, and 9 of 10 residues are separable
+again from block 14.</p>
+<figure><img src="notebook/fig/p3_overview.png"><figcaption>(a) Fourier amplitudes ‖Ψ<sub><i>k</i></sub>‖ for <i>k</i> = 1, 5 of the operand's
+residue means at position 1 (solid) and position 3 (dashed), and of <i>a</i> mod 10 at position 3 (dotted). (b) Closest-pair
+separation of the residue clouds in <i>D</i>. (c) Number of residues linearly separable (affine) from the other nine in <i>D</i>:
+position 1, position 3 with the 20 contexts pooled, and the worst single context at position 3. (d) Position 3: mean radius of
+the <i>b</i> circle in <i>D</i> (averaged over contexts), norm of the offset between the + and − circles, and mean offset of an
+<i>a</i>-context from its operation's average.</figcaption></figure>
+<figure><img src="notebook/fig/p3_k1.png"><figcaption>Position 3, projected onto the frequency-1 plane of <i>b</i> mod 10 at each
+boundary (axes turned so that residue 0's mean is on the positive horizontal axis; the cross is the activation zero). Top: all
+8,000 prompts coloured by <i>b</i> mod 10, with the residue means. Bottom: the same points split by operation (blue +, red −), with
+each operation's residue means.</figcaption></figure>
+
+<h3>4. Block by block</h3>
+<p>Each cell gives position 1 / position 3 where both are listed. MLP gain is the range over <i>k</i> = 1 … 5 of the MLP's period-10
+output relative to its input. Separation and accuracy are measured on the stream leaving the block. "Separable" counts the
+residues linearly separable (affine) from the other nine in <i>D</i> at position 3 with contexts pooled, and in brackets the
+worst single context. "Op offset / radius" is position 3's offset between the + and − circles and the circle's radius in
+<i>D</i>, leaving the block. The last column is position 3's mean attention weight on &lt;BOS&gt; / <i>a</i> / op / itself in the block.</p>
+<div class="tw"><table><tr><th>block</th><th>MLP gain p1</th><th>MLP gain p3</th><th>secant r²</th><th>additivity r²</th>
+<th>closest-pair sep</th><th>accuracy</th><th>separable p3 (worst context)</th><th>op offset / radius p3</th>
+<th>attention weights p3</th></tr><tr><td>0</td><td>1.37–1.86</td><td>1.08–1.51</td><td>0.93 / 0.94</td><td>0.94 / 0.95</td><td>4.83 / 4.80</td><td>1.000 / 1.000</td><td>10 (10)</td><td>0.01 / 0.33</td><td>0.79 / 0.06 / 0.11 / 0.04</td></tr><tr><td>1</td><td>0.04–0.10</td><td>0.04–0.12</td><td>0.91 / 0.68</td><td>1.00 / 1.00</td><td>3.59 / 3.58</td><td>1.000 / 1.000</td><td>10 (10)</td><td>0.04 / 0.32</td><td>0.82 / 0.07 / 0.08 / 0.02</td></tr><tr><td>2</td><td>0.29–0.64</td><td>0.14–0.45</td><td>0.94 / 0.77</td><td>0.99 / 0.99</td><td>2.61 / 2.37</td><td>0.998 / 0.998</td><td>10 (10)</td><td>0.18 / 0.40</td><td>0.93 / 0.01 / 0.04 / 0.01</td></tr><tr><td>3</td><td>0.48–0.90</td><td>0.31–0.77</td><td>0.97 / 0.93</td><td>0.98 / 0.97</td><td>2.73 / 2.47</td><td>1.000 / 1.000</td><td>10 (10)</td><td>0.22 / 0.56</td><td>0.90 / 0.04 / 0.03 / 0.02</td></tr><tr><td>4</td><td>0.32–0.60</td><td>0.27–0.62</td><td>0.97 / 0.93</td><td>0.99 / 1.00</td><td>2.22 / 2.09</td><td>1.000 / 1.000</td><td>9 (10)</td><td>0.33 / 0.69</td><td>0.89 / 0.03 / 0.04 / 0.04</td></tr><tr><td>5</td><td>0.24–0.58</td><td>0.11–0.41</td><td>0.96 / 0.70</td><td>0.98 / 0.94</td><td>1.70 / 1.70</td><td>0.985 / 0.998</td><td>8 (10)</td><td>0.43 / 0.74</td><td>0.86 / 0.05 / 0.06 / 0.03</td></tr><tr><td>6</td><td>0.17–0.42</td><td>0.11–0.31</td><td>0.99 / 0.84</td><td>1.00 / 1.00</td><td>1.36 / 1.38</td><td>0.955 / 0.978</td><td>5 (10)</td><td>0.51 / 0.71</td><td>0.86 / 0.03 / 0.07 / 0.03</td></tr><tr><td>7</td><td>0.11–0.29</td><td>0.08–0.16</td><td>0.99 / 0.86</td><td>1.00 / 1.00</td><td>1.12 / 0.94</td><td>0.917 / 0.883</td><td>5 (9)</td><td>0.94 / 0.91</td><td>0.82 / 0.07 / 0.06 / 0.04</td></tr><tr><td>8</td><td>0.08–0.26</td><td>0.07–0.17</td><td>0.98 / 0.89</td><td>1.00 / 1.00</td><td>1.04 / 0.86</td><td>0.907 / 0.845</td><td>3 (8)</td><td>1.00 / 0.84</td><td>0.82 / 0.04 / 0.07 / 0.07</td></tr><tr><td>9</td><td>0.13–0.32</td><td>0.08–0.22</td><td>0.99 / 0.91</td><td>1.00 / 1.00</td><td>1.01 / 0.76</td><td>0.912 / 0.786</td><td>2 (8)</td><td>1.10 / 1.04</td><td>0.91 / 0.02 / 0.03 / 0.05</td></tr><tr><td>10</td><td>0.09–0.25</td><td>0.08–0.16</td><td>0.98 / 0.88</td><td>1.00 / 1.00</td><td>0.95 / 0.73</td><td>0.897 / 0.764</td><td>0 (8)</td><td>1.10 / 0.89</td><td>0.90 / 0.02 / 0.03 / 0.05</td></tr><tr><td>11</td><td>0.33–0.81</td><td>0.29–0.77</td><td>0.94 / 0.93</td><td>0.99 / 0.98</td><td>1.05 / 0.88</td><td>0.945 / 0.881</td><td>4 (9)</td><td>1.09 / 0.96</td><td>0.90 / 0.04 / 0.03 / 0.03</td></tr><tr><td>12</td><td>0.45–1.17</td><td>0.50–1.46</td><td>0.76 / 0.80</td><td>0.81 / 0.92</td><td>1.45 / 1.33</td><td>0.988 / 0.993</td><td>7 (10)</td><td>0.76 / 1.16</td><td>0.81 / 0.05 / 0.05 / 0.08</td></tr><tr><td>13</td><td>0.49–1.22</td><td>0.50–1.29</td><td>0.51 / 0.53</td><td>0.75 / 0.80</td><td>3.06 / 2.52</td><td>1.000 / 0.999</td><td>9 (10)</td><td>0.57 / 1.44</td><td>0.88 / 0.04 / 0.03 / 0.06</td></tr><tr><td>14</td><td>0.42–0.68</td><td>0.39–0.62</td><td>0.64 / 0.67</td><td>0.83 / 0.81</td><td>4.12 / 3.07</td><td>1.000 / 0.999</td><td>9 (10)</td><td>0.54 / 1.60</td><td>0.85 / 0.04 / 0.07 / 0.03</td></tr><tr><td>15</td><td>0.27–0.35</td><td>0.22–0.29</td><td>0.75 / 0.74</td><td>0.97 / 0.97</td><td>3.89 / 2.69</td><td>1.000 / 0.997</td><td>9 (10)</td><td>0.60 / 1.72</td><td>0.84 / 0.03 / 0.07 / 0.06</td></tr><tr><td>16</td><td>0.32–0.50</td><td>0.24–0.38</td><td>0.77 / 0.84</td><td>0.95 / 0.97</td><td>3.52 / 2.24</td><td>1.000 / 0.994</td><td>9 (10)</td><td>0.95 / 1.91</td><td>0.79 / 0.08 / 0.07 / 0.06</td></tr></table></div>
+
+<h3>5. Repository</h3>
+<p>The representation repository now holds position 3 for blocks 0–11: the five block-0 planes <code>L0.p3.b_mod_10.k1</code>, …,
+the residue-mean spans <code>L1.p3.b_mod_10.means</code> … <code>L11.p3.b_mod_10.means</code> with their circulant statistics, every
+kept reader's position-3 response, the block-0 mod-10 readers' position-3 writers, and the transitions
+<code>L0.p3.b_mod_10</code> … <code>L11.p3.b_mod_10</code> with this page's per-block measurements.</p>
+`
+},
 ];
