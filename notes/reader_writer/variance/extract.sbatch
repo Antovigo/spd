@@ -5,7 +5,7 @@
 #SBATCH --mem=96G
 #SBATCH -t 03:00:00
 #SBATCH -o /mnt/nw/home/a.vigouroux/out/pod-backup/p-ba8b0c08/analysis/reader_writer/variance/logs/%x-%j.out
-# sbatch [--export=ALL,LIMIT=6000,OUT=<dir>] extract.sbatch — alive-only activations (extract_alive_only.py)
+# sbatch [--export=ALL,LIMIT=6000,OUT=<dir>,ATTN=1] extract.sbatch — alive-only activations (extract_alive_only.py)
 # against a node-local copy of the arith_representations package (NFS can serve a stale .py).
 set -euo pipefail
 W=/mnt/nw/home/a.vigouroux/Code/param-decomp/arith_representations
@@ -26,4 +26,4 @@ done
 [ -n "$FREE_IDS" ] || { echo "no free card"; exit 1; }
 export CUDA_VISIBLE_DEVICES=$FREE_IDS
 cd "$FRESH"
-"$W/.venv/bin/python" -u extract_alive_only.py ${LIMIT:+--limit $LIMIT} ${OUT:+--out $OUT} ${PROFILE:+--profile}
+"$W/.venv/bin/python" -u extract_alive_only.py ${LIMIT:+--limit $LIMIT} ${OUT:+--out $OUT} ${PROFILE:+--profile} ${ATTN:+--attn}

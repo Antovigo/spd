@@ -10,7 +10,11 @@ l this writes, for the block's alive gate / up / down components (columns in tha
     OUT/kl_last.npy     (N,) float32           KL(original || alive-only) at the last position
     OUT/meta.json
 
-    python extract_alive_only.py [--limit N] [--out DIR] [--alive_json FILE]
+    python extract_alive_only.py [--limit N] [--out DIR] [--alive_json FILE] [--attn]
+
+`--attn` writes the attention sites instead, kinds q, k, v, o (layers.<l>.self_attn.<kind>_proj; columns in that
+order), to `alive_only_attn/` by default; the files have the same layout. For o_proj the input is the attention
+output at that position (concatenated heads), for q / k / v the post-norm residual stream.
 
 `--alive_json` replaces the filter's alive set by another list in the same format (e.g. a pruned
 subset written by `param_decomp.pruning.alive_json` on experiment/comp_pruning): the model is then
@@ -50,6 +54,9 @@ DATA_ROOT = Path(os.environ.get("DATA_ROOT", "/mnt/nw/home/a.vigouroux/out"))
 STEP = 40000
 FILTER = "addsub-08-last-pos"
 KINDS = ("gate", "up", "down")
+ATTN_KINDS = ("q", "k", "v", "o")
+SITE_OF = {"gate": "mlp.gate_proj", "up": "mlp.up_proj", "down": "mlp.down_proj",
+           "q": "self_attn.q_proj", "k": "self_attn.k_proj", "v": "self_attn.v_proj", "o": "self_attn.o_proj"}  # fmt: skip
 POSITIONS = (1, 2, 3, 4)
 N_LAYER = 32
 OUT = RUN_DIR / "analysis" / "reader_writer" / "variance" / "alive_only"
@@ -64,8 +71,14 @@ def main() -> None:
         "--alive_json", type=Path, default=None, help="alive list (default: the filter's)"
     )
     ap.add_argument("--profile", action="store_true", help="time the forward pieces, write nothing")
+    ap.add_argument(
+        "--attn", action="store_true", help="attention sites (q, k, v, o) instead of the MLP"
+    )
     args = ap.parse_args()
-    out: Path = args.out
+    kinds = ATTN_KINDS if args.attn else KINDS
+    out: Path = (
+        args.out if not (args.attn and args.out == OUT) else OUT.with_name("alive_only_attn")
+    )
     out.mkdir(parents=True, exist_ok=True)
     assert not (out / "meta.json").exists(), f"{out} is complete already"
 
@@ -74,7 +87,7 @@ def main() -> None:
     alive_path = outputs.alive if args.alive_json is None else args.alive_json
     alive_json = json.loads(alive_path.read_text())
     alive = {s: np.asarray(ids, np.int32) for s, ids in alive_json["components"].items()}
-    sites = {(b, k): f"layers.{b}.mlp.{k}_proj" for b in range(N_LAYER) for k in KINDS}
+    sites = {(b, k): f"layers.{b}.{SITE_OF[k]}" for b in range(N_LAYER) for k in kinds}
 
     restored = restore_jax_run(RUN_DIR, STEP, data_root=DATA_ROOT)
     placed, mesh, components = restored.placed, restored.mesh, restored.components
@@ -96,13 +109,13 @@ def main() -> None:
         for b in range(N_LAYER):
             (out / f"L{b}").mkdir(exist_ok=True)
             uv = {}
-            for k in KINDS:
+            for k in kinds:
                 site = components.site(sites[(b, k)])
                 uv[f"U_{k}"] = np.asarray(site.U, np.float32)[alive[sites[(b, k)]]]
                 uv[f"V_{k}"] = np.asarray(site.V, np.float32)[:, alive[sites[(b, k)]]]
             np.savez(out / f"L{b}" / "comps.npz",
-                     kind=np.asarray([k for k in KINDS for _ in alive[sites[(b, k)]]]),
-                     index=np.concatenate([alive[sites[(b, k)]] for k in KINDS]), **uv)  # fmt: skip
+                     kind=np.asarray([k for k in kinds for _ in alive[sites[(b, k)]]]),
+                     index=np.concatenate([alive[sites[(b, k)]] for k in kinds]), **uv)  # fmt: skip
         prepared, _ = prepare_components(placed, components)
         del components
         # (C,) 1.0 on the site's alive components, 0.0 elsewhere; broadcast over (B, T) in-jit
@@ -144,7 +157,7 @@ def main() -> None:
                         jnp.take(
                             jax.sharding.reshard(inner[sites[(b, k)]], P()), cols[(b, k)], axis=-1
                         )
-                        for k in KINDS
+                        for k in kinds
                     ],
                     axis=-1,
                 )[:, pos]
@@ -155,7 +168,7 @@ def main() -> None:
         if args.profile:
             profile(placed, prepared, on, cols, tokens_all, collect, args.batch_size)
             return
-        widths = [sum(alive[sites[(b, k)]].size for k in KINDS) for b in range(N_LAYER)]
+        widths = [sum(alive[sites[(b, k)]].size for k in kinds) for b in range(N_LAYER)]
         mm = [
             open_memmap(
                 out / f"L{b}" / "inner.npy",
@@ -190,7 +203,7 @@ def main() -> None:
     meta = {"run_dir": str(RUN_DIR), "step": STEP, "filter": FILTER, "model": "alive-only", "alive_json": str(alive_path),
             "n_prompts": n, "positions": list(POSITIONS), "inner_dtype": "float32",
             "absmax": absmax, "kl_last_mean": float(kl_last.mean()),
-            "n_alive": {b: {k: int(alive[sites[(b, k)]].size) for k in KINDS}
+            "n_alive": {b: {k: int(alive[sites[(b, k)]].size) for k in kinds}
                         for b in range(N_LAYER)},
             "seconds": time.time() - t0}  # fmt: skip
     (out / "meta.json").write_text(json.dumps(meta, indent=2))
