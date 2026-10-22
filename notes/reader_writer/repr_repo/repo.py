@@ -9,6 +9,9 @@ Stored in `<run>/analysis/representation_repository/`:
     readers.json            {"readers": [Reader, ...]}: every alive gate / up component of the ceiling
                             filter that the learned mask "kl_int, sampled mask, λ=5e-05" keeps
     transitions.json        {"transitions": [Transition, ...]} (schema 2): what one block does to a representation
+    periodicity.json        index of the readers of blocks 0..16 at positions 1 and 3 by the exact periods tau | 100
+                            of their inner activation in the operand (seed_periodicity.py, which defines every field):
+                            index[t][tau] = reader ids, readers[id].positions[t] = shares per tau and the nulls
 
 Representation (one subspace of one block's MLP input at one token position):
     id            "L<block>.p<position>.<name>", e.g. "L0.p1.a_mod10.k1"
