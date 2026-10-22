@@ -5,13 +5,14 @@ and offers a "period" filter. Layout:
 
     window.PERIODICITY = {
       taus:      [2, 4, 5, 10, 20, 25, 50, 100]   the exact periods tau (dividing 100) the index tests
-      blocks:    [0, ..., 16]                     blocks whose gate / up readers are indexed
-      positions: {"<p>": {"<site>": {"<c>": [tau, ...]}}}
+      blocks:    {"<p>": [block, ...]}            blocks whose gate / up readers are indexed at position p
+      variables: {"<p>": [v, ...]}                variables tested at position p ("a", "b", "a+b")
+      positions: {"<p>": {"<site>": {"<c>": {"<v>": [tau, ...]}}}}
     }
 
-p is the applet's position index (1 = the token a, 3 = the token b), site a module name such as
-"layers.0.mlp.gate_proj", c the component index, and [tau, ...] the periods of that reader at that position (empty:
-indexed, no period found). Components absent from `positions` were not indexed.
+p is the applet's position index (1 = the token a, 3 = the token b, 4 = "=", addition prompts only), site a module
+name such as "layers.0.mlp.gate_proj", c the component index, v a variable, and [tau, ...] the periods of that
+reader in v at that position (empty: tested, no period found). Components absent from `positions` were not indexed.
 
     python export_periodicity_js.py
 """
@@ -30,15 +31,16 @@ OUT = Path(
 
 def main() -> None:
     doc = json.loads((ROOT / "periodicity.json").read_text())
-    positions: dict[str, dict[str, dict[str, list[int]]]] = {}
+    positions: dict[str, dict[str, dict[str, dict[str, list[int]]]]] = {}
     for rd in doc["readers"].values():
         site = f"layers.{rd['block']}.mlp.{rd['kind']}_proj"
-        for t, entry in rd["positions"].items():
-            positions.setdefault(t, {}).setdefault(site, {})[str(rd["component"])] = entry[
-                "periods"
-            ]
+        for t, by_var in rd["positions"].items():
+            positions.setdefault(t, {}).setdefault(site, {})[str(rd["component"])] = {
+                v: entry["periods"] for v, entry in by_var.items()
+            }
     js = {
-        "taus": [int(tau) for tau in next(iter(doc["index"].values()))],
+        "taus": [int(tau) for tau in doc["index"]["1"]["a"]],
+        "variables": doc["variables"],
         "blocks": doc["blocks"],
         "source": str(ROOT / "periodicity.json"),
         "positions": positions,
