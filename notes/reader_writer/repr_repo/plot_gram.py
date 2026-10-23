@@ -9,7 +9,12 @@ over 200 random relabellings of the residues (seed_blocks_mod10.circulant).
 With --cosine: cos(mu_r, mu_r') = G[r, r'] / (||mu_r|| ||mu_r'||) instead; the diagonal (1 by definition) is drawn
 grey and left out of the colour range, which spans the panel's off-diagonal values.
 
-    python plot_gram.py --out <png> [--cosine]
+With --centred (an explicit exception to the no-centring rule, for this view only): cos(d_r, d_r'), with
+d_r = mu_r - (mean over the ten residues of mu_s), the relative orientations once the shared direction is removed;
+diagonal grey, diverging colour range symmetric about 0 (+- the panel's largest off-diagonal |value|). Ten equally
+spaced one-hot-like directions give -1/9 everywhere off the diagonal.
+
+    python plot_gram.py --out <png> [--cosine | --centred]
 """
 
 import argparse
@@ -55,6 +60,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--cosine", action="store_true")
+    ap.add_argument("--centred", action="store_true")
     args = ap.parse_args()
     readers = json.loads((ROOT / "readers.json").read_text())["readers"]
     reps = {
@@ -71,7 +77,17 @@ def main() -> None:
         circ = circulant(mu)
         G = mu @ mu.T
         ax = grid[b // 6, b % 6]
-        if args.cosine:
+        if args.centred:
+            d = mu - mu.mean(0)
+            n = np.linalg.norm(d, axis=1)
+            C = (d @ d.T) / np.outer(n, n)
+            m = np.abs(C[~np.eye(10, dtype=bool)]).max()
+            cmap = plt.get_cmap("RdBu_r").copy()
+            cmap.set_bad("#bbbbbb")
+            im = ax.imshow(
+                np.ma.masked_where(np.eye(10, dtype=bool), C), cmap=cmap, vmin=-m, vmax=m
+            )
+        elif args.cosine:
             n = np.linalg.norm(mu, axis=1)
             C = G / np.outer(n, n)
             off = C[~np.eye(10, dtype=bool)]
@@ -95,7 +111,13 @@ def main() -> None:
         ax.tick_params(labelsize=6)
     grid[-1, -1].axis("off")
     for i in range(3):
-        label = "cos(μ_r, μ_r')" if args.cosine else "G[r, r'] = μ_r · μ_r'"
+        label = (
+            "cos(μ_r − μ̄, μ_r' − μ̄)"
+            if args.centred
+            else "cos(μ_r, μ_r')"
+            if args.cosine
+            else "G[r, r'] = μ_r · μ_r'"
+        )
         grid[i, 0].set_ylabel(f"{label}\nrow r, column r'", fontsize=8)
     fig.tight_layout()
     fig.savefig(args.out, dpi=120)
