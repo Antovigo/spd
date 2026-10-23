@@ -1157,6 +1157,56 @@ worst single context. "Op offset / radius" is position 3's offset between the + 
 the residue-mean spans <code>L1.p3.b_mod_10.means</code> … <code>L11.p3.b_mod_10.means</code> with their circulant statistics, every
 kept reader's position-3 response, the block-0 mod-10 readers' position-3 writers, and the transitions
 <code>L0.p3.b_mod_10</code> … <code>L11.p3.b_mod_10</code> with this page's per-block measurements.</p>
+<!-- compare:begin -->
+<h3>6. a and b compared, blocks 0–16</h3>
+<p>This section compares the representation of <i>a</i> mod 10 at the token <i>a</i> (position 1, 400 prompts) with that of <i>b</i> mod 10
+at the token <i>b</i> (position 3, the 8,000 prompts of this page), at the MLP input of every block (<code>compare_p1p3.py</code>,
+<code>compare_page.py</code>).</p>
+<ul>
+<li><b>Amplitudes.</b> <i>X</i> is the residual stream entering the MLP, ρ = √(mean of <i>X</i>² over the 4096 coordinates) its RMS, and
+<i>x</i> = γ ⊙ <i>X</i> / ρ the MLP input, with γ the norm's weight. <i>A<sub>k</sub></i> is the frequency-<i>k</i> Fourier amplitude of the residue means
+(<i>k</i> = 1 … 5). R<sub>res</sub> = <i>A<sub>k</sub></i>(<i>X</i> at position 3) / <i>A<sub>k</sub></i>(<i>X</i> at position 1). R<sub>norm</sub> is the same ratio for <i>x</i>, and the RMS
+ratio is mean ρ at position 3 / mean ρ at position 1. "Undone by the norm" = 1 − log R<sub>norm</sub> / log R<sub>res</sub>: 0 when
+the readers see the residual stream's shrinking in full, 1 when the norm cancels it, and negative when the norm adds to it.</li>
+<li><b>Mod-10 readers</b> of a block are its gate and up components whose inner activation <i>t<sub>c</sub></i> = <i>x</i> · <i>V<sub>c</sub></i> is explained with uncentred
+r² ≥ 0.5 by the input projected onto the period-10 subspace <i>D</i>, at either position. Their amplitude ratio is the norm of the
+period-10 part of <i>t<sub>c</sub></i>'s residue means at position 3 divided by that at position 1.</li>
+<li><b>Context.</b> <i>C</i> is the 10-dimensional span of the frequency 1–5 Fourier components of the position-3 stream's means over
+<i>a</i> mod 10, plus the difference between the + and − means, with <i>b</i>'s period-10 subspace projected out. A reader's context
+share is Σ(<i>t<sub>c</sub></i>(<i>x</i>) − <i>t<sub>c</sub></i>(<i>x<sub>C</sub></i>))² / Σ <i>t<sub>c</sub></i>(<i>x</i>)², where <i>x<sub>C</sub></i> = γ ⊙ (<i>X</i> − Π<sub><i>C</i></sub><i>X</i>) / ρ(<i>X</i>) is the
+input without the context content and with the norm held fixed. It can exceed 1 when the context flips the activation's sign.
+The MLP's response to the context is Δ<sub>ctx</sub> = MLP(<i>x</i>) − MLP(<i>x<sub>C</sub></i>). The table gives the size of its part in <i>D′</i>, <i>b</i>'s
+subspace of the stream leaving the block, relative to the MLP's whole write into <i>D′</i>. That part is split into a per-context offset, a
+part periodic in <i>b</i>, and the rest.</li>
+</ul>
+<div class="tw"><table><tr><th>block</th><th>R<sub>res</sub></th><th>RMS ratio</th><th>R<sub>norm</sub></th><th>undone by the norm</th>
+<th>plane cosines a vs b</th><th>mod-10 readers</th><th>their amplitude ratio (median)</th><th>mod-10 readers with context share &gt; 0.3</th>
+<th>Δ<sub>ctx</sub> in D′ / MLP in D′ (offset / b-periodic / rest)</th><th>closest pair: no Δ<sub>ctx</sub> → actual</th></tr><tr><td>0</td><td>1.00–1.00</td><td>1.14</td><td>0.87–0.87</td><td>–</td><td>1.00–1.00</td><td>13</td><td>0.87</td><td>–</td><td>0.26 (0.27 / 0.62 / 0.11)</td><td>5.02 → 4.80</td></tr><tr><td>1</td><td>0.86–0.88</td><td>0.96</td><td>0.91–0.93</td><td>0.34–0.42</td><td>0.99–1.00</td><td>0</td><td>–</td><td>–</td><td>0.70 (0.71 / 0.00 / 0.29)</td><td>4.04 → 3.58</td></tr><tr><td>2</td><td>0.87–0.88</td><td>1.10</td><td>0.80–0.81</td><td>-0.67–-0.52</td><td>0.98–1.00</td><td>4</td><td>0.79</td><td>–</td><td>0.50 (0.74 / 0.01 / 0.25)</td><td>2.70 → 2.37</td></tr><tr><td>3</td><td>0.77–0.84</td><td>1.04</td><td>0.74–0.81</td><td>-0.18–-0.12</td><td>0.93–0.97</td><td>10</td><td>0.84</td><td>u36 (0.98), g36 (0.64), u245 (0.41)</td><td>0.33 (0.78 / 0.03 / 0.18)</td><td>2.76 → 2.47</td></tr><tr><td>4</td><td>0.70–0.76</td><td>0.92</td><td>0.76–0.82</td><td>0.20–0.30</td><td>0.90–0.97</td><td>7</td><td>0.85</td><td>u48 (0.77)</td><td>0.44 (0.85 / 0.00 / 0.15)</td><td>2.36 → 2.09</td></tr><tr><td>5</td><td>0.69–0.76</td><td>0.92</td><td>0.74–0.83</td><td>0.21–0.32</td><td>0.89–0.98</td><td>7</td><td>0.85</td><td>–</td><td>0.55 (0.69 / 0.01 / 0.30)</td><td>1.99 → 1.70</td></tr><tr><td>6</td><td>0.62–0.75</td><td>0.93</td><td>0.66–0.81</td><td>0.13–0.24</td><td>0.83–0.95</td><td>0</td><td>–</td><td>–</td><td>0.53 (0.68 / 0.00 / 0.32)</td><td>1.58 → 1.38</td></tr><tr><td>7</td><td>0.61–0.75</td><td>0.95</td><td>0.63–0.79</td><td>0.06–0.16</td><td>0.80–0.94</td><td>0</td><td>–</td><td>–</td><td>0.69 (0.95 / 0.00 / 0.05)</td><td>1.31 → 0.94</td></tr><tr><td>8</td><td>0.59–0.75</td><td>0.89</td><td>0.65–0.84</td><td>0.19–0.39</td><td>0.78–0.93</td><td>0</td><td>–</td><td>–</td><td>0.59 (0.75 / 0.00 / 0.24)</td><td>0.95 → 0.86</td></tr><tr><td>9</td><td>0.58–0.75</td><td>0.89</td><td>0.64–0.84</td><td>0.18–0.39</td><td>0.76–0.93</td><td>0</td><td>–</td><td>–</td><td>0.55 (0.90 / 0.00 / 0.10)</td><td>0.88 → 0.76</td></tr><tr><td>10</td><td>0.58–0.74</td><td>0.97</td><td>0.59–0.77</td><td>0.04–0.12</td><td>0.75–0.93</td><td>1</td><td>0.34</td><td>–</td><td>0.74 (0.87 / 0.00 / 0.13)</td><td>0.80 → 0.73</td></tr><tr><td>11</td><td>0.57–0.74</td><td>0.98</td><td>0.58–0.76</td><td>0.01–0.10</td><td>0.75–0.92</td><td>3</td><td>0.80</td><td>–</td><td>0.50 (0.87 / 0.01 / 0.12)</td><td>0.95 → 0.88</td></tr><tr><td>12</td><td>0.58–0.73</td><td>0.91</td><td>0.64–0.81</td><td>0.18–0.32</td><td>0.77–0.96</td><td>7</td><td>0.84</td><td>g20 (1.03), g94 (0.75), g117 (0.54), g57 (0.40)</td><td>0.56 (0.57 / 0.09 / 0.34)</td><td>1.21 → 1.33</td></tr><tr><td>13</td><td>0.64–0.76</td><td>0.95</td><td>0.68–0.80</td><td>0.14–0.19</td><td>0.87–0.97</td><td>13</td><td>0.81</td><td>u733 (0.68), g540 (0.40)</td><td>0.27 (0.57 / 0.08 / 0.35)</td><td>2.39 → 2.52</td></tr><tr><td>14</td><td>0.69–0.76</td><td>0.94</td><td>0.74–0.81</td><td>0.19–0.25</td><td>0.94–0.98</td><td>15</td><td>0.82</td><td>–</td><td>0.29 (0.69 / 0.03 / 0.28)</td><td>3.09 → 3.07</td></tr><tr><td>15</td><td>0.67–0.75</td><td>0.96</td><td>0.70–0.78</td><td>0.11–0.15</td><td>0.96–0.98</td><td>15</td><td>0.75</td><td>–</td><td>0.40 (0.82 / 0.00 / 0.18)</td><td>2.95 → 2.69</td></tr><tr><td>16</td><td>0.67–0.74</td><td>0.98</td><td>0.67–0.75</td><td>0.03–0.04</td><td>0.95–0.97</td><td>16</td><td>0.73</td><td>–</td><td>0.50 (0.81 / 0.01 / 0.18)</td><td>2.59 → 2.24</td></tr></table></div>
+<p><b>Directions are conserved, amplitudes are not.</b> The planes of <i>a</i> at position 1 and of <i>b</i> at position 3 have mean
+principal cosines 0.75–1.00 (lowest) to 1.00 per plane, with the full-residue plane
+<i>k</i> = 3 and the mod-5 plane <i>k</i> = 4 drifting most (0.75–0.79 at blocks 9–12). In the residual stream, <i>b</i>'s amplitude is
+0.57–1.00 to 0.73–1.00 of <i>a</i>'s, frequency by frequency.
+It is 1.00 at block 0, 0.86–0.88 at blocks 1–2 (block 0's MLP writes less at position 3), 0.77–0.84 at block 3, and
+0.57–0.76 from block 4 on.</p>
+<p><b>What the norm does.</b> The readers see R<sub>norm</sub>, not R<sub>res</sub>, and the two differ by the RMS ratio
+(0.89–1.14). The norm undoes 0.06–0.42 of the shrinking in blocks 1, 4–9 and 12–15, where position 3's RMS is smaller (ratio
+0.89–0.96). It undoes almost nothing in blocks 10, 11 and 16 (0.01–0.12; RMS ratio 0.97–0.98). It adds to the shrinking in blocks 0, 2 and 3, where position 3's
+RMS is larger (1.04–1.14). At block 0 the stream's amplitudes are equal and the whole 0.87 comes from the norm. The mod-10 readers
+follow R<sub>norm</sub>: their median amplitude ratio is 0.73–0.87 in every block that has them (block 10's single reader: 0.34).</p>
+<p><b>Mod-10 readers rarely respond to the context, and its effect on <i>b</i>'s representation is mostly a shift.</b> Except in blocks
+10–12 (0.15–0.40), the mod-10 readers' median context share is ≤ 0.13. The exceptions are a few readers in blocks 3, 4, 12 and 13, listed in the
+table, whose activation at position 3 depends strongly on <i>a</i> or the operation. The MLP's response to the context lands in
+<i>b</i>'s subspace with 0.26–0.74 of the size of its whole write there. From block 1 on it is mostly an offset per context
+(0.57–0.95 of its energy) and hardly periodic in <i>b</i> (≤ 0.09). At block 0, 0.62 of it is periodic in <i>b</i> and 0.27 is an offset. The components
+that write it are mostly not mod-10 readers. In blocks 0–11 and 14–16 it lowers the closest-pair separation (largest at block 7:
+1.31 → 0.94). In blocks 12–13 it raises it (1.21 → 1.33 and 2.39 → 2.52); the largest contributors there include the mod-10
+readers g46 and g14.</p>
+<figure><img src="notebook/fig/p3_compare.png"><figcaption>(a) Frequency-<i>k</i> amplitude at position 3 ÷ position 1, in the residual stream
+(solid) and at the MLP input (dashed), the inverse RMS ratio (dotted), and the mod-10 readers' median ratio (green). (b) Share of the
+residual-stream shrinking undone by the norm. (c) Mean principal cosine between the planes of <i>a</i> at position 1 and of <i>b</i> at
+position 3. (d) Closest-pair separation of the <i>b</i> clouds leaving the block, actual and with the MLP's response to the context
+removed.</figcaption></figure>
+<!-- compare:end -->
 `
 },
 ];
