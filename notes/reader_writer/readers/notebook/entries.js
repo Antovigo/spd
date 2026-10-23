@@ -1046,6 +1046,71 @@ and the cross is the activation zero. Dots are the 8,000 prompts, coloured by re
 <i>b</i>: block 15). (b, c) Residue profiles (mean inner activation per residue, scaled to the largest |value|) of the value
 components carrying 90% of each copy, labelled with their share. (d) Gain per frequency from the source to the copy.</figcaption></figure>
 <!-- copy:end -->
+<!-- copyfig:begin -->
+<h3>11. The copying heads' patterns, the copying vectors, and the copied geometry</h3>
+<p>This section draws the attention patterns at "=" in the original model and in the alive-only model. It also plots
+the copying components' vectors in the Fourier planes, and the structure of the copied representation at "=". It uses
+2,000 prompts of each set of section 10: every 4th prompt of the <i>a</i> set, and a seeded random draw from the <i>b</i> set
+(181–219 prompts per <i>b</i> residue). For the original model, positions 0–4 were recomputed through block 16, in float32
+from the bf16 weights (<code>copy_figs.py</code>, <code>copyfig_page.py</code>).</p>
+<ul>
+<li><b>Notation.</b> <i>p<sub>h</sub></i>(<i>j</i>) is the attention weight of query head <i>h</i> (0 … 31) at "=" on position <i>j</i>
+(0 … 4: &lt;BOS&gt;, <i>a</i>, op, <i>b</i>, =). A head is shown when its weight on the source is ≥ 0.15 in either model.
+<i>x<sub>s</sub></i> is the attention input at the source position. <i>E</i> is the stream at "=" entering the block, and
+<i>E′</i> = <i>E</i> + the attention output is the stream right after the attention write. <i>P<sub>k</sub></i> are the Fourier planes of
+a field's residue means, for <i>k</i> = 1 … 5. <i>V<sub>c</sub></i> is the read vector of value component <i>c</i>, in <i>x<sub>s</sub></i> space,
+and <i>U<sub>o</sub></i> is the write vector of output component <i>o</i>, in the residual stream.</li>
+<li><b>Pairwise measures.</b> cos(<i>r</i>, <i>r′</i>) is the cosine between the residue means μ<sub><i>r</i></sub> and μ<sub><i>r′</i></sub> of <i>E′</i>, in
+the full stream and after projection onto <i>E′</i>'s period-10 subspace <i>D</i>. Cohen's d(<i>r</i>, <i>r′</i>) is the distance between the
+two residue means divided by the pooled standard deviation of the two clouds projected on the unit vector between the means.
+This is the only quantity here measured around class means.</li>
+</ul>
+<p><b>Attention patterns.</b> The main copying head is the same in both models and attends to the source in both, more
+sharply in the alive-only model. Head 21 (block 16) puts 0.76 of its weight on <i>a</i> in the original model and
+0.91 in the alive-only model. Head 13 (block 15) puts 0.75 and 0.89 on <i>b</i>.
+In the original model, the other heads put 0.06–0.17 (block 16) and 0.08–0.31 (block 15)
+on the source, and 0.46–0.90 on &lt;BOS&gt;. The alive-only model raises their weight on the source
+to 0.15–0.42 and 0.15–0.63. The largest increases are head 3 (block 16: 0.17 → 0.42; block 15:
+0.31 → 0.63), head 8 (0.08 → 0.28) and head 31 (block 15: 0.20 → 0.36).</p>
+<figure><img src="notebook/fig/copy_patterns.png"><figcaption>Mean attention weight at "=" on each position, for the heads with weight ≥ 0.15 on the
+source in either model. Left pair: block 16 (source: <i>a</i>, position 1), original and alive-only. Right pair: block 15 (source: <i>b</i>,
+position 3). The red line marks the source.</figcaption></figure>
+<p><b>The copying vectors in the Fourier planes.</b> The top row of each pair shows the read vectors <i>V<sub>c</sub></i> of the value components that
+carry 90% of the copy (section 10), projected onto the source's planes. The bottom row shows the write vectors <i>U<sub>o</sub></i> of the output components
+that carry 90% of the copy, projected onto the planes of <i>E′</i>. The arrows point in many directions within each plane: no single
+component aligns with one residue. Each vector has only a small share of its norm² in any one plane (titles; 0.03–0.12 for
+<i>V<sub>c</sub></i>, 0.02–0.22 for <i>U<sub>o</sub></i>).</p>
+<figure><img src="notebook/fig/copy_vectors.png"><figcaption>Rows 1–2: the copy of <i>a</i> (block 16); rows 3–4: the copy of <i>b</i> (block 15). Rows 1 and
+3: residue means of the source's attention input in its planes <i>k</i> = 1 … 5 (dots, labelled by residue), and the value read vectors
+<i>V<sub>c</sub></i> / ‖<i>V<sub>c</sub></i>‖ (arrows). Rows 2 and 4: residue means of <i>E′</i> in its planes, and the output write vectors
+<i>U<sub>o</sub></i> / ‖<i>U<sub>o</sub></i>‖ (arrows). Arrows are scaled by the factor in each title; the cross is the activation zero.</figcaption></figure>
+<p><b>The "=" planes were empty before the write.</b> Project the residue means of <i>E</i>, before the write, onto the planes of <i>E′</i>.
+For the copy of <i>a</i>, their frequency-<i>k</i> amplitude is 0.013, 0.016, 0.096, 0.107 and 0.72 times
+<i>E′</i>'s, for <i>k</i> = 1 … 5. The exception is the parity line: the stream at "=" already carries some <i>a</i> mod 2 there before block 16. For the copy of
+<i>b</i>, it is 0.038, 0.029, 0.49, 0.27 and 0.008. Decoding the residue from <i>E</i> in <i>E′</i>'s period-10 subspace gives a
+leave-one-out accuracy of 0.172 (<i>a</i>) and 0.097 (<i>b</i>), against
+chance 0.1. After the write it gives 0.873 and 0.554.</p>
+<p><b>The structure after the copy.</b></p>
+<ul>
+<li><b>Full stream.</b> In <i>E′</i> the ten residue means point almost the same way. The pairwise cosines are
+0.948–0.984 (<i>a</i>) and 0.972–0.991 (<i>b</i>) in the
+alive-only model, and 0.938–0.984 and 0.967–0.984 in the original.</li>
+<li><b>Inside <i>D</i>, <i>a</i>.</b> The cosines show a parity checkerboard: even residues point the same way (up to about 0.8),
+odd residues less so. The range is -0.12–0.78 alive-only and -0.24–0.80 original.
+This matches the copy's frequency gains (section 10): the parity line <i>k</i> = 5 is copied at 0.27, and the full-residue plane
+<i>k</i> = 3 and the mod-5 plane <i>k</i> = 4 at only 0.10–0.11.</li>
+<li><b>Inside <i>D</i>, <i>b</i>.</b> All ten means point the same way inside <i>D</i>: cosines 0.57–0.85 alive-only and
+0.43–0.80 original.</li>
+<li><b>Separation.</b> For <i>a</i>, Cohen's d has minimum 2.43 and median
+4.78 alive-only, and 2.67 and
+3.68 original. For <i>b</i> it is 1.05 and
+3.16, against 1.30 and
+3.01.</li>
+</ul>
+<figure><img src="notebook/fig/copy_geometry.png"><figcaption>The stream at "=" right after the attention write of block 16 (<i>a</i>, rows 1–2) and
+block 15 (<i>b</i>, rows 3–4), alive-only and original. Left: cosines between the ten raw residue means. Middle: the same after projection onto
+the stream's period-10 subspace <i>D</i>. Right: Cohen's d between residue clouds along the axis joining their means.</figcaption></figure>
+<!-- copyfig:end -->
 `
 },
 {
