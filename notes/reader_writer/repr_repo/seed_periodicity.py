@@ -1,8 +1,15 @@
-"""Periodicity index of the readers: periodicity.json.
+"""Periodicity and constancy index of the components: periodicity.json.
 
-Part 1, the operand positions: readers of blocks 0..16 at t = 1 (in a) and t = 3 (in b), on all prompts.
-Part 2, the "=" position: readers of blocks 0..31 at t = 4, each tested for periodicity in a, in b and in a + b
+Components: every component of the ceiling filter's alive set that the learned mask "kl_int, sampled mask,
+λ=5e-05" keeps, at every MLP site (gate, up, down) and attention site (q, k, v, o), id "L<block>.<kind>.<c>".
+Inner activations of the alive-only model: MLP from variance/alive_only, attention from variance/alive_only_attn
+(extract_alive_only.py [--attn]). For gate / up / q / k / v the input is the post-norm residual stream, for down the
+MLP hidden activation, for o the attention output (concatenated heads), all at the same position.
+
+Part 1, the operand positions: components of blocks 0..16 at t = 1 (in a) and t = 3 (in b), on all prompts.
+Part 2, the "=" position: components of blocks 0..31 at t = 4, each tested for periodicity in a, in b and in a + b
 (not exclusive), on the addition prompts only. Part 2 is defined after part 1.
+Part 3, constancy: every component of blocks 0..31 at t = 1..4, on all prompts (both ops). Defined after part 2.
 
 Part 1.
 
@@ -10,7 +17,7 @@ Notation:
   b          block, 0..16
   t          token position, 1 (the token a) or 3 (the token b); the prompt is `<BOS> a op b =`
   x          the operand at position t (a for t = 1, b for t = 3), integer 1..400
-  c          a reader: a kept gate / up component of block b (readers.json)
+  c          a component (see "Components" above)
   f_c(x)     its inner activation t_c / ||V_c|| (V_c its read vector), averaged over every stored prompt whose
              operand at position t equals x: 800 prompts per x (400 values of the other operand, 2 ops).
              At t = 1 every prompt with the same a has the same activation, so the average is exact.
@@ -45,7 +52,7 @@ The indicator of x mod 10 = 3 has parts of exact period 2, 5 and 10 (energy 1 : 
 
 Part 2 (t = 4, the token "="; the 160,000 prompts a + b with a, b in 1..400).
   v          the variable tested: a, b or s = a + b (s in 2..800)
-  f_c(a, b)  the reader's inner activation t_c / ||V_c|| on prompt a + b (no averaging: at "=" it depends on both)
+  f_c(a, b)  the inner activation t_c / ||V_c|| on prompt a + b (no averaging: at "=" it depends on both)
   m_c(r)     mean of f_c over the prompts with v mod 100 = r, r in 0..99: exactly 1,600 prompts per class for each
              v (a and b each run over four whole periods of 100, so every value of s mod 100 is equally common)
   M_c(k), tau(k), exact-period parts P_tau as in part 1, with the sums over the 160,000 prompts:
@@ -55,7 +62,7 @@ Part 2 (t = 4, the token "="; the 160,000 prompts a + b with a, b in 1..400).
              e.g. on a when v = s, lowers every share of v)
   share_rest 1 - sum over tau of share_tau: the energy that no function of v mod 100 explains
   Parts in different variables are orthogonal (a non-constant function of a mod 100 averages to zero over every
-  class of s mod 100, and the reverse), so a reader periodic only in a gets no share in s.
+  class of s mod 100, and the reverse), so a component periodic only in a gets no share in s.
   null_tau   99th percentile of the same statistic (class means over the relabelled classes, then the same DFT
              energy) over NPERM relabellings v -> pi(v) (seed 0): pi a random permutation of the values of v
   align_tau  the same with pi rotating each hundred of v (100 q + 1 .. 100 q + 100, q >= 1) by an independent random
@@ -64,13 +71,25 @@ Part 2 (t = 4, the token "="; the 160,000 prompts a + b with a, b in 1..400).
              the observed statistic does (for which it is exact)
   exact_periods, periods, minimal_period   as in part 1, per variable
 
-Layout: readers[id].positions[t][v] = entry, t in {"1", "3", "4"}, v in {"a", "b", "a+b"} (t = 1: v = a only;
-t = 3: v = b only); index[t][v][tau] = reader ids with tau in periods.
+Layout: components[id].positions[t][v] = entry, t in {"1", "3", "4"}, v in {"a", "b", "a+b"} (t = 1: v = a only;
+t = 3: v = b only); index[t][v][tau] = component ids with tau in periods.
+
+Part 3 (constancy; t = 1..4, all 320,000 prompts, ops + and -).
+  f_c        the inner activation t_c / ||V_c|| at position t on every prompt
+  E          sum over prompts of f_c^2 (uncentred)
+  share_const   320000 mean(f_c)^2 / E: the energy one constant explains
+  share_op      sum over the two ops of 160000 mean_op(f_c)^2 / E: the energy one constant per op explains
+  label      "constant" if share_const >= CONST_THR; else "op_constant" if share_op >= CONST_THR; else null.
+             At t = 1 the activation cannot depend on the op (it comes later in the prompt), so there share_op =
+             share_const.
+Layout: components[id].constancy[t] = {share_const, share_op, mean_add, mean_sub, rms, label};
+constancy_index[t][label] = component ids.
 
     python seed_periodicity.py
 """
 
 import datetime
+import json
 import subprocess
 import sys
 from math import gcd, lcm
@@ -83,6 +102,13 @@ from repo import ROOT, Repo, _write_json  # noqa: E402
 
 RUN = Path("/mnt/nw/home/a.vigouroux/out/pod-backup/p-ba8b0c08")
 SRC = RUN / "analysis/reader_writer/variance/alive_only"
+SRC_ATTN = RUN / "analysis/reader_writer/variance/alive_only_attn"
+FILTER = RUN / "addsub-08-last-pos-40000"
+MASK = "kl_sampled/lam_5e-05"
+SOURCES = ((SRC, ("gate", "up", "down")), (SRC_ATTN, ("q", "k", "v", "o")))
+SITE_OF = {"gate": "mlp.gate_proj", "up": "mlp.up_proj", "down": "mlp.down_proj",
+           "q": "self_attn.q_proj", "k": "self_attn.k_proj", "v": "self_attn.v_proj", "o": "self_attn.o_proj"}  # fmt: skip
+CONST_THR = 0.95
 N = 400
 BLOCKS = range(17)
 TS = (1, 3)
@@ -200,79 +226,141 @@ def entry_of(S, Q, QA, j, thresh) -> dict:  # noqa: ANN001
     }
 
 
+def kept() -> dict[tuple[int, str], list[int]]:
+    """(block, kind) -> the kept components: alive (alive/alive.json) minus the ones MASK prunes (pruned.js)."""
+    text = (FILTER / "ab_grids/pruned.js").read_text().strip()
+    doc = json.loads(text[len("window.PRUNED = ") :].rstrip(";"))
+    (mask,) = [m for m in doc["masks"] if m["name"] == MASK]
+    alive = json.loads((FILTER / "alive/alive.json").read_text())["components"]
+    out = {}
+    for b in EQ_BLOCKS:
+        for kind, site in SITE_OF.items():
+            name = f"layers.{b}.{site}"
+            out[(b, kind)] = sorted(set(alive[name]) - set(mask["pruned"].get(name, [])))
+    return out
+
+
+def constancy(T: np.ndarray) -> dict[str, np.ndarray]:
+    """T (320000, C), rows op * N * N + ...: share_const, share_op, mean_add, mean_sub, rms."""
+    E = (T**2).sum(0)
+    mo = T.reshape(2, N * N, -1).mean(1)
+    return {
+        "share_const": len(T) * T.mean(0) ** 2 / E,
+        "share_op": (N * N * mo**2).sum(0) / E,
+        "mean_add": mo[0],
+        "mean_sub": mo[1],
+        "rms": np.sqrt(E / len(T)),
+    }
+
+
 def main() -> None:
-    repo = Repo()
-    thresh = repo.meta["response_threshold"]
+    thresh = Repo().meta["response_threshold"]
     commit = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True,
                             cwd=Path(__file__).parent).stdout.strip()  # fmt: skip
     today = datetime.date.today().isoformat()
-    readers: dict[str, dict] = {}
+    keep = kept()
+    comps: dict[str, dict] = {}
     for b in EQ_BLOCKS:
-        rds = [rd for rd in repo.readers.values() if rd["block"] == b]
-        z = np.load(SRC / f"L{b}" / "comps.npz")
-        col = {
-            (str(k), int(i)): j for j, (k, i) in enumerate(zip(z["kind"], z["index"], strict=True))
-        }
-        cols = np.asarray([col[(rd["kind"], rd["component"])] for rd in rds])
-        vnorm = np.asarray([np.linalg.norm(z[f"V_{rd['kind']}"][:, list(z["index"][z["kind"] == rd["kind"]])
-                            .index(rd["component"])]) for rd in rds])  # fmt: skip
-        inner = np.load(SRC / f"L{b}" / "inner.npy", mmap_mode="r")
-        for t in TS if b in BLOCKS else ():
-            T = np.asarray(inner[:, t - 1, :], np.float64)[:, cols] / vnorm
-            F = operand_means(T, t)
-            S = shares(F)
-            Q = null(F, "perm")
-            QA = null(F, "align")
-            coef, *_ = np.linalg.lstsq(POLY, F, rcond=None)
-            smooth = 1 - ((F - POLY @ coef) ** 2).sum(0) / (F**2).sum(0)
-            for j, rd in enumerate(rds):
-                entry = readers.setdefault(rd["id"], {"block": b, "kind": rd["kind"],
-                                                      "component": rd["component"], "positions": {}})  # fmt: skip
-                entry["positions"][str(t)] = {"ab"[t // 2]: {
-                    **entry_of(S, Q, QA, j, thresh),
-                    "smooth_r2": float(smooth[j]),
-                    "rms": float(np.sqrt((F[:, j] ** 2).mean())),
-                }}  # fmt: skip
-        F = np.asarray(inner[: N * N, 3, :], np.float64)[:, cols] / vnorm
-        for v, (S, Q, QA) in eq_shares(F).items():
-            for j, rd in enumerate(rds):
-                entry = readers.setdefault(rd["id"], {"block": b, "kind": rd["kind"],
-                                                      "component": rd["component"], "positions": {}})  # fmt: skip
-                entry["positions"].setdefault("4", {})[v] = {
-                    **entry_of(S, Q, QA, j, thresh),
-                    "rms": float(np.sqrt((F[:, j] ** 2).mean())),
-                }
-        print(f"L{b}: {len(rds)} readers", flush=True)
+        for src, kinds in SOURCES:
+            z = np.load(src / f"L{b}" / "comps.npz")
+            col = {
+                (str(k), int(i)): j
+                for j, (k, i) in enumerate(zip(z["kind"], z["index"], strict=True))
+            }
+            ids = [(k, c) for k in kinds for c in keep[(b, k)]]
+            if not ids:
+                continue
+            cols = np.asarray([col[kc] for kc in ids])
+            vnorm = np.asarray([np.linalg.norm(z[f"V_{k}"][:, list(z["index"][z["kind"] == k]).index(c)])
+                                for k, c in ids])  # fmt: skip
+            inner = np.asarray(
+                np.load(src / f"L{b}" / "inner.npy", mmap_mode="r")[:, :, cols], np.float64
+            )
+            inner /= vnorm
+            rows = []
+            for k, c in ids:
+                rows.append(comps.setdefault(f"L{b}.{k}.{c}", {"block": b, "kind": k, "component": c,
+                            "site": f"layers.{b}.{SITE_OF[k]}", "positions": {}, "constancy": {}}))  # fmt: skip
+            for t in range(1, 5):
+                cs = constancy(inner[:, t - 1])
+                for j, e in enumerate(rows):
+                    e["constancy"][str(t)] = {key: float(v[j]) for key, v in cs.items()}
+                    sc, so = cs["share_const"][j], cs["share_op"][j]
+                    e["constancy"][str(t)]["label"] = (
+                        "constant"
+                        if sc >= CONST_THR
+                        else "op_constant"
+                        if so >= CONST_THR
+                        else None
+                    )
+            for t in TS if b in BLOCKS else ():
+                F = operand_means(inner[:, t - 1], t)
+                S = shares(F)
+                Q = null(F, "perm")
+                QA = null(F, "align")
+                coef, *_ = np.linalg.lstsq(POLY, F, rcond=None)
+                smooth = 1 - ((F - POLY @ coef) ** 2).sum(0) / (F**2).sum(0)
+                for j, e in enumerate(rows):
+                    e["positions"][str(t)] = {"ab"[t // 2]: {
+                        **entry_of(S, Q, QA, j, thresh),
+                        "smooth_r2": float(smooth[j]),
+                        "rms": float(np.sqrt((F[:, j] ** 2).mean())),
+                    }}  # fmt: skip
+            F = inner[: N * N, 3]
+            for v, (S, Q, QA) in eq_shares(F).items():
+                for j, e in enumerate(rows):
+                    e["positions"].setdefault("4", {})[v] = {
+                        **entry_of(S, Q, QA, j, thresh),
+                        "rms": float(np.sqrt((F[:, j] ** 2).mean())),
+                    }
+            del inner
+        print(f"L{b}: {sum(e['block'] == b for e in comps.values())} components", flush=True)
 
+    order = lambda i: (
+        comps[i]["block"],
+        list(SITE_OF).index(comps[i]["kind"]),
+        comps[i]["component"],
+    )  # noqa: E731
     variables = {"1": ("a",), "3": ("b",), "4": EQ_VARS}
     index = {
-        t: {v: {str(tau): sorted((rid for rid, e in readers.items()
-                                  if t in e["positions"] and tau in e["positions"][t][v]["periods"]),
-                                 key=lambda s: (readers[s]["block"], readers[s]["kind"], readers[s]["component"]))
+        t: {v: {str(tau): sorted((i for i, e in comps.items()
+                                  if t in e["positions"] and tau in e["positions"][t][v]["periods"]), key=order)
                 for tau in TAUS if tau > 1} for v in vs}
         for t, vs in variables.items()
+    }  # fmt: skip
+    cindex = {
+        str(t): {lab: sorted((i for i, e in comps.items() if e["constancy"][str(t)]["label"] == lab), key=order)
+                 for lab in ("constant", "op_constant")}
+        for t in range(1, 5)
     }  # fmt: skip
     doc = {
         "definitions": __doc__,
         "threshold": thresh,
+        "const_threshold": CONST_THR,
         "nperm": NPERM,
         "align_taus": list(ALIGN_TAUS),
+        "mask": MASK,
+        "kinds": list(SITE_OF),
         "blocks": {"1": list(BLOCKS), "3": list(BLOCKS), "4": list(EQ_BLOCKS)},
-        "positions": {"1": "a", "3": "b", "4": "= (addition prompts only)"},
+        "constancy_blocks": list(EQ_BLOCKS),
+        "positions": {"1": "a", "2": "op", "3": "b", "4": "= (periodicity: addition prompts only)"},
         "variables": {t: list(vs) for t, vs in variables.items()},
         "index": index,
-        "readers": readers,
+        "constancy_index": cindex,
+        "components": comps,
         "provenance": {
             "script": "notes/reader_writer/repr_repo/seed_periodicity.py",
             "commit": commit,
             "date": today,
-            "source": str(SRC),
+            "source": [str(SRC), str(SRC_ATTN)],
         },  # fmt: skip
     }
     _write_json(ROOT / "periodicity.json", doc)
     for t, vs in index.items():
         for v, ids in vs.items():
             print(f"t={t} {v}:", {tau: len(x) for tau, x in ids.items()})
+    for t, labs in cindex.items():
+        print(f"t={t} constancy:", {lab: len(x) for lab, x in labs.items()})
 
 
 if __name__ == "__main__":
