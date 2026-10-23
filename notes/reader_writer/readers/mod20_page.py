@@ -1,5 +1,6 @@
 """Figures, numbers and notebook entry (id "mod20") of the page "Mod 20 representation at a (position 1)".
 
+Page of the separate "Mod 20 representations" notebook (notebook_mod20/index.html).
 Reads track_mod20/{alive,orig}/{analysis.json,readers_scan.npz} (mod20_track.py, mod20_readers.py) and the two float64
 streams (track_build.py: alive-only model; track_build_orig.py: original Llama-3.1-8B). Writes notebook/fig/mod20_*.png,
 track_mod20/page_numbers.json and the entry in <out>/entries.js. Nothing is centred: plot origins are the activation
@@ -10,7 +11,7 @@ zero. Notation as in mod20_track.py; in addition:
   alpha      the alpha in [0, 1] minimising sum_s wrap(phi_s - c - 2 pi / 20 (alpha s + (1 - alpha) 5 floor(s / 5)))^2 over
              alpha and an offset angle c: 1 = evenly spaced ring, 0 = four points (one per quarter)
 
-    python mod20_page.py --out notebook [--entries <entries.js> ...]
+    python mod20_page.py --out notebook_mod20
 """
 
 import argparse
@@ -498,7 +499,7 @@ model blurs much less.</p>
 only to &lt;BOS&gt; and to itself, so its residual stream depends on <i>a</i> alone, and 400 two-token forwards give
 every value. Two models are compared, both rebuilt in float64 on the CPU through block 16:</p>
 <ul>
-<li><b>Components</b>: the alive-only model of section 8 of the "Mod 10 representations" page (every alive attention and MLP
+<li><b>Components</b>: the alive-only model of section 8 of the "Mod 10 representations" page of the mod-10 notebook (every alive attention and MLP
 component of the ceiling filter <code>addsub-08-last-pos</code> on, the weight delta off; <code>track_build.py</code>). A
 <i>reader</i> is a kept gate or up component of a block's MLP; its activation is its read vector applied to the
 MLP input.</li>
@@ -549,7 +550,7 @@ whole stream beats the plane alone (for example {f2(bd("alive", 11)["probe_h"]["
 {f2(bd("alive", 11)["probe_h"]["plane"])} entering block 11), while the stream without the plane stays at
 {f2(bd("alive", 11)["probe_h"]["without_plane"])}: other directions do not carry <i>h</i> themselves but help the probe
 remove the spread of the clouds in the plane (section 5).</p>
-<figure><img src="notebook/fig/mod20_fourier.png"><figcaption>Figure 1. ‖Ψ<sub><i>j</i></sub>‖/null<sub><i>j</i></sub> for
+<figure><img src="fig/mod20_fourier.png"><figcaption>Figure 1. ‖Ψ<sub><i>j</i></sub>‖/null<sub><i>j</i></sub> for
 every frequency <i>j</i> of <i>a</i> mod 20 (rows; <i>τ</i> its exact period) at the residual stream entering each block
 (columns). White contour: 1, the 99th percentile of shuffled labels. Odd <i>j</i> (τ = 20 or 4) separate <i>s</i> from
 <i>s</i> + 10; only <i>j</i> = 1 is above 1. Even <i>j</i> are the <i>a</i> mod 10, mod 5 and mod 2 representations.</figcaption></figure>
@@ -558,7 +559,7 @@ every frequency <i>j</i> of <i>a</i> mod 20 (rows; <i>τ</i> its exact period) a
 <p>Figure 2 shows the 400 prompts in the plane at several blocks. The residues sit on a ring around the activation zero,
 in the order 0, 1, …, 19, so that <i>s</i> and <i>s</i> + 10 are on opposite sides. Roundness (minor over major axis of the
 ellipse traced by Re Ψ<sub>1</sub>, Im Ψ<sub>1</sub>) is {f2(bd("alive", 0)["roundness"])} at the embedding.</p>
-<figure><img src="notebook/fig/mod20_planes.png"><figcaption>Figure 2. Residual stream at position 1 projected onto the
+<figure><img src="fig/mod20_planes.png"><figcaption>Figure 2. Residual stream at position 1 projected onto the
 frequency-1 plane <i>P</i> of its own boundary (top: components; bottom: neurons). Each dot is one <i>a</i> (400), coloured by
 <i>s</i> = <i>a</i> mod 20 in four colour families, one per quarter <i>Q</i> (blue 0–4, orange 5–9, green 10–14, purple 15–19);
 labels are the residue means <i>m<sub>s</sub></i>. The axes are turned so that the vector from residue 10's mean to residue 0's
@@ -580,7 +581,7 @@ there through block 13: entering block 14, <i>α</i> = {f2(alpha("alive", 14))} 
 {step("alive", 14, 4):.0f}° (neurons {step("orig", 14, 4):.0f}°), the 9 → 10 step {step("alive", 14, 9):.0f}°
 ({step("orig", 14, 9):.0f}°), and the steps inside a quarter shrink to 3–17°. Blocks 15–16 partly undo it (<i>α</i>
 {f2(alpha("alive", 17))} and {f2(alpha("orig", 17))} leaving block 16). Figure 3 shows every step at every block.</p>
-<figure><img src="notebook/fig/mod20_ring.png"><figcaption>Figure 3. Left and centre: the angular step <i>φ</i><sub><i>s</i>+1</sub> −
+<figure><img src="fig/mod20_ring.png"><figcaption>Figure 3. Left and centre: the angular step <i>φ</i><sub><i>s</i>+1</sub> −
 <i>φ<sub>s</sub></i> (degrees) from residue <i>s</i> to <i>s</i> + 1 (columns) at the stream entering each block (rows; 17 =
 leaving block 16); 18° everywhere would be an evenly spaced ring. The quarter edges are the columns 4→5, 9→10, 14→15, 19→0.
 Right: the quantization index <i>α</i>.</figcaption></figure>
@@ -607,7 +608,7 @@ component u141 and up neuron 13082 are high for <i>s</i> ∈ 0–8 and low for 1
 component g11 and gate neuron 8953 fire for <i>s</i> ∈ 10–14 only, the quarter <i>Q</i> = 2 (<i>h</i> = 1 and <i>r</i> &lt; 5). Blocks 13
 and 14: component g58 and gate neuron 10534, component g73 and gate neuron 3498, are steps at <i>s</i> = 5 and 15:
 <i>g</i>.</p>
-<figure><img src="notebook/fig/mod20_readers.png"><figcaption>Figure 4. Top: number of readers per block with odd share ≥
+<figure><img src="fig/mod20_readers.png"><figcaption>Figure 4. Top: number of readers per block with odd share ≥
 0.05 and best step r² ≥ 0.8, coloured by their best edge (left: kept gate and up components; right: all 28,672 gate and up
 neurons). Bottom: mean activation over <i>s</i> of matched readers, each divided by its largest absolute value (solid:
 component, dashed: neuron). Grey lines mark the quarter edges.</figcaption></figure>
@@ -685,7 +686,7 @@ secant {f2(mech("alive", 14, "r2_secant_sum"))} → {f2(mech("alive", 14, "r2_ga
 reader u33 and the largest gated neuron path up neuron 6838; both activations are <i>g</i>-shaped (figure 5, right), and both
 writes are gated by a function of the units digit that is largest for <i>r</i> ∈ {{2, 3, 8}}, smaller for 9 (component),
 and largest for <i>r</i> ∈ {{2, 3, 8, 9}}, smaller for 5 (neuron).</p>
-<figure><img src="notebook/fig/mod20_gating.png"><figcaption>Figure 5. The gated up readers of blocks 12 and 14. First and
+<figure><img src="fig/mod20_gating.png"><figcaption>Figure 5. The gated up readers of blocks 12 and 14. First and
 third panels: per residue <i>s</i>, the mean size of the reader's write per unit of its activation (component: the norm of the
 MLP output's derivative in <i>t<sub>c</sub></i>; neuron: silu of the same neuron's gate pre-activation). Second and fourth panels: the
 reader's mean activation. Solid: component, dashed: neuron.</figcaption></figure>
@@ -695,7 +696,7 @@ r²<sub>gated</sub> − r²<sub>lin</sub> = {rng(sl("alive", b)["r2_gated"] - sl
 {f2(alpha("alive", 17))} ({f2(alpha("orig", 17))}) leaving block 16, and the ring moves away from the activation zero (the
 norm of the mean of <i>z</i> grows from {bd("alive", 15)["offset_norm"]:.2f} to {bd("alive", 17)["offset_norm"]:.2f} while the mean
 residue radius goes from {bd("alive", 15)["radius_mean"]:.2f} to {bd("alive", 17)["radius_mean"]:.2f}).</p>
-<figure><img src="notebook/fig/mod20_sublayers.png"><figcaption>Figure 6. Per block (solid: components, dashed: neurons).
+<figure><img src="fig/mod20_sublayers.png"><figcaption>Figure 6. Per block (solid: components, dashed: neurons).
 (a) Period-20 gain of the MLP and of attention. (b) Share of the MLP's period-20 output made from the plane, and the
 period-20 output it makes without the plane. (c) Held-out r² of Δ from the plane's coordinates: one linear map, or one
 per units digit. (d) Reader decomposition of Δ: secant, gated secant, additivity.</figcaption></figure>
@@ -721,7 +722,7 @@ components model's antipodal separation to {f2(anti("alive", 12))}): entering bl
 antipodal separation is {f2(anti("alive", 14))} ({f2(anti("orig", 14))}), <i>h</i> given <i>r</i>
 {f2(bd("alive", 14)["acc"]["h_given_r"])} ({f2(bd("orig", 14)["acc"]["h_given_r"])}), quarters
 {f2(bd("alive", 14)["acc"]["Q"])} ({f2(bd("orig", 14)["acc"]["Q"])}).</p>
-<figure><img src="notebook/fig/mod20_clouds.png"><figcaption>Figure 7. Per boundary (solid: components, dashed: neurons).
+<figure><img src="fig/mod20_clouds.png"><figcaption>Figure 7. Per boundary (solid: components, dashed: neurons).
 (a) η<sub><i>s</i></sub> and η<sub><i>Q</i></sub>. (b) Median antipodal separation and closest pair of quarters. (c) Held-out nearest-mean
 accuracies. (d) Held-out probe accuracy for <i>h</i> from the whole stream, the plane only, and the stream minus the plane.</figcaption></figure>
 

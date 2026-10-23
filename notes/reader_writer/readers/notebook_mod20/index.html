@@ -1,0 +1,56 @@
+<title>Mod 20 Representations</title>
+<style>
+/* Layout: one reading column, entries newest first, figures full column width on a white plate. */
+:root {
+  --bg: #fafaf8; --panel: #ffffff; --fg: #1d1d1b; --muted: #6b6b66; --line: #deded8; --accent: #2a5db0;
+  --body: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #161615; --panel: #1f1f1d; --fg: #e9e9e4; --muted: #9a9a93; --line: #34342f; --accent: #7ea6ec;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #161615; --panel: #1f1f1d; --fg: #e9e9e4; --muted: #9a9a93; --line: #34342f; --accent: #7ea6ec;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--fg); font: 15px/1.6 var(--body); margin: 0; padding-inline: 16px; padding-block: 24px 64px; }
+main { max-width: 1000px; margin: 0 auto; display: flex; flex-direction: column; gap: 8px; }
+header { border-bottom: 1px solid var(--line); padding-block: 0 12px; margin-bottom: 8px; }
+header h1 { font-size: 20px; margin: 0; text-wrap: balance; }
+.note { color: var(--muted); font-size: 13px; }
+#toc a { color: var(--accent); }
+article { min-width: 0; margin-bottom: 48px; }
+article h2 { font-size: 22px; margin: 16px 0 2px; text-wrap: balance; }
+article h3 { font-size: 16px; margin: 28px 0 6px; text-wrap: balance; }
+article p, article li { max-width: 72ch; }
+figure { margin: 12px 0; }
+figure img { max-width: 100%; height: auto; display: block; background: #fff; border: 1px solid var(--line); }
+figcaption { color: var(--muted); font-size: 13px; max-width: 72ch; margin-top: 4px; }
+.tw { overflow-x: auto; }
+table { border-collapse: collapse; font-variant-numeric: tabular-nums; font-size: 14px; }
+td, th { padding: 3px 14px 3px 0; text-align: left; border-bottom: 1px solid var(--line); }
+code { font: 13px var(--mono); }
+</style>
+<main>
+  <header>
+    <h1>Mod 20 representations</h1>
+    <div class="note">Run p-ba8b0c08 (addsub-08, Llama-3.1-8B). <span id="toc"></span></div>
+  </header>
+  <div id="body"><p class="note">Loading entries.js…</p></div>
+</main>
+<script src="entries.js" onerror="window.NOTEBOOK = null"></script>
+<script>
+(function () {
+  const body = document.getElementById("body");
+  if (!window.NOTEBOOK) { body.innerHTML = '<p class="note">entries.js did not load.</p>'; return; }
+  const NB = window.NOTEBOOK.slice().reverse();
+  document.getElementById("toc").innerHTML = "Entries: " + NB.map(e => `<a href="#nb-${e.id}">${e.title}</a> (${e.date})`).join(" · ");
+  body.innerHTML = NB.map(e => `<article id="nb-${e.id}"><h2>${e.title}</h2><div class="note">${e.date}</div>${e.html}</article>`).join("");
+  body.querySelectorAll("table").forEach(t => { const w = document.createElement("div"); w.className = "tw"; t.replaceWith(w); w.appendChild(t); });
+  const h = location.hash && document.getElementById(location.hash.slice(1)); if (h) h.scrollIntoView();
+})();
+</script>
