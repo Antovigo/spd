@@ -14,7 +14,7 @@ d_r = mu_r - (mean over the ten residues of mu_s), the relative orientations onc
 diagonal grey, diverging colour range symmetric about 0 (+- the panel's largest off-diagonal |value|). Ten equally
 spaced one-hot-like directions give -1/9 everywhere off the diagonal.
 
---shared: one colour range (and one colour bar) for all blocks.
+--log: logarithmic colour scale. --shared: one colour range (and one colour bar) for all blocks.
 
 --cohen: D[r, r'] = Cohen's d between the clouds {x_V(a): a mod 10 = r} and {x_V(a): a mod 10 = r'} (40 operands
 each) along the unit vector joining their centroids mu_r' -> mu_r (pooled within-cloud standard deviation, no
@@ -33,6 +33,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.colors import LogNorm
 from repo import ROOT
 from seed_blocks_mod10 import circulant
 
@@ -101,6 +102,7 @@ def main() -> None:
     ap.add_argument("--cosine", action="store_true")
     ap.add_argument("--centred", action="store_true")
     ap.add_argument("--cohen", action="store_true")
+    ap.add_argument("--log", action="store_true", help="logarithmic colour scale (Cohen's d)")
     ap.add_argument("--shared", action="store_true", help="one colour range for all blocks")
     args = ap.parse_args()
     mode = (
@@ -146,7 +148,10 @@ def main() -> None:
         ax = grid[b // 6, b % 6]
         lo, hi = shared if args.shared else vrange(M)
         shown = M if mode == "gram" else np.ma.masked_where(eye, M)
-        im = ax.imshow(shown, cmap=cmap, vmin=lo, vmax=hi)
+        if args.log:
+            im = ax.imshow(shown, cmap=cmap, norm=LogNorm(vmin=lo, vmax=hi))
+        else:
+            im = ax.imshow(shown, cmap=cmap, vmin=lo, vmax=hi)
         if not args.shared:
             fig.colorbar(im, ax=ax, fraction=0.046, pad=0.03)
         c = circs[b]
