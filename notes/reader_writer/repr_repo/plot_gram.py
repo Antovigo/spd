@@ -6,8 +6,10 @@ whose stored `mu` it reproduces for blocks 1..11). Nothing is centred: G include
 share. G is circulant when G[r, r'] depends only on the lag (r' - r) mod 10. Each panel has its own colour range.
 Titles: offdiag = share of |F G F^H|^2 off the diagonal within frequencies 1..5 (0 for circulant), and its median
 over 200 random relabellings of the residues (seed_blocks_mod10.circulant).
+With --cosine: cos(mu_r, mu_r') = G[r, r'] / (||mu_r|| ||mu_r'||) instead; the diagonal (1 by definition) is drawn
+grey and left out of the colour range, which spans the panel's off-diagonal values.
 
-    python plot_gram.py --out <png>
+    python plot_gram.py --out <png> [--cosine]
 """
 
 import argparse
@@ -52,6 +54,7 @@ def block_mu(b: int, readers: list[dict]) -> np.ndarray:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--out", type=Path, required=True)
+    ap.add_argument("--cosine", action="store_true")
     args = ap.parse_args()
     readers = json.loads((ROOT / "readers.json").read_text())["readers"]
     reps = {
@@ -68,7 +71,20 @@ def main() -> None:
         circ = circulant(mu)
         G = mu @ mu.T
         ax = grid[b // 6, b % 6]
-        im = ax.imshow(G, cmap="viridis", vmin=G.min(), vmax=G.max())
+        if args.cosine:
+            n = np.linalg.norm(mu, axis=1)
+            C = G / np.outer(n, n)
+            off = C[~np.eye(10, dtype=bool)]
+            cmap = plt.get_cmap("viridis").copy()
+            cmap.set_bad("#bbbbbb")
+            im = ax.imshow(
+                np.ma.masked_where(np.eye(10, dtype=bool), C),
+                cmap=cmap,
+                vmin=off.min(),
+                vmax=off.max(),
+            )
+        else:
+            im = ax.imshow(G, cmap="viridis", vmin=G.min(), vmax=G.max())
         fig.colorbar(im, ax=ax, fraction=0.046, pad=0.03)
         ax.set_title(
             f"block {b}\noffdiag {circ['offdiag_share_k1to5']:.2f} (shuffled {circ['shuffled_median']:.2f})",
@@ -79,7 +95,8 @@ def main() -> None:
         ax.tick_params(labelsize=6)
     grid[-1, -1].axis("off")
     for i in range(3):
-        grid[i, 0].set_ylabel("G[r, r'] = μ_r · μ_r'\nrow r, column r'", fontsize=8)
+        label = "cos(μ_r, μ_r')" if args.cosine else "G[r, r'] = μ_r · μ_r'"
+        grid[i, 0].set_ylabel(f"{label}\nrow r, column r'", fontsize=8)
     fig.tight_layout()
     fig.savefig(args.out, dpi=120)
 
