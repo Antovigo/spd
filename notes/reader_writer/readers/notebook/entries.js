@@ -976,6 +976,76 @@ against itself, on the line <i>y</i> = <i>x</i>. (C) Gate arm: SiLU(<i>h</i><sub
 shifted so that its training off and on means sit at 0 and 1, and its held-out prompts are pooled. Titles give the mean
 held-out d′ and the AUC over the folds; legends give mean ± standard deviation.</figcaption></figure>
 <!-- lens:end -->
+<!-- copy:begin -->
+<h3>10. Copying a and b to "="</h3>
+<p>In the decomposition (the AB grids, with CI masks), the value components of block 15 that are active at the token
+<i>b</i> (position 3) are periodic in <i>b</i>, and so are block 15's output components at "=" (position 4). The value components of block 16
+that are active at the token <i>a</i> (position 1) are periodic in <i>a</i>, and so are block 16's output components at "=". So block 15 copies <i>b</i> mod 10
+and block 16 copies <i>a</i> mod 10. Block 18 makes a smaller second copy of <i>a</i>. This section analyses the two main copies in the alive-only model
+(<code>copy_build.py</code>, <code>copy_analyze.py</code>, <code>copy_page.py</code>). Each uses 8,000 prompts. For the copy of <i>a</i>: every
+<i>a</i> = 1 … 400, ten values of <i>b</i> (one per residue) and both operations. For <i>b</i>: ten values of <i>a</i>, every <i>b</i> and both operations.
+The rebuild matches the stored MLP activations to within 1.4% at every block.</p>
+<ul>
+<li><b>Notation.</b> <i>X<sub>j</sub></i> is the stream at position <i>j</i> entering the block, and <i>x<sub>j</sub></i> = RMSNorm(<i>X<sub>j</sub></i>) is the attention's
+input. A value component <i>c</i> has inner activation <i>t<sub>c</sub></i>(<i>j</i>) = <i>x<sub>j</sub></i> · <i>V<sub>c</sub></i> and writes <i>t<sub>c</sub></i> <i>U<sub>c</sub></i>
+into the eight key-value (KV) heads of 128 dimensions each. Query head <i>h</i> (0 … 31) reads KV head ⌊<i>h</i>/4⌋, with attention weight
+<i>p<sub>h</sub></i> at "=" on the source position <i>s</i>. The <b>copy</b> <i>O<sub>s</sub></i> is the part of the attention output at "=" that comes from position
+<i>s</i>: Σ<sub><i>h</i></sub> <i>p<sub>h</sub></i> × (head <i>h</i>'s value at <i>s</i>), passed through the output projection.
+Residue means, Fourier components Ψ<sub><i>k</i></sub>, planes <i>P<sub>k</sub></i> and the 9-dimensional period-10 subspace <i>D</i> are as before,
+with <i>r</i> the copied operand mod 10.</li>
+<li><b>Gain per frequency.</b> <i>g<sub>k</sub></i> = √(λ<sub><i>k</i></sub>(copy)/λ<sub><i>k</i></sub>(source)), where λ<sub><i>k</i></sub> is the frequency-<i>k</i>
+diagonal entry of the residue means' Gram matrix in the Fourier basis (<i>k</i> = 0 is the direction shared by all residues).
+"offdiag" is the share of the frequency 1–5 Gram energy off that diagonal: 0 means the residues sit equally spaced on circles.
+"Accuracy / separable" gives the leave-one-out nearest-mean accuracy, and the number of residues linearly separable from the
+other nine, in the field's own <i>D</i>.</li>
+</ul>
+<div class="tw"><table><tr><th>copy</th><th>block</th><th>source position</th><th>main head</th><th>share of copied period-10 energy</th>
+<th>its weight on the source</th><th>source accuracy / separable</th><th>copy accuracy / separable</th><th>gain g<sub>k</sub>, k = 0 … 5</th>
+<th>offdiag of copy</th><th>value comps for 90%</th><th>output comps for 90%</th></tr><tr><td>a mod 10</td><td>16</td><td>1</td><td>21 (KV 5)</td><td>0.98</td><td>0.90</td><td>1.000 / 10</td><td>1.000 / 10</td><td>0.07 / 0.25 / 0.24 / 0.10 / 0.11 / 0.27</td><td>0.032</td><td>19 of 86</td><td>24 of 169</td></tr><tr><td>b mod 10</td><td>15</td><td>3</td><td>13 (KV 3)</td><td>0.97</td><td>0.89</td><td>0.998 / 9</td><td>0.974 / 5</td><td>0.09 / 0.25 / 0.27 / 0.08 / 0.09 / 0.29</td><td>0.062</td><td>16 of 75</td><td>17 of 128</td></tr></table></div>
+<p><b>One head does each copy.</b> Head 21 carries 98% of the copied period-10 energy of <i>a</i>, with weight 0.90 on position 1. Head 13
+carries 97% of <i>b</i>'s, with weight 0.89 on position 3. Averaged over all heads, "=" puts 0.11 of its weight on <i>a</i> in block 16 and
+0.15 on <i>b</i> in block 15. The main head's weight on the source varies between prompts (<i>a</i>: 0.90 ± 0.14, minimum
+0.25; <i>b</i>: 0.89 ± 0.23, minimum 0.09), and it scales the whole copied vector. Rescaling each prompt's residue mean reproduces
+28% (<i>a</i>) and 47% (<i>b</i>) of the copy's within-class spread in its <i>D</i>, and the fitted scale correlates with the head weight
+(correlation 0.83 for both). This is why the copied clouds stretch along lines through the activation zero in the figure below.</p>
+<p><b>Value components spread over several KV heads; the copy uses one.</b> Most value components that carry the copy of <i>a</i> have
+their largest write in KV head 5 (read by head 21; two have it in KV head 0), and no single KV head holds more than 17–40% of a
+component's write energy. For <i>b</i>, every carrying component's largest write is in KV head 3 (read by head 13), with 32–51% of the energy. The rest goes to KV heads that other query heads read with little weight on the
+source. Output components read several heads (5–10 heads for 90% of their read energy). The 24 (<i>a</i>) and 17 (<i>b</i>) output
+components that carry 90% of the copy each read head 21 (<i>a</i>) or head 13 (<i>b</i>) most, with 66–84% of their read energy.</p>
+<p><b>All ten residues are copied, but not with equal gain.</b> The copy of <i>a</i> keeps every residue apart (accuracy 1.000, 10 of 10
+separable) and stays circulant (offdiag 0.032). Its frequencies are scaled unequally: <i>k</i> = 1, 2, 5 by 0.24–0.27, and
+<i>k</i> = 3, 4 by 0.10–0.11, against 0.07 for the shared direction. So the copy is the same structure up to a linear map that rotates the planes
+and shrinks the full-residue plane <i>k</i> = 3 and the mod-5 plane <i>k</i> = 4 about 2.5 times more than the others. It is not a single
+rotation times a scale. The copy of <i>b</i> has the same pattern (<i>k</i> = 3, 4 scaled by 0.08–0.09, others by 0.25–0.29). It keeps less:
+accuracy 0.974 and 5 of 10 residues separable, against 0.998 and 9 at the source.
+The copy of <i>b</i> also carries <i>a</i> mod 10 (Fourier amplitude 2.69 at <i>k</i> = 1, against 4.98 for <i>b</i>), because position 3 holds <i>a</i> mod 10
+(see the position-3 page). The copy of <i>a</i> carries little <i>b</i> (0.46 against 6.25).</p>
+<p><b>The copy lands in new directions.</b> The planes of the copy at "=" are almost orthogonal to the source's (mean principal cosines
+≤ 0.08). The stream at "=" after the block holds the copied planes (cosines 0.83–0.99 for <i>a</i>; 0.29–0.91 for <i>b</i>). Before the block,
+"=" carried little of either operand (amplitude ≤ 0.78).</p>
+<p><b>How a value component can be mod 2 or a three-residue bump.</b> A value component's activation at the source is a linear read
+<i>V<sub>c</sub></i> · <i>x<sub>s</sub></i> of the circles. Its residue profile is therefore a sum of sinusoids, one per frequency, with any amplitude and phase.
+v114 reads mostly the <i>k</i> = 5 line and the shared direction (frequency shares 0.52 at <i>k</i> = 0, 0.41 at <i>k</i> = 5): a mod-2 pattern on an offset.
+v115 reads <i>k</i> = 1 and 2 (0.43, 0.22) plus the offset (0.29), which sums to a bump over a few consecutive residues. Together the
+19 value components carrying 90% of the copy of <i>a</i> span all nine period-10 dimensions: their profiles' frequency 1–5 parts have rank 9,
+with singular values 8.62 down to 1.97. The same holds for <i>b</i>
+(16 components, rank 9, smallest singular value 0.49). No single value component carries the
+representation. The set does.</p>
+<p><b><i>a</i> and <i>b</i>: the same source structure, different destinations.</b> At their sources, the planes of <i>a</i> (position 1, entering block 16)
+and of <i>b</i> (position 3, entering block 15) are nearly the same directions: principal cosines 0.88–0.96 per plane, 0.84–0.99 for the
+nine directions of <i>D</i>. At "=", the two copies land in almost orthogonal places (cosines between the copies' <i>D</i> subspaces
+0.39 down to 0.01). The value components that copy <i>a</i> and <i>b</i> are different components in different blocks, and their read
+vectors are only partly aligned: for each component copying <i>a</i>, the largest |cosine| with a component copying <i>b</i> is
+0.28–0.61.</p>
+<figure><img src="notebook/fig/copy_planes.png"><figcaption>Top: <i>a</i> mod 10, block 16. Bottom: <i>b</i> mod 10, block 15. From left: the source
+position's attention input in its own planes <i>k</i> = 1 and <i>k</i> = 3; the copy <i>O<sub>s</sub></i> at "=" in its own planes <i>k</i> = 1 and 3;
+the stream at "=" leaving the block in its plane <i>k</i> = 1. Axes are turned so that residue 0's mean is on the positive horizontal axis,
+and the cross is the activation zero. Dots are the 8,000 prompts, coloured by residue.</figcaption></figure>
+<figure><img src="notebook/fig/copy_parts.png"><figcaption>(a) Share of each head in the copied period-10 energy (<i>a</i>: block 16;
+<i>b</i>: block 15). (b, c) Residue profiles (mean inner activation per residue, scaled to the largest |value|) of the value
+components carrying 90% of each copy, labelled with their share. (d) Gain per frequency from the source to the copy.</figcaption></figure>
+<!-- copy:end -->
 `
 },
 {
