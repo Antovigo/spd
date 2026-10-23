@@ -14,7 +14,9 @@ d_r = mu_r - (mean over the ten residues of mu_s), the relative orientations onc
 diagonal grey, diverging colour range symmetric about 0 (+- the panel's largest off-diagonal |value|). Ten equally
 spaced one-hot-like directions give -1/9 everywhere off the diagonal.
 
-    python plot_gram.py --out <png> [--cosine | --centred]
+--shared: one colour range (and one colour bar) for all blocks.
+
+    python plot_gram.py --out <png> [--cosine | --centred] [--shared]
 """
 
 import argparse
@@ -56,69 +58,83 @@ def block_mu(b: int, readers: list[dict]) -> np.ndarray:
     return np.stack([xv[r == A % 10].mean(0) for r in range(10)])
 
 
+def matrix(mu: np.ndarray, mode: str) -> np.ndarray:
+    match mode:
+        case "gram":
+            return mu @ mu.T
+        case "cosine":
+            n = np.linalg.norm(mu, axis=1)
+            return (mu @ mu.T) / np.outer(n, n)
+        case "centred":
+            d = mu - mu.mean(0)
+            n = np.linalg.norm(d, axis=1)
+            return (d @ d.T) / np.outer(n, n)
+        case _:
+            raise ValueError(mode)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--cosine", action="store_true")
     ap.add_argument("--centred", action="store_true")
+    ap.add_argument("--shared", action="store_true", help="one colour range for all blocks")
     args = ap.parse_args()
+    mode = "centred" if args.centred else "cosine" if args.cosine else "gram"
     readers = json.loads((ROOT / "readers.json").read_text())["readers"]
     reps = {
         r["id"]: r
         for r in json.loads((ROOT / "representations.json").read_text())["representations"]
     }
-    fig, grid = plt.subplots(3, 6, figsize=(16, 8.4))
+    eye = np.eye(10, dtype=bool)
+    mats, circs = {}, {}
     for b in BLOCKS:
         mu = block_mu(b, readers)
         rid = f"L{b}.p1.a_mod_10.means"
         if rid in reps:
             stored = np.load(ROOT / reps[rid]["vectors"])["mu"]
             assert np.abs(stored - mu).max() <= 1e-6 * np.abs(stored).max(), b
-        circ = circulant(mu)
-        G = mu @ mu.T
+        circs[b] = circulant(mu)
+        mats[b] = matrix(mu, mode)
+
+    def vrange(M: np.ndarray) -> tuple[float, float]:
+        v = M if mode == "gram" else M[~eye]
+        if mode == "centred":
+            m = float(np.abs(v).max())
+            return -m, m
+        return float(v.min()), float(v.max())
+
+    if args.shared:
+        lims = np.array([vrange(M) for M in mats.values()])
+        shared = (float(lims[:, 0].min()), float(lims[:, 1].max()))
+    cmap = plt.get_cmap("RdBu_r" if mode == "centred" else "viridis").copy()
+    cmap.set_bad("#bbbbbb")
+    fig, grid = plt.subplots(3, 6, figsize=(16, 8.4))
+    for b, M in mats.items():
         ax = grid[b // 6, b % 6]
-        if args.centred:
-            d = mu - mu.mean(0)
-            n = np.linalg.norm(d, axis=1)
-            C = (d @ d.T) / np.outer(n, n)
-            m = np.abs(C[~np.eye(10, dtype=bool)]).max()
-            cmap = plt.get_cmap("RdBu_r").copy()
-            cmap.set_bad("#bbbbbb")
-            im = ax.imshow(
-                np.ma.masked_where(np.eye(10, dtype=bool), C), cmap=cmap, vmin=-m, vmax=m
-            )
-        elif args.cosine:
-            n = np.linalg.norm(mu, axis=1)
-            C = G / np.outer(n, n)
-            off = C[~np.eye(10, dtype=bool)]
-            cmap = plt.get_cmap("viridis").copy()
-            cmap.set_bad("#bbbbbb")
-            im = ax.imshow(
-                np.ma.masked_where(np.eye(10, dtype=bool), C),
-                cmap=cmap,
-                vmin=off.min(),
-                vmax=off.max(),
-            )
-        else:
-            im = ax.imshow(G, cmap="viridis", vmin=G.min(), vmax=G.max())
-        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.03)
+        lo, hi = shared if args.shared else vrange(M)
+        shown = M if mode == "gram" else np.ma.masked_where(eye, M)
+        im = ax.imshow(shown, cmap=cmap, vmin=lo, vmax=hi)
+        if not args.shared:
+            fig.colorbar(im, ax=ax, fraction=0.046, pad=0.03)
+        c = circs[b]
         ax.set_title(
-            f"block {b}\noffdiag {circ['offdiag_share_k1to5']:.2f} (shuffled {circ['shuffled_median']:.2f})",
+            f"block {b}\noffdiag {c['offdiag_share_k1to5']:.2f} (shuffled {c['shuffled_median']:.2f})",
             fontsize=8,
         )
         ax.set_xticks(range(10))
         ax.set_yticks(range(10))
         ax.tick_params(labelsize=6)
     grid[-1, -1].axis("off")
+    if args.shared:
+        fig.colorbar(im, ax=grid[-1, -1], fraction=0.5, pad=0.0)
+    label = {
+        "centred": "cos(μ_r − μ̄, μ_r' − μ̄)",
+        "cosine": "cos(μ_r, μ_r')",
+        "gram": "G[r, r'] = μ_r · μ_r'",
+    }
     for i in range(3):
-        label = (
-            "cos(μ_r − μ̄, μ_r' − μ̄)"
-            if args.centred
-            else "cos(μ_r, μ_r')"
-            if args.cosine
-            else "G[r, r'] = μ_r · μ_r'"
-        )
-        grid[i, 0].set_ylabel(f"{label}\nrow r, column r'", fontsize=8)
+        grid[i, 0].set_ylabel(f"{label[mode]}\nrow r, column r'", fontsize=8)
     fig.tight_layout()
     fig.savefig(args.out, dpi=120)
 
