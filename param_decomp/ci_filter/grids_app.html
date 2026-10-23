@@ -37,7 +37,10 @@
   .ax .xt span::before { content: ""; position: absolute; left: 50%; top: 0; width: 1px; height: 4px;
                          background: var(--muted); }
   #readout { font-family: ui-monospace, monospace; margin-top: 10px; min-height: 1.3em;
-             white-space: pre-wrap; }
+             white-space: pre-wrap;
+             /* Zero intrinsic width: the readout wraps inside the drawer instead of setting its width,
+                so a sign or digit change in the hovered values never resizes the panel. */
+             width: 0; min-width: 100%; }
   #gallery { padding: 10px 16px; }
   body.drawer-open header, body.drawer-open .axis-note, body.drawer-open #legend,
   body.drawer-open #gallery, body.drawer-open #empty { margin-right: var(--drawer-w, 0px); }
