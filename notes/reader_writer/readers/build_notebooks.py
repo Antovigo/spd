@@ -52,7 +52,8 @@ LAYOUT = {
         "title": "Mod 10 representations",
         "pages": ["mod10", "mod10_p3", "mod10_geometry", "mod10-neurons"],
         "parts": [
-            [("mod10", 1), ("mod10", 7), ("mod10", 8), ("mod10_p3", 1), ("mod10_p3", 2), ("mod10_p3", 4), ("mod10_p3", 5)],
+            [("mod10", 1), ("mod10", 7), ("mod10", 8), ("mod10_p3", 1), ("mod10_p3", 2), ("mod10_p3", 4), ("mod10_p3", 5),
+             ("mod10_p3", 6)],
             [("mod10_geometry", 1), ("mod10_geometry", 2), ("mod10_geometry", 3), ("mod10_geometry", 4),
              ("mod10_geometry", 5), ("mod10_geometry", "Caveat"), ("mod10_p3", 3), ("mod10", 9)],
             [("mod10", 2), ("mod10", 3), ("mod10", 4), ("mod10", 5), ("mod10", 6)],

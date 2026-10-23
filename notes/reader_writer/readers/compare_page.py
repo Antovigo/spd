@@ -137,7 +137,7 @@ def main() -> None:
     html = f"""{BEGIN}
 <h3>6. a and b compared, blocks 0–16</h3>
 <p>This section compares the representation of <i>a</i> mod 10 at the token <i>a</i> (position 1, 400 prompts) with that of <i>b</i> mod 10
-at the token <i>b</i> (position 3, the 8,000 prompts of this page), at the MLP input of every block (<code>compare_p1p3.py</code>,
+at the token <i>b</i> (position 3, the 8,000 position-3 prompts), at the MLP input of every block (<code>compare_p1p3.py</code>,
 <code>compare_page.py</code>).</p>
 <ul>
 <li><b>Amplitudes.</b> <i>X</i> is the residual stream entering the MLP, ρ = √(mean of <i>X</i>² over the 4096 coordinates) its RMS, and
