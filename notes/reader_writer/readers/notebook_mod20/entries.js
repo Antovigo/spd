@@ -207,7 +207,7 @@ positive for <i>s</i> ∈ 0–9, negative for 11–19). The size of its effect o
 (here <i>h</i><sub>gate</sub> ∈ ℝ<sup>14336</sup> is the vector of gate pre-activations, <i>U</i><sub>up,57</sub> component 57's write
 into the 14,336 neurons, <i>V</i><sub>down</sub>, <i>U</i><sub>down</sub> the down components, ⊙ the elementwise product), is large when
 <i>r</i> ∈ 5–9 and small when <i>r</i> ∈ 0–4. For the neuron, the slope is silu of its gate pre-activation: 0.36–0.87
-for <i>r</i> ∈ 5–9 and -0.27–0.14 for <i>r</i> ∈ 0–4. A write proportional to (ring
+for <i>r</i> ∈ 5–9 and −0.27 to 0.14 for <i>r</i> ∈ 0–4. A write proportional to (ring
 reading) × [<i>r</i> ≥ 5] is what turns <i>h</i> into <i>g</i>: with ±1 coding, <i>g</i> = <i>h</i>·(1 − 2[<i>r</i> ≥ 5]).</p>
 <p><b>Block 13: g is read, and the clouds tighten.</b> Across block 13, <i>α</i> barely moves, while the clouds
 separate: held-out quarter accuracy 0.83 → 0.91
@@ -287,6 +287,62 @@ probes in figure 7d).</li>
 0.52–0.79).</li>
 <li>Blur of the clouds in blocks 3–11: much stronger in the components model.</li>
 </ul>
+<h3>8. Block 12 in the planes: components</h3>
+<p>Block 12's MLP turns the ring into quarters (section 2). The components model's MLP has the same 14,336 neurons as
+the original (indices 0–14335); only the gate, up and down matrices are replaced by sums of components. In the components
+model, two neurons carry the step, and each is fed by a few components (<code>mod20_b12_fig.py</code>). A component reader feeds the 14,336 neurons through its write row
+<i>U</i><sub>up,<i>c</i></sub> or <i>U</i><sub>gate,<i>c</i></sub> ∈ ℝ<sup>14336</sup>; a neuron <i>n</i>'s gate pre-activation is
+gate<sub><i>n</i></sub> = Σ<sub><i>c</i></sub> <i>t<sub>c</sub></i> <i>U</i><sub>gate,<i>c</i></sub>[<i>n</i>] over gate components, its up
+pre-activation up<sub><i>n</i></sub> the same over up components, and its <b>write coefficient</b> is silu(gate<sub><i>n</i></sub>)·up<sub><i>n</i></sub>
+(silu(<i>x</i>) = <i>x</i>/(1 + e<sup>−<i>x</i></sup>)). The read vector of a reader in residual-stream coordinates is
+<i>ρ</i> = <i>γ</i> ⊙ <i>w</i>, with <i>γ</i> ∈ ℝ<sup>4096</sup> block 12's post-attention RMSNorm gain, ⊙ the elementwise product and
+<i>w</i> the reader's read vector, so that its activation is <i>ρ</i> · <i>X</i>/rms(<i>X</i>). Its <b>in-plane</b> value is
+‖<i>P</i><sup>T</sup><i>ρ</i>‖/‖<i>ρ</i>‖ (1 when <i>ρ</i> lies in the plane), and the arrows in figure 8 are <i>P</i><sup>T</sup><i>ρ</i>/‖<i>ρ</i>‖ drawn
+from the activation zero. <i>P</i><sub>10</sub> is the frequency-1 plane of <i>a</i> mod 10 of the same stream.</p>
+<ul>
+<li><b>Neuron 5212, the h × [r ≥ 5] product.</b> Its up input is almost only component u57
+(<i>U</i><sub>up,57</sub>[5212] = 0.31; u57's next largest write to any neuron is 0.08).
+u57 reads the ring (in-plane 0.66): its contribution to up<sub>5212</sub> is
+0.11–0.12 for <i>s</i> = 1–3 and −0.69 to −0.64 for <i>s</i> = 15–17. Its gate is set by
+components that read the units digit, not the ring (in-plane in <i>P</i>: g37 0.10, g33
+0.01; in <i>P</i><sub>10</sub>: 0.55 and
+0.48). g37 lowers gate<sub>5212</sub> by −1.31 to −1.02 for <i>r</i> = 2–4, and g33
+raises it by 0.45–0.59 for <i>r</i> = 5–7. silu(gate<sub>5212</sub>) is 0.90–1.47
+for <i>r</i> = 5–9 and −0.21 to 0.22 for <i>r</i> = 0–4. The write coefficient is
+0.35–0.55 for <i>s</i> = 5–9, −0.39 to −0.11 for <i>s</i> = 15–19 and between
+-0.10 and 0.04 elsewhere: a sign set by the
+ring's <i>h</i> side, nonzero only when <i>r</i> ≥ 5.</li>
+<li><b>Neuron 8953, the quarter s = 10–14.</b> Its gate is mostly component g11 (<i>U</i><sub>gate,11</sub>[8953] =
+0.36; next largest 0.10), which reads the ring (in-plane 0.69)
+and contributes 1.08–1.42 to gate<sub>8953</sub> for <i>s</i> = 10–14. Its up input is nearly constant
+(−1.62 to −1.35, mostly component u1, in-plane 0.03). The write coefficient is
+−1.34 to −0.87 for <i>s</i> = 10–14 and 0.06–0.43 elsewhere.</li>
+</ul>
+<figure><img src="fig/mod20_b12_components.png"><figcaption>Figure 8. Components model, block 12's MLP input. (a) The
+<i>a</i> mod 20 plane <i>P</i> (residues coloured by quarter, as in figure 2; the vector from residue 10's mean to residue 0's mean
+points right) with the read directions of the components that feed neurons 5212 and 8953; the legend gives each one's
+in-plane value. (b) The same readers in the <i>a</i> mod 10 frequency-1 plane <i>P</i><sub>10</sub> (blue <i>r</i> = 0–4, orange
+<i>r</i> = 5–9; residue 0's mean points right). An arrow gives the sign of the component's activation; g37 enters gate<sub>5212</sub>
+with a negative weight. (c) Per residue <i>s</i>: each component's contribution to neuron 5212's gate or up pre-activation, and
+the neuron's write coefficient. (d) The same for neuron 8953.</figcaption></figure>
+
+<h3>9. Block 12 in the planes: neurons</h3>
+<p>The same two neurons of the original model, with quantities defined as in section 8 (here <i>w</i> is the row of
+<code>gate_proj</code> or <code>up_proj</code>). <b>Neuron 5212</b>: the up row reads the ring (in-plane
+0.67; up<sub>5212</sub> is 0.29–0.56 for <i>s</i> = 1–8 and −0.60 to −0.25
+for <i>s</i> = 13–19). The gate row reads the units digit (in-plane in <i>P</i> 0.26, in
+<i>P</i><sub>10</sub> 0.48): silu(gate<sub>5212</sub>) is 0.36–0.87
+for <i>r</i> = 5–9 and −0.27 to 0.14 for <i>r</i> = 0–4. The write coefficient is
+0.24–0.35 for <i>s</i> = 5–9, −0.44 to −0.09 for <i>s</i> = 15–19, and between
+-0.14 and 0.08 elsewhere. <b>Neuron 8953</b>:
+the gate row reads the ring (in-plane 0.61) and silu(gate<sub>8953</sub>) is
+0.66–1.00 for <i>s</i> = 10–14 against −0.26 to −0.10 elsewhere; the up row
+is nearly constant (−1.53 to −0.93, in-plane 0.19). Its write coefficient is
+−1.02 to −0.66 for <i>s</i> = 10–14 and 0.14–0.36 elsewhere. The components model
+routes the same two neurons through u57 (up 5212), g37 and g33 (gate 5212), g11 (gate 8953) and u1 (up 8953) (section 8).</p>
+<figure><img src="fig/mod20_b12_neurons.png"><figcaption>Figure 9. Original model, block 12's MLP input, as figure 8 with the
+gate and up rows of neurons 5212 and 8953 as readers. (c), (d): per residue <i>s</i>, the neuron's up pre-activation,
+silu of its gate pre-activation, and their product (the write coefficient).</figcaption></figure>
 <p>Scripts: <code>track_build_orig.py</code>, <code>mod20_track.py</code>, <code>mod20_readers.py</code>, <code>mod20_page.py</code>;
 data in <code>&lt;run&gt;/analysis/reader_writer/track_mod20/</code>.</p>
 `

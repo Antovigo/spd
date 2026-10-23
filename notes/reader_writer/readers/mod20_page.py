@@ -416,6 +416,15 @@ def insert_entry(p: Path, html: str) -> None:
 
 
 def page(res, rings, counts, scan, pr) -> str:
+    b12 = json.loads((OUT / "b12_fig.json").read_text())
+    cp, npf = b12["components_profiles"], b12["neurons_profiles"]
+
+    def inpl(key: str, name: str) -> float:
+        return next(d["in_plane"] for d in b12[key] if d["reader"] == name)
+
+    def fmt(x: float) -> str:
+        return f"{x:.2f}"
+
     def bd(m: str, b: int) -> dict:
         return res[m]["boundaries"][f"pre_{b}"]
 
@@ -427,6 +436,8 @@ def page(res, rings, counts, scan, pr) -> str:
 
     def rng(vals) -> str:
         v = list(vals)
+        if min(v) < 0:
+            return f"{min(v):.2f} to {max(v):.2f}".replace("-", "−")
         return f"{min(v):.2f}–{max(v):.2f}"
 
     def j1null(m: str, b: int) -> float:
@@ -757,6 +768,62 @@ probes in figure 7d).</li>
 {rng(mech("orig", b, "r2_secant_sum") for b in range(1, 12))}).</li>
 <li>Blur of the clouds in blocks 3–11: much stronger in the components model.</li>
 </ul>
+<h3>8. Block 12 in the planes: components</h3>
+<p>Block 12's MLP turns the ring into quarters (section 2). The components model's MLP has the same 14,336 neurons as
+the original (indices 0–14335); only the gate, up and down matrices are replaced by sums of components. In the components
+model, two neurons carry the step, and each is fed by a few components (<code>mod20_b12_fig.py</code>). A component reader feeds the 14,336 neurons through its write row
+<i>U</i><sub>up,<i>c</i></sub> or <i>U</i><sub>gate,<i>c</i></sub> ∈ ℝ<sup>14336</sup>; a neuron <i>n</i>'s gate pre-activation is
+gate<sub><i>n</i></sub> = Σ<sub><i>c</i></sub> <i>t<sub>c</sub></i> <i>U</i><sub>gate,<i>c</i></sub>[<i>n</i>] over gate components, its up
+pre-activation up<sub><i>n</i></sub> the same over up components, and its <b>write coefficient</b> is silu(gate<sub><i>n</i></sub>)·up<sub><i>n</i></sub>
+(silu(<i>x</i>) = <i>x</i>/(1 + e<sup>−<i>x</i></sup>)). The read vector of a reader in residual-stream coordinates is
+<i>ρ</i> = <i>γ</i> ⊙ <i>w</i>, with <i>γ</i> ∈ ℝ<sup>4096</sup> block 12's post-attention RMSNorm gain, ⊙ the elementwise product and
+<i>w</i> the reader's read vector, so that its activation is <i>ρ</i> · <i>X</i>/rms(<i>X</i>). Its <b>in-plane</b> value is
+‖<i>P</i><sup>T</sup><i>ρ</i>‖/‖<i>ρ</i>‖ (1 when <i>ρ</i> lies in the plane), and the arrows in figure 8 are <i>P</i><sup>T</sup><i>ρ</i>/‖<i>ρ</i>‖ drawn
+from the activation zero. <i>P</i><sub>10</sub> is the frequency-1 plane of <i>a</i> mod 10 of the same stream.</p>
+<ul>
+<li><b>Neuron 5212, the h × [r ≥ 5] product.</b> Its up input is almost only component u57
+(<i>U</i><sub>up,57</sub>[5212] = {fmt(b12["U_up_57_5212"])}; u57's next largest write to any neuron is {fmt(b12["U_up_57_next"])}).
+u57 reads the ring (in-plane {fmt(inpl("components_P20", "u57"))}): its contribution to up<sub>5212</sub> is
+{rng(cp["u57->5212"][1:4])} for <i>s</i> = 1–3 and {rng(cp["u57->5212"][15:18])} for <i>s</i> = 15–17. Its gate is set by
+components that read the units digit, not the ring (in-plane in <i>P</i>: g37 {fmt(inpl("components_P20", "g37"))}, g33
+{fmt(inpl("components_P20", "g33"))}; in <i>P</i><sub>10</sub>: {fmt(inpl("components_P10", "g37"))} and
+{fmt(inpl("components_P10", "g33"))}). g37 lowers gate<sub>5212</sub> by {rng(cp["g37->5212"][2:5])} for <i>r</i> = 2–4, and g33
+raises it by {rng(cp["g33->5212"][5:8])} for <i>r</i> = 5–7. silu(gate<sub>5212</sub>) is {rng(cp["gate5212"][5:10] + cp["gate5212"][15:20])}
+for <i>r</i> = 5–9 and {rng(cp["gate5212"][0:5] + cp["gate5212"][10:15])} for <i>r</i> = 0–4. The write coefficient is
+{rng(cp["w5212"][5:10])} for <i>s</i> = 5–9, {rng(cp["w5212"][15:20])} for <i>s</i> = 15–19 and between
+{min(cp["w5212"][0:5] + cp["w5212"][10:15]):.2f} and {max(cp["w5212"][0:5] + cp["w5212"][10:15]):.2f} elsewhere: a sign set by the
+ring's <i>h</i> side, nonzero only when <i>r</i> ≥ 5.</li>
+<li><b>Neuron 8953, the quarter s = 10–14.</b> Its gate is mostly component g11 (<i>U</i><sub>gate,11</sub>[8953] =
+{fmt(b12["U_gate_11_8953"])}; next largest {fmt(b12["U_gate_11_next"])}), which reads the ring (in-plane {fmt(inpl("components_P20", "g11"))})
+and contributes {rng(cp["g11->8953"][10:15])} to gate<sub>8953</sub> for <i>s</i> = 10–14. Its up input is nearly constant
+({rng(cp["up8953"])}, mostly component u1, in-plane {fmt(inpl("components_P20", "u1"))}). The write coefficient is
+{rng(cp["w8953"][10:15])} for <i>s</i> = 10–14 and {rng(cp["w8953"][0:10] + cp["w8953"][15:20])} elsewhere.</li>
+</ul>
+<figure><img src="fig/mod20_b12_components.png"><figcaption>Figure 8. Components model, block 12's MLP input. (a) The
+<i>a</i> mod 20 plane <i>P</i> (residues coloured by quarter, as in figure 2; the vector from residue 10's mean to residue 0's mean
+points right) with the read directions of the components that feed neurons 5212 and 8953; the legend gives each one's
+in-plane value. (b) The same readers in the <i>a</i> mod 10 frequency-1 plane <i>P</i><sub>10</sub> (blue <i>r</i> = 0–4, orange
+<i>r</i> = 5–9; residue 0's mean points right). An arrow gives the sign of the component's activation; g37 enters gate<sub>5212</sub>
+with a negative weight. (c) Per residue <i>s</i>: each component's contribution to neuron 5212's gate or up pre-activation, and
+the neuron's write coefficient. (d) The same for neuron 8953.</figcaption></figure>
+
+<h3>9. Block 12 in the planes: neurons</h3>
+<p>The same two neurons of the original model, with quantities defined as in section 8 (here <i>w</i> is the row of
+<code>gate_proj</code> or <code>up_proj</code>). <b>Neuron 5212</b>: the up row reads the ring (in-plane
+{fmt(inpl("neurons_P20", "up 5212"))}; up<sub>5212</sub> is {rng(npf["up5212"][1:9])} for <i>s</i> = 1–8 and {rng(npf["up5212"][13:20])}
+for <i>s</i> = 13–19). The gate row reads the units digit (in-plane in <i>P</i> {fmt(inpl("neurons_P20", "gate 5212"))}, in
+<i>P</i><sub>10</sub> {fmt(inpl("neurons_P10", "gate 5212"))}): silu(gate<sub>5212</sub>) is {rng(npf["gate5212"][5:10] + npf["gate5212"][15:20])}
+for <i>r</i> = 5–9 and {rng(npf["gate5212"][0:5] + npf["gate5212"][10:15])} for <i>r</i> = 0–4. The write coefficient is
+{rng(npf["w5212"][5:10])} for <i>s</i> = 5–9, {rng(npf["w5212"][15:20])} for <i>s</i> = 15–19, and between
+{min(npf["w5212"][0:5] + npf["w5212"][10:15]):.2f} and {max(npf["w5212"][0:5] + npf["w5212"][10:15]):.2f} elsewhere. <b>Neuron 8953</b>:
+the gate row reads the ring (in-plane {fmt(inpl("neurons_P20", "gate 8953"))}) and silu(gate<sub>8953</sub>) is
+{rng(npf["gate8953"][10:15])} for <i>s</i> = 10–14 against {rng(npf["gate8953"][0:10] + npf["gate8953"][15:20])} elsewhere; the up row
+is nearly constant ({rng(npf["up8953"])}, in-plane {fmt(inpl("neurons_P20", "up 8953"))}). Its write coefficient is
+{rng(npf["w8953"][10:15])} for <i>s</i> = 10–14 and {rng(npf["w8953"][0:10] + npf["w8953"][15:20])} elsewhere. The components model
+routes the same two neurons through u57 (up 5212), g37 and g33 (gate 5212), g11 (gate 8953) and u1 (up 8953) (section 8).</p>
+<figure><img src="fig/mod20_b12_neurons.png"><figcaption>Figure 9. Original model, block 12's MLP input, as figure 8 with the
+gate and up rows of neurons 5212 and 8953 as readers. (c), (d): per residue <i>s</i>, the neuron's up pre-activation,
+silu of its gate pre-activation, and their product (the write coefficient).</figcaption></figure>
 <p>Scripts: <code>track_build_orig.py</code>, <code>mod20_track.py</code>, <code>mod20_readers.py</code>, <code>mod20_page.py</code>;
 data in <code>&lt;run&gt;/analysis/reader_writer/track_mod20/</code>.</p>
 """

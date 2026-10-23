@@ -76,7 +76,8 @@ LAYOUT = {
     "mod20": {
         "title": "Mod 20 representations",
         "pages": ["mod20"],
-        "parts": [[("mod20", 1), ("mod20", 4)], [("mod20", 2), ("mod20", 5), ("mod20", 6)], [("mod20", 3)], [("mod20", 7)], []],
+        "parts": [[("mod20", 1), ("mod20", 4)], [("mod20", 2), ("mod20", 5), ("mod20", 6)], [("mod20", 3), ("mod20", 8)],
+                  [("mod20", 7), ("mod20", 9)], []],
         "refs": {"mod20": [("representation of the mod-10 page", "representation of the mod-10 notebook")]},
     },
 }  # fmt: skip
