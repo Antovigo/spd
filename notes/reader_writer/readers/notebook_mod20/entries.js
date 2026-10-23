@@ -29,7 +29,7 @@ model blurs much less.</p>
 only to &lt;BOS&gt; and to itself, so its residual stream depends on <i>a</i> alone, and 400 two-token forwards give
 every value. Two models are compared, both rebuilt in float64 on the CPU through block 16:</p>
 <ul>
-<li><b>Components</b>: the alive-only model of section 8 of the "Mod 10 representations" page of the mod-10 notebook (every alive attention and MLP
+<li><b>Components</b>: the alive-only model of section 1.3 of the mod-10 notebook (every alive attention and MLP
 component of the ceiling filter <code>addsub-08-last-pos</code> on, the weight delta off; <code>track_build.py</code>). A
 <i>reader</i> is a kept gate or up component of a block's MLP; its activation is its read vector applied to the
 MLP input.</li>
@@ -58,6 +58,17 @@ percentile of ‖Ψ<sub><i>j</i></sub>‖ over 100 random relabellings of the 40
 orthonormal columns) spans Re Ψ<sub>1</sub> and Im Ψ<sub>1</sub>: the frequency-1 plane of <i>a</i> mod 20.
 <i>z</i>(<i>a</i>) = <i>P</i><sup>T</sup><i>X</i>(<i>a</i>) ∈ ℝ<sup>2</sup> and <i>m<sub>s</sub></i> = <i>P</i><sup>T</sup><i>μ<sub>s</sub></i> are
 a prompt's and a residue's coordinates in it, and Π<sub><i>P</i></sub> = <i>PP</i><sup>T</sup> is the projection onto it.</p>
+<p><b>Ring and cloud measures</b> (used from chapter 1 on; illustrated in chapter 2).
+<i>o<sub>s</sub></i> = (<i>m<sub>s</sub></i> − <i>m</i><sub><i>s</i>+10</sub>)/2 ∈ ℝ<sup>2</sup> for <i>s</i> = 0–9, and <i>o</i><sub><i>s</i>+10</sub> = −<i>o<sub>s</sub></i>;
+<i>φ<sub>s</sub></i> is its angle, unwrapped along <i>s</i>, and the step from <i>s</i> to <i>s</i> + 1 is <i>φ</i><sub><i>s</i>+1</sub> − <i>φ<sub>s</sub></i>
+in degrees (18° on an evenly spaced ring). The quantization index <i>α</i> ∈ [0, 1] minimises the squared angular error of
+<i>φ<sub>s</sub></i> ≈ <i>c</i> + (2π/20)(<i>α s</i> + (1 − <i>α</i>)·5⌊<i>s</i>/5⌋) over <i>α</i> and an offset angle <i>c</i>: 1 is the even ring, 0 is
+four points, one per quarter. In the plane, <i>c<sub>s</sub></i> is the mean of <i>z</i> over residue <i>s</i> and <i>sp<sub>s</sub></i> the
+root-mean-square distance of those <i>z</i> to <i>c<sub>s</sub></i>; the separation of residues <i>s</i>, <i>s′</i> is
+‖<i>c<sub>s</sub></i> − <i>c<sub>s′</sub></i>‖/√((<i>sp<sub>s</sub></i>² + <i>sp<sub>s′</sub></i>²)/2) (the "antipodal" separation is that of <i>s</i> and
+<i>s</i> + 10), and the same for the four quarters ("closest quarters": the smallest of their pairwise separations). Held-out
+accuracies fit the plane and the class means on the <i>a</i> ≤ 200 half and test on the other half, and the reverse: <i>Q</i>
+among 4 classes (chance 0.25), <i>s</i> among 20 (0.05), and <i>h</i> given <i>r</i> (choose between residues <i>r</i> and <i>r</i> + 10; 0.5).</p>
 
 <h3>1. One plane carries what a mod 20 adds to a mod 10</h3>
 <p>Figure 1 compares the strength of each frequency with what shuffled labels give. Of the five odd frequencies, only
