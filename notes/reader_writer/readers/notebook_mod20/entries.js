@@ -58,6 +58,9 @@ percentile of ‖Ψ<sub><i>j</i></sub>‖ over 100 random relabellings of the 40
 orthonormal columns) spans Re Ψ<sub>1</sub> and Im Ψ<sub>1</sub>: the frequency-1 plane of <i>a</i> mod 20.
 <i>z</i>(<i>a</i>) = <i>P</i><sup>T</sup><i>X</i>(<i>a</i>) ∈ ℝ<sup>2</sup> and <i>m<sub>s</sub></i> = <i>P</i><sup>T</sup><i>μ<sub>s</sub></i> are
 a prompt's and a residue's coordinates in it, and Π<sub><i>P</i></sub> = <i>PP</i><sup>T</sup> is the projection onto it.</p>
+<p>Scripts: <code>track_build_orig.py</code>, <code>mod20_track.py</code>, <code>mod20_readers.py</code>,
+<code>mod20_b12_fig.py</code>, <code>mod20_geometry.py</code>, <code>mod20_page.py</code>; data in
+<code>&lt;run&gt;/analysis/reader_writer/track_mod20/</code>.</p>
 <p><b>Ring and cloud measures</b> (used from chapter 1 on; illustrated in chapter 2).
 <i>o<sub>s</sub></i> = (<i>m<sub>s</sub></i> − <i>m</i><sub><i>s</i>+10</sub>)/2 ∈ ℝ<sup>2</sup> for <i>s</i> = 0–9, and <i>o</i><sub><i>s</i>+10</sub> = −<i>o<sub>s</sub></i>;
 <i>φ<sub>s</sub></i> is its angle, unwrapped along <i>s</i>, and the step from <i>s</i> to <i>s</i> + 1 is <i>φ</i><sub><i>s</i>+1</sub> − <i>φ<sub>s</sub></i>
@@ -343,8 +346,45 @@ routes the same two neurons through u57 (up 5212), g37 and g33 (gate 5212), g11 
 <figure><img src="fig/mod20_b12_neurons.png"><figcaption>Figure 9. Original model, block 12's MLP input, as figure 8 with the
 gate and up rows of neurons 5212 and 8953 as readers. (c), (d): per residue <i>s</i>, the neuron's up pre-activation,
 silu of its gate pre-activation, and their product (the write coefficient).</figcaption></figure>
-<p>Scripts: <code>track_build_orig.py</code>, <code>mod20_track.py</code>, <code>mod20_readers.py</code>, <code>mod20_page.py</code>;
-data in <code>&lt;run&gt;/analysis/reader_writer/track_mod20/</code>.</p>
+<h3>10. The 20 residue means in the full MLP input: cosines and Cohen's d</h3>
+<p>Sections 1 and 2 look only at the plane <i>P</i>. This section looks at the whole residue means, in the same way as the
+mod-10 geometry page (<code>mod20_geometry.py</code>). <i>y</i>(<i>a</i>) ∈ ℝ<sup>4096</sup> is block <i>ℓ</i>'s MLP input (the
+post-attention RMSNorm output) in one of three spaces: <i>x</i>, the full input of the components model; <i>x</i><sub>orig</sub>,
+the full input of the original model; <i>x<sub>V</sub></i>, <i>x</i> projected onto the span of the block's kept readers' read
+vectors (the space of the mod-10 geometry page). <i>ν<sub>s</sub></i> ∈ ℝ<sup>4096</sup> is the mean of <i>y</i> over the 20 operands with
+<i>a</i> mod 20 = <i>s</i> (the residue's direction; nothing is centred). cos[<i>s</i>, <i>s′</i>] = <i>ν<sub>s</sub></i> · <i>ν<sub>s′</sub></i>/(‖<i>ν<sub>s</sub></i>‖ ‖<i>ν<sub>s′</sub></i>‖).
+Cohen's d of residues <i>s</i>, <i>s′</i> projects both clouds of 20 operands onto <i>u</i> = (<i>ν<sub>s</sub></i> − <i>ν<sub>s′</sub></i>)/‖<i>ν<sub>s</sub></i> − <i>ν<sub>s′</sub></i>‖ and
+divides ‖<i>ν<sub>s</sub></i> − <i>ν<sub>s′</sub></i>‖ by the pooled within-cloud standard deviation of the projections (unbiased variances, averaged
+over the two clouds). Pairs are grouped as <b>antipodal</b> (<i>s′</i> = <i>s</i> + 10: same <i>r</i>, other <i>h</i>), <b>lag 1</b>
+(<i>s′</i> = <i>s</i> ± 1 mod 20) and <b>other</b>.</p>
+<p><b>Cosines.</b> The antipodal pairs are the most similar pairs at every block in <i>x</i> and <i>x</i><sub>orig</sub>: mean
+cosine 0.815 at block 0 (lag 1 0.737, other
+0.681) and 0.94–0.99 over blocks 1–16. From
+block 1 on every cosine is at least 0.76, because all 20 means share one large
+direction; figure 10 gives each block its own colour range. The bright diagonal lines at <i>s′</i> = <i>s</i> ± 10 are the
+mod-10 structure: residues that share <i>r</i> point almost the same way, and the part that tells <i>s</i> from <i>s</i> + 10 is small.
+The original model gives the same picture (0.93–0.99 for antipodal pairs over
+blocks 1–16).</p>
+<p><b>Cohen's d.</b> The antipodal pairs are also the least separated pairs at every block, in all three spaces. In <i>x</i>,
+their median d is 12.8 at block 0 (lag 1 19.8), falls to
+1.5 by block 11, and rises to 7.9 at
+block 15 (lag 1 11.4). In <i>x</i><sub>orig</sub> the minimum over blocks is
+3.0 (block 9). In <i>x<sub>V</sub></i> the
+separations are lower at several blocks (antipodal median 1.0 at block 1,
+0.7 at block 16, against 9.6 and
+7.3 in <i>x</i>): part of the difference between the residue clouds lies outside the span of
+the kept readers.</p>
+<figure><img src="fig/mod20_geom_cos_x.png"><figcaption>Figure 10. cos[<i>s</i>, <i>s′</i>] between the 20 residue means of the
+components model's full MLP input, blocks 0–16 (row <i>s</i>, column <i>s′</i>; diagonal grey; white lines at the quarter
+edges). Each panel has its own colour range. Titles: mean cosine of the antipodal and lag-1 pairs.</figcaption></figure>
+<figure><img src="fig/mod20_geom_cohen_x.png"><figcaption>Figure 11. Cohen's d between residue clouds <i>s</i> and <i>s′</i> along the
+axis joining their means, components model, full MLP input; one logarithmic colour scale for all blocks. Titles: median d of
+the antipodal and lag-1 pairs.</figcaption></figure>
+<figure><img src="fig/mod20_geom_cos_x_orig.png"><figcaption>Figure 12. As figure 10, original model.</figcaption></figure>
+<figure><img src="fig/mod20_geom_cohen_x_orig.png"><figcaption>Figure 13. As figure 11, original model.</figcaption></figure>
+<figure><img src="fig/mod20_geom_cos_x_V.png"><figcaption>Figure 14. As figure 10, in <i>x<sub>V</sub></i> (components model,
+kept readers' span).</figcaption></figure>
+<figure><img src="fig/mod20_geom_cohen_x_V.png"><figcaption>Figure 15. As figure 11, in <i>x<sub>V</sub></i>.</figcaption></figure>
 `
 },
 ];
