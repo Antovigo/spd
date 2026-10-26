@@ -357,10 +357,20 @@ def main() -> None:
         default=None,
         help="entries.js files to update (default <out>)",
     )
+    ap.add_argument("--text-only", action="store_true",
+                    help="rewrite the page text from the stored numbers (page_numbers.json, profiles.npz); no figures")  # fmt: skip
     args = ap.parse_args()
     fig_dir = args.out / "fig"
     res = {m: json.loads((OUT / m / "analysis.json").read_text()) for m in MODELS}
     scan = {m: dict(np.load(OUT / m / "readers_scan.npz")) for m in MODELS}
+    if args.text_only:
+        nums = json.loads((OUT / "page_numbers.json").read_text())
+        html = page(
+            res, nums["rings"], nums["reader_counts"], scan, dict(np.load(OUT / "profiles.npz"))
+        )
+        for p in args.entries or [args.out / "entries.js"]:
+            insert_entry(p, html)
+        return
     st = {
         m: {k: v.astype(np.float64) for k, v in np.load(STREAM[m] / "stream.npz").items()}
         for m in MODELS
@@ -413,6 +423,170 @@ def insert_entry(p: Path, html: str) -> None:
         assert s.rstrip().endswith("];")
         s = s.rstrip()[:-2] + entry + "];\n"
     p.write_text(s)
+
+
+def comp_label(r: dict) -> str:
+    if r["odd_share"] < 0.05:
+        return "little period-20 signal"
+    if r["step_r2"] >= 0.8:
+        return {0: "reads <i>h</i>", 5: "reads <i>g</i>"}.get(
+            r["edge"], f"step at <i>s</i> = {r['edge']}"
+        )
+    if r["circle_r2"] >= 0.8:
+        return "reads the ring"
+    return "reads the plane"
+
+
+def comp_text(c: dict, n_read: int = 4, n_write: int = 3) -> str:
+    rd = ", ".join(
+        f"{r['reader']} ({r['share'] * 100:.0f}%, {comp_label(r)})" for r in c["readers"][:n_read]
+    )
+    if not c["writers"]:
+        return f"readers {rd}; writers: coming soon"
+    wr = ", ".join(
+        f"d{w['writer'][1:]} ({w['out_share'] * 100:+.0f}%)" for w in c["writers"][:n_write]
+    )
+    return f"readers {rd}; writers {wr}"
+
+
+def readers_only(res: dict, scan: dict) -> dict:
+    """The component lists without writers, from mod20_track.py's reader shares and mod20_readers.py's labels (used
+    until mod20_components.py has written components.json)."""
+    out = {}
+    for b in range(17):
+        rows = []
+        for t in res["alive"]["sublayers"][f"mlp_{b}"]["mechanism"]["top"][:6]:
+            kind = {"g": "gate", "u": "up"}[t["reader"][0]]
+            j = list(scan["alive"][f"L{b}_{kind}_ids"]).index(int(t["reader"][1:]))
+            rows.append(t | {k: float(scan["alive"][f"L{b}_{kind}_{k}"][j]) for k in ("odd", "step_r2", "circle_r2")}
+                        | {"odd_share": float(scan["alive"][f"L{b}_{kind}_odd"][j]), "edge": int(scan["alive"][f"L{b}_{kind}_edge"][j])})  # fmt: skip
+        out[str(b)] = {"readers": rows, "writers": []}
+    return out
+
+
+def sec4(res, comp, rings, pr, att_gain, f2, rng, sl, bd, mech, alpha) -> str:
+    rows = "".join(
+        f"<tr><td>{b}</td><td>{sl('alive', b)['gain']:.2f}</td><td>{sl('alive', b)['r2_lin']:.2f}</td>"
+        f"<td>{sl('alive', b)['r2_gated']:.2f}</td><td>{comp_text(comp[str(b)])}</td></tr>"
+        for b in range(17)
+    )
+    table = ("<table><tr><th>block</th><th>gain</th><th>r²<sub>lin</sub></th><th>r²<sub>gated</sub></th>"
+             "<th>components (readers: share of the plane-driven write, what they read; writers: share of the period-20 output)</th></tr>"
+             + rows + "</table>")  # fmt: skip
+    c = {b: comp[str(b)] for b in range(17)}
+    return f"""<h3>4. How the blocks move the representation</h3>
+<p>Each block adds two things to the stream at the token <i>a</i>: its attention output and its MLP output. This section
+goes through the blocks and asks four questions about each addition. Does it change the mod-20 plane <i>P</i> at all? Is the
+change caused by the plane itself, or made from other information about <i>a</i>? Is it a simple linear map of the plane,
+or does it depend on the units digit? And which components do it?</p>
+
+<p><b>How each question is measured</b> (<code>mod20_track.py</code>, <code>mod20_components.py</code>). <i>X</i>(<i>a</i>) is the
+stream entering the sublayer and <i>S</i>(<i>X</i>)(<i>a</i>) ∈ ℝ<sup>4096</sup> what the sublayer adds (<i>S</i> includes the block's
+RMSNorm). For any quantity <i>f</i>(<i>a</i>) over the operands, Ψ<sub>1</sub>(<i>f</i>) is the frequency-1 Fourier coefficient of its 20
+residue means (section 0.2): its period-20 content.</p>
+<ul>
+<li><b>Does it change the plane?</b> The <b>gain</b> ‖Ψ<sub>1</sub>(<i>S</i>(<i>X</i>))‖/‖Ψ<sub>1</sub>(<i>X</i>)‖ compares the period-20 signal the
+sublayer writes with the period-20 signal already in the stream. A gain of 0.5 means it writes half as much as is there.</li>
+<li><b>Is the change caused by the plane?</b> Run the sublayer twice: on <i>X</i>, and on <i>X</i> − Π<sub><i>P</i></sub><i>X</i>, the same stream with
+the plane removed. The difference Δ(<i>a</i>) = <i>S</i>(<i>X</i>)(<i>a</i>) − <i>S</i>(<i>X</i> − Π<sub><i>P</i></sub><i>X</i>)(<i>a</i>) is what the sublayer
+writes because the plane is there. The <b>share from <i>P</i></b>, Re⟨Ψ<sub>1</sub>(<i>S</i>(<i>X</i>)), Ψ<sub>1</sub>(Δ)⟩/‖Ψ<sub>1</sub>(<i>S</i>(<i>X</i>))‖², is
+the fraction of the sublayer's period-20 output that disappears when the plane is removed.</li>
+<li><b>Is it linear in the plane?</b> Try to predict Δ(<i>a</i>) from the two plane coordinates <i>z</i>(<i>a</i>) with one fixed
+4096 × 2 matrix, fitted on the operands <i>a</i> ≤ 200 and scored on <i>a</i> &gt; 200 (and the reverse). The score <b>r²<sub>lin</sub></b> is
+1 − Σ<sub><i>a</i></sub>‖Δ − prediction‖² / Σ<sub><i>a</i></sub>‖Δ‖² (uncentred). <b>r²<sub>gated</sub></b> allows a different matrix for each units digit
+<i>r</i> = <i>a</i> mod 10. When r²<sub>gated</sub> is clearly above r²<sub>lin</sub>, the block does something different to the plane for
+different units digits.</li>
+<li><b>Which components?</b> <i>Readers</i> (gate and up components): change one reader's activation as the plane's removal would,
+keep the others fixed, and measure how much of Δ that produces; a reader's <b>share</b> is its part of the sum over readers of
+Σ<sub><i>a</i></sub>‖Δ<sub>reader</sub>‖². Each listed reader is labelled with what it reads, from the scan of section 3.1: <i>h</i>
+(tens parity), <i>g</i> (parity of <i>a</i> rounded to the nearest ten), "the ring" (a smooth period-20 profile), or "little period-20
+signal" (odd share below 0.05). <i>Writers</i> (down components): writer <i>w</i> adds <i>t<sub>w</sub></i>(<i>a</i>) <i>U<sub>w</sub></i> to the stream, and its
+<b>share of the period-20 output</b> is Re⟨Ψ<sub>1</sub>(<i>S</i>(<i>X</i>)), Ψ<sub>1</sub>(<i>t<sub>w</sub></i>) <i>U<sub>w</sub></i>⟩/‖Ψ<sub>1</sub>(<i>S</i>(<i>X</i>))‖²; the shares sum to
+1 over writers and can be negative (a writer that shrinks the ring).</li>
+<li><b>Reader-level linearity</b> (used in the table of section 2.3 and figure 6d). <b>Secant</b>: the r² of Δ when each reader's
+contribution is replaced by a fixed multiple of its own activation change; high when every reader path is linear on its own.
+<b>Gated secant</b>: the same with one multiple per units digit. <b>Additivity</b>: the r² of Δ by the plain sum of the single-reader
+effects; below 1 when readers interact.</li>
+</ul>
+<p>Numbers in brackets are the original model's (neurons); the component lists are for the components model.</p>
+
+<p><b>Attention leaves the plane alone.</b> In every block the attention's gain is at most {f2(att_gain["alive"])}
+({f2(att_gain["orig"])}). Everything below is done by the MLPs.</p>
+
+<p><b>Block 0: the ring grows and turns.</b> The MLP writes {f2(sl("alive", 0)["gain"])} times ({f2(sl("orig", 0)["gain"])}) the
+period-20 signal it receives, and the plane turns: its mean principal cosine with the embedding's plane is
+{f2(float(np.mean(bd("alive", 1)["cos_emb"])))} ({f2(float(np.mean(bd("orig", 1)["cos_emb"])))}) after the block. Only
+{f2(sl("alive", 0)["share_from_P"])} ({f2(sl("orig", 0)["share_from_P"])}) of that output is caused by the plane: block 0 builds
+most of the new ring from other features of the token. The work is spread thin: no reader carries more than
+{c[0]["readers"][0]["share"] * 100:.0f}% of the plane-driven write, and {mech("alive", 0, "n_readers_90")} readers carry 90% of it. Components:
+{comp_text(c[0])}.</p>
+
+<p><b>Blocks 1–11: small linear touch-ups.</b> Each MLP writes {rng(sl("alive", b)["gain"] for b in range(1, 12))}
+({rng(sl("orig", b)["gain"] for b in range(1, 12))}) of the period-20 signal it receives. Its effect is a linear map of the plane:
+Δ is predicted from the two plane coordinates at held-out r² {rng(sl("alive", b)["r2_lin"] for b in range(1, 12))}
+({rng(sl("orig", b)["r2_lin"] for b in range(1, 12))}), and one map per units digit does no better (at most
+{max(sl(m, b)["r2_gated"] - sl(m, b)["r2_lin"] for m in MODELS for b in range(1, 12)):.2f} higher). In the components model each
+reader path is itself linear (secant {rng(mech("alive", b, "r2_secant_sum") for b in range(1, 12))}) and the paths add up
+(additivity ≥ {min(mech("alive", b, "r2_additivity") for b in range(1, 12)):.3f}); single neurons are more curved (secant
+{rng(mech("orig", b, "r2_secant_sum") for b in range(1, 12))}). The plane drifts slowly: entering block 12, its mean principal
+cosine with the embedding's plane is {f2(float(np.mean(bd("alive", 12)["cos_emb"])))} ({f2(float(np.mean(bd("orig", 12)["cos_emb"])))}).
+The two largest writes are in blocks 3 and 11 (gains {f2(sl("alive", 3)["gain"])} and {f2(sl("alive", 11)["gain"])}). Block 3's is
+almost one reader, u141 ({c[3]["readers"][0]["share"] * 100:.0f}%), which reads <i>h</i> (figure 4); its components: {comp_text(c[3])}.
+Block 11's: {comp_text(c[11])}. The components of every other block are in the table below.</p>
+
+<p><b>Block 12: the ring becomes four quarters.</b> This MLP turns the ring into the four clumps of section 2.1. Its gain is
+{f2(sl("alive", 12)["gain"])} ({f2(sl("orig", 12)["gain"])}), and {f2(sl("alive", 12)["share_from_P"])}
+({f2(sl("orig", 12)["share_from_P"])}) of its period-20 output is caused by the plane. The write is not one linear map of the plane
+(r²<sub>lin</sub> {f2(sl("alive", 12)["r2_lin"])}, {f2(sl("orig", 12)["r2_lin"])}) but is close to one map per units digit
+(r²<sub>gated</sub> {f2(sl("alive", 12)["r2_gated"])}, {f2(sl("orig", 12)["r2_gated"])}). Three components carry 90% of it:</p>
+<ul>
+<li>u57 ({c[12]["readers"][1]["share"] * 100:.0f}%) reads the plane (in-plane value 0.66, section 3.2) and feeds neuron 5212's up input. That neuron's gate opens only
+for units digits 5–9, so u57's write is multiplied by [<i>r</i> ≥ 5]: figure 5, left, shows the size of its write per unit of
+activation, large for <i>r</i> = 5–9 and small for <i>r</i> = 0–4. In the original model, the same neuron's silu(gate) is
+{rng(pr["orig_L12_silu_g5212"][np.arange(20) % 10 >= 5])} for <i>r</i> = 5–9 and
+{rng(pr["orig_L12_silu_g5212"][np.arange(20) % 10 < 5])} for <i>r</i> = 0–4. A ring reading times [<i>r</i> ≥ 5] is the
+product that turns <i>h</i> into <i>g</i>: in ±1 coding, <i>g</i> = <i>h</i>·(1 − 2[<i>r</i> ≥ 5]).</li>
+<li>g11 ({c[12]["readers"][0]["share"] * 100:.0f}%) fires only for <i>s</i> = 10–14 (figure 4) and drives neuron 8953's gate,
+which writes a vector only for that quarter.</li>
+<li>g7 ({c[12]["readers"][2]["share"] * 100:.0f}%).</li>
+</ul>
+<p>Sections 3.2 and 4.2 draw these readers in the plane. Writers: {", ".join(f"d{w['writer'][1:]} ({w['out_share'] * 100:+.0f}%)" for w in c[12]["writers"][:4]) or "coming soon"}.</p>
+
+<p><b>Block 13: <i>g</i> is read and the clouds tighten.</b> The quarter structure stays (<i>α</i> barely moves), and the clouds
+separate: held-out quarter accuracy goes from {f2(bd("alive", 13)["acc"]["Q"])} to {f2(bd("alive", 14)["acc"]["Q"])}
+({f2(bd("orig", 13)["acc"]["Q"])} → {f2(bd("orig", 14)["acc"]["Q"])}). The write is not linear in the plane
+(r²<sub>lin</sub> {f2(sl("alive", 13)["r2_lin"])}, {f2(sl("orig", 13)["r2_lin"])}) and a map per units digit does not help
+({f2(sl("alive", 13)["r2_gated"])}, {f2(sl("orig", 13)["r2_gated"])}). One reader dominates: g58
+({c[13]["readers"][0]["share"] * 100:.0f}%), which reads <i>g</i>; in the original model neuron 10534 (gate and up) does the same.
+Removing the plane changes both the gate and the up input of neuron 10534, and the product of the two changes belongs to
+neither reader alone, which is why the neuron-basis additivity is {f2(mech("orig", 13, "r2_additivity"))}. Components:
+{comp_text(c[13])}.</p>
+
+<p><b>Block 14: <i>g</i> read again, gated by the units digit.</b> r²<sub>lin</sub> {f2(sl("alive", 14)["r2_lin"])} →
+r²<sub>gated</sub> {f2(sl("alive", 14)["r2_gated"])} ({f2(sl("orig", 14)["r2_lin"])} → {f2(sl("orig", 14)["r2_gated"])}). The
+largest reader, u33 ({c[14]["readers"][0]["share"] * 100:.0f}%), and the largest neuron path, up neuron 6838, both read <i>g</i>
+(figure 5, right); their writes are largest for units digits 2, 3 and 8 (component) and 2, 3, 8 and 9 (neuron). Components:
+{comp_text(c[14])}.</p>
+<figure><img src="fig/mod20_gating.png"><figcaption>Figure 5. The gated up readers of blocks 12 and 14. First and
+third panels: per residue <i>s</i>, the mean size of the reader's write per unit of its activation (component: the norm of the
+MLP output's derivative in <i>t<sub>c</sub></i>; neuron: silu of the same neuron's gate pre-activation). Second and fourth panels: the
+reader's mean activation. Solid: component, dashed: neuron.</figcaption></figure>
+
+<p><b>Blocks 15–16: the quarters loosen and the ring drifts off zero.</b> Gains {rng(sl("alive", b)["gain"] for b in (15, 16))}
+({rng(sl("orig", b)["gain"] for b in (15, 16))}); the per-digit maps add {rng(sl("alive", b)["r2_gated"] - sl("alive", b)["r2_lin"] for b in (15, 16))}
+({rng(sl("orig", b)["r2_gated"] - sl("orig", b)["r2_lin"] for b in (15, 16))}) to r². <i>α</i> rises back to
+{f2(alpha("alive", 17))} ({f2(alpha("orig", 17))}) leaving block 16, and the ring moves away from the activation zero (the
+distance of the plane coordinates' mean from zero grows from {bd("alive", 15)["offset_norm"]:.2f} to {bd("alive", 17)["offset_norm"]:.2f}
+while the mean residue radius goes from {bd("alive", 15)["radius_mean"]:.2f} to {bd("alive", 17)["radius_mean"]:.2f}). The work is
+spread over more readers ({mech("alive", 15, "n_readers_90")} and {mech("alive", 16, "n_readers_90")} for 90%). Block 15:
+{comp_text(c[15])}. Block 16: {comp_text(c[16])}.</p>
+
+<p><b>All blocks.</b> Gain, linearity and the main components of every MLP (components model):</p>
+{table}
+<figure><img src="fig/mod20_sublayers.png"><figcaption>Figure 6. Per block (solid: components, dashed: neurons).
+(a) Period-20 gain of the MLP and of attention. (b) Share of the MLP's period-20 output caused by the plane, and the
+period-20 output it makes without the plane. (c) Held-out r² of Δ from the plane's coordinates: one linear map, or one
+per units digit. (d) Reader-level linearity: secant, gated secant, additivity.</figcaption></figure>"""
 
 
 def page(res, rings, counts, scan, pr) -> str:
@@ -487,6 +661,9 @@ def page(res, rings, counts, scan, pr) -> str:
         + "".join(rows)
         + "</table>"
     )
+    cpath = OUT / "components.json"
+    comp = json.loads(cpath.read_text()) if cpath.exists() else readers_only(res, scan)
+    sec4_html = sec4(res, comp, rings, pr, att_gain, f2, rng, sl, bd, mech, alpha)
     return f"""
 <p><b>Summary.</b> At the token <i>a</i>, the information that tells <i>a</i> mod 20 apart from <i>a</i> mod 10, that is,
 whether the tens digit is even or odd, sits in a single plane of the residual stream: the frequency-1 Fourier plane of
@@ -640,93 +817,7 @@ and 14: component g58 and gate neuron 10534, component g73 and gate neuron 3498,
 neurons). Bottom: mean activation over <i>s</i> of matched readers, each divided by its largest absolute value (solid:
 component, dashed: neuron). Grey lines mark the quarter edges.</figcaption></figure>
 
-<h3>4. How the blocks move the representation</h3>
-<p><b>Per-sublayer quantities</b> (<code>mod20_track.py</code>). A sublayer <i>S</i> is one block's attention or MLP, including its
-RMSNorm; it adds <i>S</i>(<i>X</i>) to the stream. Δ(<i>a</i>) = <i>S</i>(<i>X</i>)(<i>a</i>) − <i>S</i>(<i>X</i> − Π<sub><i>P</i></sub><i>X</i>)(<i>a</i>)
-is what <i>S</i> writes because its input contains the plane. The <b>gain</b> is ‖Ψ<sub>1</sub>(<i>S</i>(<i>X</i>))‖/‖Ψ<sub>1</sub>(<i>X</i>)‖,
-with Ψ<sub>1</sub>(·) the frequency-1 Fourier vector of a field over <i>a</i>. <b>Share from <i>P</i></b> is
-Re⟨Ψ<sub>1</sub>(<i>S</i>(<i>X</i>)), Ψ<sub>1</sub>(Δ)⟩/‖Ψ<sub>1</sub>(<i>S</i>(<i>X</i>))‖², the part of the period-20 output made from the plane;
-<b>without <i>P</i></b> is ‖Ψ<sub>1</sub>(<i>S</i>(<i>X</i> − Π<sub><i>P</i></sub><i>X</i>))‖/‖Ψ<sub>1</sub>(<i>S</i>(<i>X</i>))‖, the period-20 output the
-sublayer still makes from other features of <i>a</i>. For r²(<i>Y</i>, <i>Ŷ</i>) = 1 − Σ<sub><i>a</i></sub>‖<i>Y</i> − <i>Ŷ</i>‖²/Σ<sub><i>a</i></sub>‖<i>Y</i>‖²
-(uncentred): <b>r²<sub>lin</sub></b> is the held-out r² of Δ ≈ <i>Lz</i> with one 4096 × 2 matrix <i>L</i> (fitted on <i>a</i> ≤ 200,
-tested on <i>a</i> &gt; 200, and the reverse); <b>r²<sub>gated</sub></b> is the same with one matrix <i>L<sub>r</sub></i> for each <i>r</i> = <i>a</i> mod 10.
-For the MLP readers, <i>dt<sub>c</sub></i> = <i>t<sub>c</sub></i>(<i>X</i>) − <i>t<sub>c</sub></i>(<i>X</i> − Π<sub><i>P</i></sub><i>X</i>) is the change of reader <i>c</i>'s
-activation when the plane is removed, Δ<sub><i>c</i></sub> the change of the MLP output when only that reader changes, and
-<i>κ<sub>c</sub></i> ∈ ℝ<sup>4096</sup> the least-squares slope of Δ<sub><i>c</i></sub> on <i>dt<sub>c</sub></i>; <i>κ<sub>c,r</sub></i> is the same slope within each
-<i>r</i>. <b>Secant</b> is the r² of Δ ≈ Σ<sub><i>c</i></sub> <i>κ<sub>c</sub> dt<sub>c</sub></i> (every reader path linear in its own input),
-<b>gated secant</b> the r² of Δ ≈ Σ<sub><i>c</i></sub> <i>κ</i><sub><i>c</i>, <i>a</i> mod 10</sub> <i>dt<sub>c</sub></i> (the slope may depend on the
-units digit), and <b>additivity</b> the r² of Δ ≈ Σ<sub><i>c</i></sub> Δ<sub><i>c</i></sub> (no interaction between readers).</p>
-<p><b>Attention does not act on it.</b> The attention gain is at most {f2(att_gain["alive"])} (components) and
-{f2(att_gain["orig"])} (neurons) in every block, as for <i>a</i> mod 10.</p>
-<p><b>Block 0's MLP enlarges the ring and turns the plane.</b> Its gain is {f2(sl("alive", 0)["gain"])} ({f2(sl("orig", 0)["gain"])}),
-and the plane turns: the mean principal cosine between the plane entering block 1 and the embedding's is
-{f2(float(np.mean(bd("alive", 1)["cos_emb"])))} ({f2(float(np.mean(bd("orig", 1)["cos_emb"])))}). Only
-{f2(sl("alive", 0)["share_from_P"])} ({f2(sl("orig", 0)["share_from_P"])}) of its period-20 output comes from the plane;
-the rest is made from other features of the token. The residue means still move by a near-linear map of the plane: the
-odd parts <i>o<sub>s</sub></i> after the block are fitted from those before with one 2 × 2 matrix at r² {f2(sl("alive", 0)["r2_map"])}
-({f2(sl("orig", 0)["r2_map"])}).</p>
-<p><b>Blocks 1–11: small rewrites, linear within the plane.</b> MLP gains are {rng(sl("alive", b)["gain"] for b in range(1, 12))}
-({rng(sl("orig", b)["gain"] for b in range(1, 12))}). The residue means' odd parts after each MLP are fitted from those
-before by one 2 × 2 matrix at r² ≥ {min(sl(m, b)["r2_map"] for m in MODELS for b in range(1, 12)):.3f}. Per prompt, Δ is fitted
-from <i>z</i> by one linear map at held-out r²<sub>lin</sub> {rng(sl("alive", b)["r2_lin"] for b in range(1, 12))}
-({rng(sl("orig", b)["r2_lin"] for b in range(1, 12))}), and a map per units digit does not do better
-(r²<sub>gated</sub> − r²<sub>lin</sub> ≤ {max(sl(m, b)["r2_gated"] - sl(m, b)["r2_lin"] for m in MODELS for b in range(1, 12)):.2f}). In the components model the reader paths are linear in their own input
-(secant {rng(mech("alive", b, "r2_secant_sum") for b in range(1, 12))}, additivity
-{rng(mech("alive", b, "r2_additivity") for b in range(1, 12))}), and allowing a slope per units digit adds at most
-{max(mech("alive", b, "r2_gated_secant_sum") - mech("alive", b, "r2_secant_sum") for b in range(1, 12)):.2f}. In the neuron basis
-the secant r² is lower ({rng(mech("orig", b, "r2_secant_sum") for b in range(1, 12))}) because each neuron's SiLU is curved
-over the range the plane moves it, and the per-digit slope again adds little (at most
-{max(mech("orig", b, "r2_gated_secant_sum") - mech("orig", b, "r2_secant_sum") for b in range(1, 12)):.2f}). The plane drifts
-slowly: by the stream entering block 12 the mean principal cosine with the embedding's plane is
-{f2(float(np.mean(bd("alive", 12)["cos_emb"])))} ({f2(float(np.mean(bd("orig", 12)["cos_emb"])))}).</p>
-<p><b>Block 12: h times [units digit ≥ 5].</b> The MLP's gain rises to {f2(sl("alive", 12)["gain"])}
-({f2(sl("orig", 12)["gain"])}), and {f2(sl("alive", 12)["share_from_P"])} ({f2(sl("orig", 12)["share_from_P"])}) of its
-period-20 output comes from the plane. Its write is not linear in the plane, r²<sub>lin</sub> = {f2(sl("alive", 12)["r2_lin"])}
-({f2(sl("orig", 12)["r2_lin"])}), but is close to linear for each units digit separately, r²<sub>gated</sub> =
-{f2(sl("alive", 12)["r2_gated"])} ({f2(sl("orig", 12)["r2_gated"])}). The reader decomposition says the same: secant
-{f2(mech("alive", 12, "r2_secant_sum"))} → gated secant {f2(mech("alive", 12, "r2_gated_secant_sum"))} (neurons
-{f2(mech("orig", 12, "r2_secant_sum"))} → {f2(mech("orig", 12, "r2_gated_secant_sum"))}). In the components model three
-readers carry 90% of Σ<sub><i>a</i></sub>‖Δ<sub><i>c</i></sub>‖²: g11 (the <i>Q</i> = 2 detector of figure 4), u57 and g7. In the neuron
-basis gate neuron 8953 and up neuron 5212 carry the two largest shares. Figure 5 (left) shows how u57's write is gated.
-Its activation follows the ring: highest for <i>s</i> ∈ 1–4, near zero for 5–9, lowest for 13–19 (the up neuron 5212:
-positive for <i>s</i> ∈ 0–9, negative for 11–19). The size of its effect on the output, ‖(silu(<i>h</i><sub>gate</sub>) ⊙ <i>U</i><sub>up,57</sub>)<i>V</i><sub>down</sub><i>U</i><sub>down</sub>‖
-(here <i>h</i><sub>gate</sub> ∈ ℝ<sup>14336</sup> is the vector of gate pre-activations, <i>U</i><sub>up,57</sub> component 57's write
-into the 14,336 neurons, <i>V</i><sub>down</sub>, <i>U</i><sub>down</sub> the down components, ⊙ the elementwise product), is large when
-<i>r</i> ∈ 5–9 and small when <i>r</i> ∈ 0–4. For the neuron, the slope is silu of its gate pre-activation: {rng(pr["orig_L12_silu_g5212"][np.arange(20) % 10 >= 5])}
-for <i>r</i> ∈ 5–9 and {rng(pr["orig_L12_silu_g5212"][np.arange(20) % 10 < 5])} for <i>r</i> ∈ 0–4. A write proportional to (ring
-reading) × [<i>r</i> ≥ 5] is what turns <i>h</i> into <i>g</i>: with ±1 coding, <i>g</i> = <i>h</i>·(1 − 2[<i>r</i> ≥ 5]).</p>
-<p><b>Block 13: g is read, and the clouds tighten.</b> Across block 13, <i>α</i> barely moves, while the clouds
-separate: held-out quarter accuracy {f2(bd("alive", 13)["acc"]["Q"])} → {f2(bd("alive", 14)["acc"]["Q"])}
-({f2(bd("orig", 13)["acc"]["Q"])} → {f2(bd("orig", 14)["acc"]["Q"])}), closest quarters
-{f2(bd("alive", 13)["sep_quarters_min"])} → {f2(bd("alive", 14)["sep_quarters_min"])}
-({f2(bd("orig", 13)["sep_quarters_min"])} → {f2(bd("orig", 14)["sep_quarters_min"])}). Block 13's own write is not linear in the plane either:
-r²<sub>lin</sub> {f2(sl("alive", 13)["r2_lin"])} ({f2(sl("orig", 13)["r2_lin"])}), and per-digit maps do not help
-({f2(sl("alive", 13)["r2_gated"])}, {f2(sl("orig", 13)["r2_gated"])}). Its largest component, g58 ({mech("alive", 13, "top")[0]["share"] * 100:.0f}%
-of the reader energy), reads <i>g</i> (figure 4); so does the largest neuron, 10534 (gate and up). In the neuron basis the
-additivity of block 13 is {f2(mech("orig", 13, "r2_additivity"))}: removing the plane changes both the gate and the up
-pre-activation of neuron 10534, and the product of the two changes, which belongs to neither reader alone, is large. Summed
-per neuron instead of per reader, the decomposition is exact by construction.</p>
-<p><b>Block 14: g read again, gated by a units-digit set.</b> r²<sub>lin</sub> {f2(sl("alive", 14)["r2_lin"])} →
-r²<sub>gated</sub> {f2(sl("alive", 14)["r2_gated"])} (neurons {f2(sl("orig", 14)["r2_lin"])} → {f2(sl("orig", 14)["r2_gated"])}),
-secant {f2(mech("alive", 14, "r2_secant_sum"))} → {f2(mech("alive", 14, "r2_gated_secant_sum"))}
-({f2(mech("orig", 14, "r2_secant_sum"))} → {f2(mech("orig", 14, "r2_gated_secant_sum"))}). The largest component is up
-reader u33 and the largest gated neuron path up neuron 6838; both activations are <i>g</i>-shaped (figure 5, right), and both
-writes are gated by a function of the units digit that is largest for <i>r</i> ∈ {{2, 3, 8}}, smaller for 9 (component),
-and largest for <i>r</i> ∈ {{2, 3, 8, 9}}, smaller for 5 (neuron).</p>
-<figure><img src="fig/mod20_gating.png"><figcaption>Figure 5. The gated up readers of blocks 12 and 14. First and
-third panels: per residue <i>s</i>, the mean size of the reader's write per unit of its activation (component: the norm of the
-MLP output's derivative in <i>t<sub>c</sub></i>; neuron: silu of the same neuron's gate pre-activation). Second and fourth panels: the
-reader's mean activation. Solid: component, dashed: neuron.</figcaption></figure>
-<p><b>Blocks 15–16.</b> Gains {rng(sl("alive", b)["gain"] for b in (15, 16))} ({rng(sl("orig", b)["gain"] for b in (15, 16))}),
-r²<sub>gated</sub> − r²<sub>lin</sub> = {rng(sl("alive", b)["r2_gated"] - sl("alive", b)["r2_lin"] for b in (15, 16))}
-({rng(sl("orig", b)["r2_gated"] - sl("orig", b)["r2_lin"] for b in (15, 16))}); <i>α</i> rises back to
-{f2(alpha("alive", 17))} ({f2(alpha("orig", 17))}) leaving block 16, and the ring moves away from the activation zero (the
-norm of the mean of <i>z</i> grows from {bd("alive", 15)["offset_norm"]:.2f} to {bd("alive", 17)["offset_norm"]:.2f} while the mean
-residue radius goes from {bd("alive", 15)["radius_mean"]:.2f} to {bd("alive", 17)["radius_mean"]:.2f}).</p>
-<figure><img src="fig/mod20_sublayers.png"><figcaption>Figure 6. Per block (solid: components, dashed: neurons).
-(a) Period-20 gain of the MLP and of attention. (b) Share of the MLP's period-20 output made from the plane, and the
-period-20 output it makes without the plane. (c) Held-out r² of Δ from the plane's coordinates: one linear map, or one
-per units digit. (d) Reader decomposition of Δ: secant, gated secant, additivity.</figcaption></figure>
+{sec4_html}
 
 <h3>5. Separation of the clouds</h3>
 <p>Per boundary, in the plane: <i>c<sub>s</sub></i> is the mean of <i>z</i> over residue <i>s</i>, <i>sp<sub>s</sub></i> the root-mean-square

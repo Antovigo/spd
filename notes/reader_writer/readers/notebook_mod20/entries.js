@@ -158,92 +158,118 @@ neurons). Bottom: mean activation over <i>s</i> of matched readers, each divided
 component, dashed: neuron). Grey lines mark the quarter edges.</figcaption></figure>
 
 <h3>4. How the blocks move the representation</h3>
-<p><b>Per-sublayer quantities</b> (<code>mod20_track.py</code>). A sublayer <i>S</i> is one block's attention or MLP, including its
-RMSNorm; it adds <i>S</i>(<i>X</i>) to the stream. Δ(<i>a</i>) = <i>S</i>(<i>X</i>)(<i>a</i>) − <i>S</i>(<i>X</i> − Π<sub><i>P</i></sub><i>X</i>)(<i>a</i>)
-is what <i>S</i> writes because its input contains the plane. The <b>gain</b> is ‖Ψ<sub>1</sub>(<i>S</i>(<i>X</i>))‖/‖Ψ<sub>1</sub>(<i>X</i>)‖,
-with Ψ<sub>1</sub>(·) the frequency-1 Fourier vector of a field over <i>a</i>. <b>Share from <i>P</i></b> is
-Re⟨Ψ<sub>1</sub>(<i>S</i>(<i>X</i>)), Ψ<sub>1</sub>(Δ)⟩/‖Ψ<sub>1</sub>(<i>S</i>(<i>X</i>))‖², the part of the period-20 output made from the plane;
-<b>without <i>P</i></b> is ‖Ψ<sub>1</sub>(<i>S</i>(<i>X</i> − Π<sub><i>P</i></sub><i>X</i>))‖/‖Ψ<sub>1</sub>(<i>S</i>(<i>X</i>))‖, the period-20 output the
-sublayer still makes from other features of <i>a</i>. For r²(<i>Y</i>, <i>Ŷ</i>) = 1 − Σ<sub><i>a</i></sub>‖<i>Y</i> − <i>Ŷ</i>‖²/Σ<sub><i>a</i></sub>‖<i>Y</i>‖²
-(uncentred): <b>r²<sub>lin</sub></b> is the held-out r² of Δ ≈ <i>Lz</i> with one 4096 × 2 matrix <i>L</i> (fitted on <i>a</i> ≤ 200,
-tested on <i>a</i> &gt; 200, and the reverse); <b>r²<sub>gated</sub></b> is the same with one matrix <i>L<sub>r</sub></i> for each <i>r</i> = <i>a</i> mod 10.
-For the MLP readers, <i>dt<sub>c</sub></i> = <i>t<sub>c</sub></i>(<i>X</i>) − <i>t<sub>c</sub></i>(<i>X</i> − Π<sub><i>P</i></sub><i>X</i>) is the change of reader <i>c</i>'s
-activation when the plane is removed, Δ<sub><i>c</i></sub> the change of the MLP output when only that reader changes, and
-<i>κ<sub>c</sub></i> ∈ ℝ<sup>4096</sup> the least-squares slope of Δ<sub><i>c</i></sub> on <i>dt<sub>c</sub></i>; <i>κ<sub>c,r</sub></i> is the same slope within each
-<i>r</i>. <b>Secant</b> is the r² of Δ ≈ Σ<sub><i>c</i></sub> <i>κ<sub>c</sub> dt<sub>c</sub></i> (every reader path linear in its own input),
-<b>gated secant</b> the r² of Δ ≈ Σ<sub><i>c</i></sub> <i>κ</i><sub><i>c</i>, <i>a</i> mod 10</sub> <i>dt<sub>c</sub></i> (the slope may depend on the
-units digit), and <b>additivity</b> the r² of Δ ≈ Σ<sub><i>c</i></sub> Δ<sub><i>c</i></sub> (no interaction between readers).</p>
-<p><b>Attention does not act on it.</b> The attention gain is at most 0.04 (components) and
-0.10 (neurons) in every block, as for <i>a</i> mod 10.</p>
-<p><b>Block 0's MLP enlarges the ring and turns the plane.</b> Its gain is 1.79 (1.57),
-and the plane turns: the mean principal cosine between the plane entering block 1 and the embedding's is
-0.67 (0.70). Only
-0.55 (0.37) of its period-20 output comes from the plane;
-the rest is made from other features of the token. The residue means still move by a near-linear map of the plane: the
-odd parts <i>o<sub>s</sub></i> after the block are fitted from those before with one 2 × 2 matrix at r² 1.00
-(1.00).</p>
-<p><b>Blocks 1–11: small rewrites, linear within the plane.</b> MLP gains are 0.14–0.78
-(0.25–0.67). The residue means' odd parts after each MLP are fitted from those
-before by one 2 × 2 matrix at r² ≥ 0.996. Per prompt, Δ is fitted
-from <i>z</i> by one linear map at held-out r²<sub>lin</sub> 0.71–0.91
-(0.45–0.72), and a map per units digit does not do better
-(r²<sub>gated</sub> − r²<sub>lin</sub> ≤ 0.01). In the components model the reader paths are linear in their own input
-(secant 0.84–0.97, additivity
-1.00–1.00), and allowing a slope per units digit adds at most
-0.03. In the neuron basis
-the secant r² is lower (0.52–0.79) because each neuron's SiLU is curved
-over the range the plane moves it, and the per-digit slope again adds little (at most
-0.04). The plane drifts
-slowly: by the stream entering block 12 the mean principal cosine with the embedding's plane is
-0.36 (0.24).</p>
-<p><b>Block 12: h times [units digit ≥ 5].</b> The MLP's gain rises to 0.90
-(0.61), and 0.89 (0.86) of its
-period-20 output comes from the plane. Its write is not linear in the plane, r²<sub>lin</sub> = 0.63
-(0.61), but is close to linear for each units digit separately, r²<sub>gated</sub> =
-0.90 (0.80). The reader decomposition says the same: secant
-0.64 → gated secant 0.92 (neurons
-0.57 → 0.81). In the components model three
-readers carry 90% of Σ<sub><i>a</i></sub>‖Δ<sub><i>c</i></sub>‖²: g11 (the <i>Q</i> = 2 detector of figure 4), u57 and g7. In the neuron
-basis gate neuron 8953 and up neuron 5212 carry the two largest shares. Figure 5 (left) shows how u57's write is gated.
-Its activation follows the ring: highest for <i>s</i> ∈ 1–4, near zero for 5–9, lowest for 13–19 (the up neuron 5212:
-positive for <i>s</i> ∈ 0–9, negative for 11–19). The size of its effect on the output, ‖(silu(<i>h</i><sub>gate</sub>) ⊙ <i>U</i><sub>up,57</sub>)<i>V</i><sub>down</sub><i>U</i><sub>down</sub>‖
-(here <i>h</i><sub>gate</sub> ∈ ℝ<sup>14336</sup> is the vector of gate pre-activations, <i>U</i><sub>up,57</sub> component 57's write
-into the 14,336 neurons, <i>V</i><sub>down</sub>, <i>U</i><sub>down</sub> the down components, ⊙ the elementwise product), is large when
-<i>r</i> ∈ 5–9 and small when <i>r</i> ∈ 0–4. For the neuron, the slope is silu of its gate pre-activation: 0.36–0.87
-for <i>r</i> ∈ 5–9 and −0.27 to 0.14 for <i>r</i> ∈ 0–4. A write proportional to (ring
-reading) × [<i>r</i> ≥ 5] is what turns <i>h</i> into <i>g</i>: with ±1 coding, <i>g</i> = <i>h</i>·(1 − 2[<i>r</i> ≥ 5]).</p>
-<p><b>Block 13: g is read, and the clouds tighten.</b> Across block 13, <i>α</i> barely moves, while the clouds
-separate: held-out quarter accuracy 0.83 → 0.91
-(0.82 → 0.90), closest quarters
-2.08 → 2.85
-(2.63 → 2.71). Block 13's own write is not linear in the plane either:
-r²<sub>lin</sub> 0.46 (0.43), and per-digit maps do not help
-(0.47, 0.45). Its largest component, g58 (65%
-of the reader energy), reads <i>g</i> (figure 4); so does the largest neuron, 10534 (gate and up). In the neuron basis the
-additivity of block 13 is -0.17: removing the plane changes both the gate and the up
-pre-activation of neuron 10534, and the product of the two changes, which belongs to neither reader alone, is large. Summed
-per neuron instead of per reader, the decomposition is exact by construction.</p>
-<p><b>Block 14: g read again, gated by a units-digit set.</b> r²<sub>lin</sub> 0.46 →
-r²<sub>gated</sub> 0.73 (neurons 0.42 → 0.64),
-secant 0.49 → 0.78
-(0.18 → 0.41). The largest component is up
-reader u33 and the largest gated neuron path up neuron 6838; both activations are <i>g</i>-shaped (figure 5, right), and both
-writes are gated by a function of the units digit that is largest for <i>r</i> ∈ {2, 3, 8}, smaller for 9 (component),
-and largest for <i>r</i> ∈ {2, 3, 8, 9}, smaller for 5 (neuron).</p>
+<p>Each block adds two things to the stream at the token <i>a</i>: its attention output and its MLP output. This section
+goes through the blocks and asks four questions about each addition. Does it change the mod-20 plane <i>P</i> at all? Is the
+change caused by the plane itself, or made from other information about <i>a</i>? Is it a simple linear map of the plane,
+or does it depend on the units digit? And which components do it?</p>
+
+<p><b>How each question is measured</b> (<code>mod20_track.py</code>, <code>mod20_components.py</code>). <i>X</i>(<i>a</i>) is the
+stream entering the sublayer and <i>S</i>(<i>X</i>)(<i>a</i>) ∈ ℝ<sup>4096</sup> what the sublayer adds (<i>S</i> includes the block's
+RMSNorm). For any quantity <i>f</i>(<i>a</i>) over the operands, Ψ<sub>1</sub>(<i>f</i>) is the frequency-1 Fourier coefficient of its 20
+residue means (section 0.2): its period-20 content.</p>
+<ul>
+<li><b>Does it change the plane?</b> The <b>gain</b> ‖Ψ<sub>1</sub>(<i>S</i>(<i>X</i>))‖/‖Ψ<sub>1</sub>(<i>X</i>)‖ compares the period-20 signal the
+sublayer writes with the period-20 signal already in the stream. A gain of 0.5 means it writes half as much as is there.</li>
+<li><b>Is the change caused by the plane?</b> Run the sublayer twice: on <i>X</i>, and on <i>X</i> − Π<sub><i>P</i></sub><i>X</i>, the same stream with
+the plane removed. The difference Δ(<i>a</i>) = <i>S</i>(<i>X</i>)(<i>a</i>) − <i>S</i>(<i>X</i> − Π<sub><i>P</i></sub><i>X</i>)(<i>a</i>) is what the sublayer
+writes because the plane is there. The <b>share from <i>P</i></b>, Re⟨Ψ<sub>1</sub>(<i>S</i>(<i>X</i>)), Ψ<sub>1</sub>(Δ)⟩/‖Ψ<sub>1</sub>(<i>S</i>(<i>X</i>))‖², is
+the fraction of the sublayer's period-20 output that disappears when the plane is removed.</li>
+<li><b>Is it linear in the plane?</b> Try to predict Δ(<i>a</i>) from the two plane coordinates <i>z</i>(<i>a</i>) with one fixed
+4096 × 2 matrix, fitted on the operands <i>a</i> ≤ 200 and scored on <i>a</i> &gt; 200 (and the reverse). The score <b>r²<sub>lin</sub></b> is
+1 − Σ<sub><i>a</i></sub>‖Δ − prediction‖² / Σ<sub><i>a</i></sub>‖Δ‖² (uncentred). <b>r²<sub>gated</sub></b> allows a different matrix for each units digit
+<i>r</i> = <i>a</i> mod 10. When r²<sub>gated</sub> is clearly above r²<sub>lin</sub>, the block does something different to the plane for
+different units digits.</li>
+<li><b>Which components?</b> <i>Readers</i> (gate and up components): change one reader's activation as the plane's removal would,
+keep the others fixed, and measure how much of Δ that produces; a reader's <b>share</b> is its part of the sum over readers of
+Σ<sub><i>a</i></sub>‖Δ<sub>reader</sub>‖². Each listed reader is labelled with what it reads, from the scan of section 3.1: <i>h</i>
+(tens parity), <i>g</i> (parity of <i>a</i> rounded to the nearest ten), "the ring" (a smooth period-20 profile), or "little period-20
+signal" (odd share below 0.05). <i>Writers</i> (down components): writer <i>w</i> adds <i>t<sub>w</sub></i>(<i>a</i>) <i>U<sub>w</sub></i> to the stream, and its
+<b>share of the period-20 output</b> is Re⟨Ψ<sub>1</sub>(<i>S</i>(<i>X</i>)), Ψ<sub>1</sub>(<i>t<sub>w</sub></i>) <i>U<sub>w</sub></i>⟩/‖Ψ<sub>1</sub>(<i>S</i>(<i>X</i>))‖²; the shares sum to
+1 over writers and can be negative (a writer that shrinks the ring).</li>
+<li><b>Reader-level linearity</b> (used in the table of section 2.3 and figure 6d). <b>Secant</b>: the r² of Δ when each reader's
+contribution is replaced by a fixed multiple of its own activation change; high when every reader path is linear on its own.
+<b>Gated secant</b>: the same with one multiple per units digit. <b>Additivity</b>: the r² of Δ by the plain sum of the single-reader
+effects; below 1 when readers interact.</li>
+</ul>
+<p>Numbers in brackets are the original model's (neurons); the component lists are for the components model.</p>
+
+<p><b>Attention leaves the plane alone.</b> In every block the attention's gain is at most 0.04
+(0.10). Everything below is done by the MLPs.</p>
+
+<p><b>Block 0: the ring grows and turns.</b> The MLP writes 1.79 times (1.57) the
+period-20 signal it receives, and the plane turns: its mean principal cosine with the embedding's plane is
+0.67 (0.70) after the block. Only
+0.55 (0.37) of that output is caused by the plane: block 0 builds
+most of the new ring from other features of the token. The work is spread thin: no reader carries more than
+9% of the plane-driven write, and 28 readers carry 90% of it. Components:
+readers g70 (9%, little period-20 signal), g76 (9%, little period-20 signal), u77 (7%, little period-20 signal), g55 (7%, little period-20 signal); writers: coming soon.</p>
+
+<p><b>Blocks 1–11: small linear touch-ups.</b> Each MLP writes 0.14–0.78
+(0.25–0.67) of the period-20 signal it receives. Its effect is a linear map of the plane:
+Δ is predicted from the two plane coordinates at held-out r² 0.71–0.91
+(0.45–0.72), and one map per units digit does no better (at most
+0.01 higher). In the components model each
+reader path is itself linear (secant 0.84–0.97) and the paths add up
+(additivity ≥ 0.997); single neurons are more curved (secant
+0.52–0.79). The plane drifts slowly: entering block 12, its mean principal
+cosine with the embedding's plane is 0.36 (0.24).
+The two largest writes are in blocks 3 and 11 (gains 0.78 and 0.76). Block 3's is
+almost one reader, u141 (79%), which reads <i>h</i> (figure 4); its components: readers u141 (79%, reads <i>h</i>), g255 (3%, reads the ring), u281 (1%, little period-20 signal), g285 (1%, little period-20 signal); writers: coming soon.
+Block 11's: readers g24 (22%, little period-20 signal), g17 (17%, little period-20 signal), g30 (11%, little period-20 signal), u86 (9%, little period-20 signal); writers: coming soon. The components of every other block are in the table below.</p>
+
+<p><b>Block 12: the ring becomes four quarters.</b> This MLP turns the ring into the four clumps of section 2.1. Its gain is
+0.90 (0.61), and 0.89
+(0.86) of its period-20 output is caused by the plane. The write is not one linear map of the plane
+(r²<sub>lin</sub> 0.63, 0.61) but is close to one map per units digit
+(r²<sub>gated</sub> 0.90, 0.80). Three components carry 90% of it:</p>
+<ul>
+<li>u57 (21%) reads the plane (in-plane value 0.66, section 3.2) and feeds neuron 5212's up input. That neuron's gate opens only
+for units digits 5–9, so u57's write is multiplied by [<i>r</i> ≥ 5]: figure 5, left, shows the size of its write per unit of
+activation, large for <i>r</i> = 5–9 and small for <i>r</i> = 0–4. In the original model, the same neuron's silu(gate) is
+0.36–0.87 for <i>r</i> = 5–9 and
+−0.27 to 0.14 for <i>r</i> = 0–4. A ring reading times [<i>r</i> ≥ 5] is the
+product that turns <i>h</i> into <i>g</i>: in ±1 coding, <i>g</i> = <i>h</i>·(1 − 2[<i>r</i> ≥ 5]).</li>
+<li>g11 (69%) fires only for <i>s</i> = 10–14 (figure 4) and drives neuron 8953's gate,
+which writes a vector only for that quarter.</li>
+<li>g7 (1%).</li>
+</ul>
+<p>Sections 3.2 and 4.2 draw these readers in the plane. Writers: coming soon.</p>
+
+<p><b>Block 13: <i>g</i> is read and the clouds tighten.</b> The quarter structure stays (<i>α</i> barely moves), and the clouds
+separate: held-out quarter accuracy goes from 0.83 to 0.91
+(0.82 → 0.90). The write is not linear in the plane
+(r²<sub>lin</sub> 0.46, 0.43) and a map per units digit does not help
+(0.47, 0.45). One reader dominates: g58
+(65%), which reads <i>g</i>; in the original model neuron 10534 (gate and up) does the same.
+Removing the plane changes both the gate and the up input of neuron 10534, and the product of the two changes belongs to
+neither reader alone, which is why the neuron-basis additivity is -0.17. Components:
+readers g58 (65%, reads <i>g</i>), g6 (4%, little period-20 signal), u34 (4%, reads the ring), g21 (2%, little period-20 signal); writers: coming soon.</p>
+
+<p><b>Block 14: <i>g</i> read again, gated by the units digit.</b> r²<sub>lin</sub> 0.46 →
+r²<sub>gated</sub> 0.73 (0.42 → 0.64). The
+largest reader, u33 (49%), and the largest neuron path, up neuron 6838, both read <i>g</i>
+(figure 5, right); their writes are largest for units digits 2, 3 and 8 (component) and 2, 3, 8 and 9 (neuron). Components:
+readers u33 (49%, reads <i>g</i>), g73 (19%, reads <i>g</i>), g69 (4%, reads the ring), g67 (3%, little period-20 signal); writers: coming soon.</p>
 <figure><img src="fig/mod20_gating.png"><figcaption>Figure 5. The gated up readers of blocks 12 and 14. First and
 third panels: per residue <i>s</i>, the mean size of the reader's write per unit of its activation (component: the norm of the
 MLP output's derivative in <i>t<sub>c</sub></i>; neuron: silu of the same neuron's gate pre-activation). Second and fourth panels: the
 reader's mean activation. Solid: component, dashed: neuron.</figcaption></figure>
-<p><b>Blocks 15–16.</b> Gains 0.33–0.42 (0.39–0.42),
-r²<sub>gated</sub> − r²<sub>lin</sub> = 0.06–0.08
-(0.05–0.07); <i>α</i> rises back to
+
+<p><b>Blocks 15–16: the quarters loosen and the ring drifts off zero.</b> Gains 0.33–0.42
+(0.39–0.42); the per-digit maps add 0.06–0.08
+(0.05–0.07) to r². <i>α</i> rises back to
 0.57 (0.68) leaving block 16, and the ring moves away from the activation zero (the
-norm of the mean of <i>z</i> grows from 0.48 to 1.08 while the mean
-residue radius goes from 1.07 to 1.43).</p>
+distance of the plane coordinates' mean from zero grows from 0.48 to 1.08
+while the mean residue radius goes from 1.07 to 1.43). The work is
+spread over more readers (23 and 33 for 90%). Block 15:
+readers g123 (14%, reads <i>g</i>), g142 (9%, little period-20 signal), u41 (8%, reads the plane), g70 (7%, little period-20 signal); writers: coming soon. Block 16: readers u256 (8%, little period-20 signal), u216 (7%, reads the ring), g795 (6%, little period-20 signal), g149 (6%, little period-20 signal); writers: coming soon.</p>
+
+<p><b>All blocks.</b> Gain, linearity and the main components of every MLP (components model):</p>
+<table><tr><th>block</th><th>gain</th><th>r²<sub>lin</sub></th><th>r²<sub>gated</sub></th><th>components (readers: share of the plane-driven write, what they read; writers: share of the period-20 output)</th></tr><tr><td>0</td><td>1.79</td><td>0.71</td><td>0.71</td><td>readers g70 (9%, little period-20 signal), g76 (9%, little period-20 signal), u77 (7%, little period-20 signal), g55 (7%, little period-20 signal); writers: coming soon</td></tr><tr><td>1</td><td>0.14</td><td>0.76</td><td>0.76</td><td>readers u223 (28%, little period-20 signal), u61 (9%, little period-20 signal), g166 (9%, little period-20 signal), g116 (9%, little period-20 signal); writers: coming soon</td></tr><tr><td>2</td><td>0.33</td><td>0.77</td><td>0.78</td><td>readers u277 (17%, reads the ring), g335 (13%, little period-20 signal), u67 (13%, little period-20 signal), u77 (11%, little period-20 signal); writers: coming soon</td></tr><tr><td>3</td><td>0.78</td><td>0.91</td><td>0.92</td><td>readers u141 (79%, reads <i>h</i>), g255 (3%, reads the ring), u281 (1%, little period-20 signal), g285 (1%, little period-20 signal); writers: coming soon</td></tr><tr><td>4</td><td>0.22</td><td>0.80</td><td>0.80</td><td>readers u52 (24%, little period-20 signal), u94 (13%, little period-20 signal), g27 (9%, little period-20 signal), g101 (7%, little period-20 signal); writers: coming soon</td></tr><tr><td>5</td><td>0.20</td><td>0.71</td><td>0.71</td><td>readers u40 (14%, little period-20 signal), u33 (12%, little period-20 signal), u307 (11%, little period-20 signal), g138 (6%, little period-20 signal); writers: coming soon</td></tr><tr><td>6</td><td>0.19</td><td>0.86</td><td>0.84</td><td>readers u185 (21%, little period-20 signal), u545 (10%, little period-20 signal), u125 (9%, little period-20 signal), u27 (8%, little period-20 signal); writers: coming soon</td></tr><tr><td>7</td><td>0.17</td><td>0.86</td><td>0.80</td><td>readers u198 (17%, little period-20 signal), u286 (16%, little period-20 signal), g0 (12%, little period-20 signal), u828 (10%, little period-20 signal); writers: coming soon</td></tr><tr><td>8</td><td>0.14</td><td>0.82</td><td>0.76</td><td>readers g44 (30%, little period-20 signal), g109 (25%, little period-20 signal), u81 (11%, little period-20 signal), u660 (9%, little period-20 signal); writers: coming soon</td></tr><tr><td>9</td><td>0.15</td><td>0.86</td><td>0.83</td><td>readers u33 (47%, little period-20 signal), g692 (10%, little period-20 signal), u115 (10%, little period-20 signal), u131 (8%, little period-20 signal); writers: coming soon</td></tr><tr><td>10</td><td>0.14</td><td>0.71</td><td>0.69</td><td>readers g195 (36%, little period-20 signal), g7 (13%, little period-20 signal), g573 (11%, little period-20 signal), g15 (10%, little period-20 signal); writers: coming soon</td></tr><tr><td>11</td><td>0.76</td><td>0.79</td><td>0.77</td><td>readers g24 (22%, little period-20 signal), g17 (17%, little period-20 signal), g30 (11%, little period-20 signal), u86 (9%, little period-20 signal); writers: coming soon</td></tr><tr><td>12</td><td>0.90</td><td>0.63</td><td>0.90</td><td>readers g11 (69%, reads the ring), u57 (21%, reads <i>h</i>), g7 (1%, little period-20 signal); writers: coming soon</td></tr><tr><td>13</td><td>0.53</td><td>0.46</td><td>0.47</td><td>readers g58 (65%, reads <i>g</i>), g6 (4%, little period-20 signal), u34 (4%, reads the ring), g21 (2%, little period-20 signal); writers: coming soon</td></tr><tr><td>14</td><td>0.52</td><td>0.46</td><td>0.73</td><td>readers u33 (49%, reads <i>g</i>), g73 (19%, reads <i>g</i>), g69 (4%, reads the ring), g67 (3%, little period-20 signal); writers: coming soon</td></tr><tr><td>15</td><td>0.42</td><td>0.56</td><td>0.64</td><td>readers g123 (14%, reads <i>g</i>), g142 (9%, little period-20 signal), u41 (8%, reads the plane), g70 (7%, little period-20 signal); writers: coming soon</td></tr><tr><td>16</td><td>0.33</td><td>0.57</td><td>0.63</td><td>readers u256 (8%, little period-20 signal), u216 (7%, reads the ring), g795 (6%, little period-20 signal), g149 (6%, little period-20 signal); writers: coming soon</td></tr></table>
 <figure><img src="fig/mod20_sublayers.png"><figcaption>Figure 6. Per block (solid: components, dashed: neurons).
-(a) Period-20 gain of the MLP and of attention. (b) Share of the MLP's period-20 output made from the plane, and the
+(a) Period-20 gain of the MLP and of attention. (b) Share of the MLP's period-20 output caused by the plane, and the
 period-20 output it makes without the plane. (c) Held-out r² of Δ from the plane's coordinates: one linear map, or one
-per units digit. (d) Reader decomposition of Δ: secant, gated secant, additivity.</figcaption></figure>
+per units digit. (d) Reader-level linearity: secant, gated secant, additivity.</figcaption></figure>
 
 <h3>5. Separation of the clouds</h3>
 <p>Per boundary, in the plane: <i>c<sub>s</sub></i> is the mean of <i>z</i> over residue <i>s</i>, <i>sp<sub>s</sub></i> the root-mean-square
