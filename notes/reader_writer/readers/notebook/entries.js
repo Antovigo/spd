@@ -1111,6 +1111,128 @@ This matches the copy's frequency gains (section 10): the parity line <i>k</i> =
 block 15 (<i>b</i>, rows 3–4), alive-only and original. Left: cosines between the ten raw residue means. Middle: the same after projection onto
 the stream's period-10 subspace <i>D</i>. Right: Cohen's d between residue clouds along the axis joining their means.</figcaption></figure>
 <!-- copyfig:end -->
+<!-- copyvar:begin -->
+<h3>12. Why the copies vary in size</h3>
+<p>In the copy figure of section 10, the copy of <i>a</i> at "=" does not form ten round clouds in its first Fourier plane.
+Each residue's points are drawn out into a streak that points away from the origin: the copies of one residue share a
+direction but not a length. The copy of <i>b</i> looks different. Each residue has a big cloud and a much smaller one,
+close to the origin. This section traces both back to the copying head's attention weight, and the attention weight
+back to its query and keys. It uses the 2,000 prompts per set of section 11, in both the alive-only model and the original
+model (<code>p1_magnitude.py</code>, <code>b_subclouds.py</code>, <code>weight_qk_split.py</code>,
+<code>p21_vary.py</code>, <code>q21_vary.py</code>, <code>logit_writers.py</code>, <code>copyvar_figs.py</code>,
+<code>copyvar_page.py</code>).</p>
+<ul>
+<li><b>Notation.</b> The <i>copy</i> <i>O</i> is the attention write at "=" (position 4) from the source position: block 16's write from
+position 1 for <i>a</i>, block 15's write from position 3 for <i>b</i>. <i>P</i><sub>1</sub> is the <i>k</i> = 1 Fourier plane of the copy's
+own residue means, and the residue <i>r</i> (0 … 9) is the copied operand mod 10. For a prompt of residue <i>r</i>, ρ (a real number) is
+the copy's coordinate along the unit vector of the residue-<i>r</i> mean in <i>P</i><sub>1</sub>: its length along its residue's
+direction. <i>p</i> (0 … 1) is the attention weight of the copying head at "=" on the source: head 21 for <i>a</i>, head 13 for
+<i>b</i>. The copying head's own part of ρ is <i>p</i> × <i>c</i>, where <i>c</i> is ρ of that head's value write at weight 1. For
+<i>a</i>, <i>c</i> depends on <i>a</i> only, because position 1 sees only &lt;BOS&gt; and <i>a</i>.</li>
+<li><b>Within-residue shares.</b> All the spreads here are measured inside each residue's cloud: around the residue mean of the
+quantity, pooled over the ten residues. This is the only centring in the section, and it is what "spread" means: the size
+of each cloud, not the distance between clouds. A part's share is the covariance of its within-residue deviation with the
+total's deviation, divided by the total's within-residue variance. The shares of a split sum to 1, and a share can be negative.</li>
+</ul>
+<figure><img src="notebook/fig/copyvar_clouds.png"><figcaption>The copies at "=" in their <i>k</i> = 1 plane, each point a prompt, coloured
+by the copying head's weight <i>p</i> on the source. Top: copy of <i>a</i> (block 16, head 21). Bottom: copy of <i>b</i> (block 15,
+head 13). Left: alive-only model; right: original model. Red digits mark the residue means; the cross is the activation
+zero.</figcaption></figure>
+<p><b>The streaks of <i>a</i> are lengths.</b> 0.74 of each cloud's spread in <i>P</i><sub>1</sub>
+is along its residue's direction in the alive-only model, and 0.83 in the original. ρ varies
+by 0.15–0.18 of its mean within a residue (standard deviation over mean) in the alive-only model, and by 0.27–0.33 in the
+original. Head 21 carries 0.92 of the spread of ρ (alive-only) and 0.96 (original).</p>
+<p><b>Most of each streak is head 21's weight.</b> Head 21's part <i>p</i> × <i>c</i> splits to first order into the weight
+(the deviation of <i>p</i> times the residue's mean <i>c</i>), the value (the mean <i>p</i> times the deviation of <i>c</i>) and the
+product of the two deviations. The weight is 0.61 of head 21's spread in the alive-only model and
+0.75 in the original. The value is 0.36 and 0.22, and the product
+0.02 and 0.03. The value <i>c</i> differs between values of <i>a</i> that share a residue by
+0.12 (alive-only) and 0.17 (original) of its mean, and it is larger for smaller <i>a</i>
+(within-residue correlation of <i>c</i> with <i>a</i>: -0.27 and -0.34).</p>
+<p><b>The weight depends on the operator, on <i>b</i> and on <i>a</i>.</b> Head 21's weight on <i>a</i> is
+0.91 ± 0.13 (mean ± standard deviation over prompts) in the alive-only model and
+0.76 ± 0.21 in the original. With "+" it stays at
+0.97–0.98
+(alive-only) and 0.85–0.91
+(original) for every <i>b</i>. With "−" it falls as <i>b</i> grows: from 0.91 at <i>b</i> = 3 to
+0.75 at <i>b</i> = 331 (alive-only), and from 0.66 to
+0.55 (original). It also rises with <i>a</i>: 0.82 for <i>a</i> = 1–80 and
+0.97 for <i>a</i> = 321–400 (alive-only); 0.60 and
+0.84 (original). When the weight is low, it goes to <i>b</i> in the alive-only model: in the tenth of
+prompts with the lowest weight, head 21 puts 0.58 on <i>a</i> and
+0.39 on <i>b</i>. In the original model it goes to <i>b</i> and &lt;BOS&gt; alike:
+0.32 on <i>a</i>, 0.35 on <i>b</i>,
+0.29 on &lt;BOS&gt;.</p>
+<p><b>The sub-clouds of <i>b</i> are the same effect, with two levels.</b> Split each residue's prompts into two groups by ρ over
+the residue's mean ρ (a two-means split). The small cloud holds 0.17 of the prompts in the alive-only model and
+0.37 in the original. In it, head 13 puts 0.45 (alive-only) and
+0.46 (original) of its weight on <i>b</i> and 0.30 and
+0.27 on &lt;BOS&gt;. In the big cloud it puts 0.97 and
+0.92 on <i>b</i>. The small cloud is mostly "−" prompts and the three smallest values of <i>a</i>. With
+"+", 0.03 of the prompts fall in it (alive-only) and 0.11 (original). With
+"−", 0.29 and 0.61 do. For <i>a</i> = 7, 48 and 89 the rate is
+0.64, 0.43 and 0.37 (alive-only), and
+0.81, 0.62 and 0.54 (original). For the
+seven other values of <i>a</i> (130 … 376) it is 0.01–0.09 and 0.18–0.41.
+Head 13's value write is also smaller in the small cloud, but by less than its weight: <i>c</i> over the residue's mean ρ is
+0.74 against 0.92 (alive-only), and
+0.94 against 1.25 (original).</p>
+<p><b>Where the weight's variation enters: query or keys.</b> The weight <i>p</i> is a softmax over the scores of the head's query at
+"=" against its keys at positions 0 … 4. Three factors can move it: the query, the key at the source, and the keys at the
+other four positions. Recompute <i>p</i> with any subset of the factors replaced by its mean over prompts. The Shapley value of each
+factor, per prompt, then gives an exact split of <i>p</i> into the three factors. Their shares of the within-residue variance of
+<i>p</i> are:</p>
+<table><tr><th>copying head</th><th>model</th><th>query at "="</th><th>key at the source</th><th>keys at the other positions</th></tr>
+<tr><td>head 21 on <i>a</i> (block 16)</td><td>alive-only</td><td>0.06</td><td>0.17</td><td>0.77</td></tr>
+<tr><td>head 21 on <i>a</i> (block 16)</td><td>original</td><td>0.70</td><td>0.12</td><td>0.19</td></tr>
+<tr><td>head 13 on <i>b</i> (block 15)</td><td>alive-only</td><td>0.02</td><td>0.95</td><td>0.03</td></tr>
+<tr><td>head 13 on <i>b</i> (block 15)</td><td>original</td><td>0.66</td><td>0.28</td><td>0.06</td></tr></table>
+<figure><img src="notebook/fig/copyvar_split.png"><figcaption>Left: the within-residue radial spread of the copy of <i>a</i> in its
+<i>k</i> = 1 plane, split into the heads other than 21 and head 21's weight, value and product terms. Right: the within-residue variance
+of each copying head's weight on its source, split exactly (Shapley) between its query at "=", its key at the source and its
+keys at the other positions.</figcaption></figure>
+<ul>
+<li><b>In the original model, the query decides.</b> The query carries 0.70 of head 21's variation and
+0.66 of head 13's. Its Shapley value follows the operator and the other operand: within-residue R² on the
+(<i>b</i>, operator) pair 0.40 for head 21, and on the (<i>a</i>, operator) pair
+0.74 for head 13.</li>
+<li><b>In the alive-only model, the keys decide.</b> For head 21, the keys at the other positions carry
+0.77; their Shapley value follows (<i>b</i>, operator) with R²
+0.43. For head 13, the key at <i>b</i>'s own position carries
+0.95; it follows (<i>a</i>, operator) with R² 0.79,
+since position 3 sees <i>a</i> and the operator as well as <i>b</i>.</li>
+<li><b>The key at <i>a</i> plays a small part.</b> It carries 0.17 (alive-only) and
+0.12 (original) of head 21's variation, and follows <i>a</i> itself (R²
+0.81 and 0.73).</li>
+</ul>
+<p><b>The query of head 21 in the alive-only model is one direction.</b> Of the 11 query components of block 16, one (component 139)
+carries 0.998 of the variance of the score difference
+<i>s</i><sub>1</sub> − <i>s</i><sub>3</sub>, where <i>s<sub>t</sub></i> is head 21's score at "=" on position <i>t</i>. Its inner activation (the
+component's read of the normed stream at "=") is 34.0 on "+" prompts and
+31.6 on "−" prompts, and varies by 6% of its mean across prompts. Block 15
+writes most of it: its MLP 0.51 and its attention
+0.40 of the variance, against
+0.09 from the stream entering block 15.</p>
+<p><b>Which writers move head 21's score on <i>a</i>.</b> The score <i>s</i><sub>1</sub> itself (not the weight) is
+4.67 ± 0.67 in the alive-only model, and <i>a</i> explains 0.84 of its variance.
+The stream entering block 16 at a position is a sum of writes: the token embedding plus each writer of blocks 0–15
+(attention output components and MLP down components), each its inner activation times its write vector. Since the query
+and the key are linear in the normed stream, <i>s</i><sub>1</sub> splits exactly into one term per writer, either at "=" (through the
+query, with the actual key) or at <i>a</i> (through the key, with the actual query).</p>
+<ul>
+<li><b>Through the key.</b> Moving the key with the query at its mean gives 0.66 of
+the variance of <i>s</i><sub>1</sub>. All the writers at position 1 depend on <i>a</i> only. The largest are block 15 MLP down component 6 (0.19), block 13 MLP down component 1 (0.09), block 15 MLP down component 5 (0.07), block 14 MLP down component 3 (0.06). By block:
+MLP 15 0.28, MLP 14 0.17, MLP 13 0.10.
+24 writers make up 80%.</li>
+<li><b>Through the query.</b> Moving the query with the key at its mean gives 0.35.
+The largest writers at "=" are block 14 MLP down component 0 (0.24), block 15 MLP down component 1 (0.11), block 14 MLP down component 105 (-0.08). Over prompts, the R² of their inner activations on the operator is
+0.94, 0.55, 0.22, and on the (<i>b</i>, operator) pair
+0.96, 0.89, 0.57. By block: MLP 15 0.25, attention 15 0.17,
+MLP 14 0.16. 15 writers make up 80%.</li>
+</ul>
+<p>The score on <i>a</i> is only one of the five scores in head 21's softmax. In the alive-only model, head 21's score on <i>b</i>
+varies more than its score on <i>a</i>: standard deviations 1.68 and 0.67 over prompts.</p>
+<!-- copyvar:end -->
 `
 },
 {

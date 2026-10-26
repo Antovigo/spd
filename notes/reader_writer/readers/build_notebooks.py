@@ -58,7 +58,7 @@ LAYOUT = {
              ("mod10_geometry", 5), ("mod10_geometry", "Caveat"), ("mod10_p3", 3), ("mod10", 9)],
             [("mod10", 2), ("mod10", 3), ("mod10", 4), ("mod10", 5), ("mod10", 6)],
             [("mod10-neurons", k) for k in range(1, 9)],
-            [("mod10", 10), ("mod10", 11)],
+            [("mod10", 10), ("mod10", 11), ("mod10", 12)],
         ],
         "refs": {"mod10_p3": [('the "Mod 10 representations" page (sections 1–8)', "sections 1.1–1.3 and 3.1–3.5")],
                  "mod10-neurons": [("the dual-basis test of the component page", "the dual-basis test of section 3.3")],
