@@ -13,9 +13,14 @@ Notation (o = the copied operand, a or b, integer 1..400; s = o mod 20; r = o mo
 Prompts: a, the 400 values of a (position 1 depends on a alone; components model from track_build.py, original model from
 track_build_orig.py, stream entering block 16); b, copy_build.py's set "b" (ten a, every b, both ops: 8,000 prompts) and
 copy_figs.py's 2,000-prompt original-model cache.
-Writes <out>/mod20_clumps3d.json.
+With --after, the same views after the copy, at "=" (position 4), for the same prompt sets: "copy" is the part of the
+copying block's attention output at "=" that comes from the operand's position (all heads; copy_analyze.copied, and its
+original-model twin from mod20_copy.orig_parts); "eq" is the stream at "=" after the whole attention write (the stream
+entering the block plus the attention output from all positions). For a, set "a" of copy_build.py (every a, ten b,
+both ops; 8,000 prompts; original model: copy_figs.py's 2,000-prompt cache); for b, set "b" as above.
+Writes <out>/mod20_clumps3d.json (before the copy) or <out>/mod20_clumps3d_after.json (--after).
 
-    python mod20_clumps3d.py --out notebook_mod20
+    python mod20_clumps3d.py --out notebook_mod20 [--after]
 """
 
 import argparse
@@ -75,10 +80,53 @@ def view(x: np.ndarray, oper: np.ndarray) -> dict:
     }
 
 
+def after(out_dir: Path) -> None:
+    import gc
+
+    from copy_analyze import attention_parts, copied
+    from mod20_copy import orig_parts
+
+    (snap,) = glob.glob(HUB)
+    cfg = json.loads(Path(snap, "config.json").read_text())
+    wmap = json.loads(Path(snap, "model.safetensors.index.json").read_text())["weight_map"]
+    blocks = load_blocks()[0]
+    out = {}
+    for which, (L, u) in {"a": (16, 1), "b": (15, 3)}.items():
+        st = np.load(COPY / f"stream_{which}.npz")
+        X = st[f"X{L}"].astype(np.float64)
+        oper = st[which].astype(int)
+        parts = attention_parts(blocks[L], X)
+        cp = copied(blocks[L], parts, u)
+        att = sum(copied(blocks[L], parts, t) for t in range(5))
+        out[f"alive_{which}_copy"] = view(cp, oper)
+        out[f"alive_{which}_eq"] = view(X[:, 4] + att, oper)
+        del parts, X, att, cp
+        gc.collect()
+        Xo = np.load(COPY / f"orig_cache_{which}.npz")["Xor"].astype(np.float64)
+        opo = st[which][SUB[which]].astype(int)
+        _, p, v, Wo = orig_parts(snap, wmap, cfg, L, Xo)
+        cpo = np.einsum("nhd,ohd->no", p[:, :, u, None] * v[:, u], Wo)
+        atto = np.einsum("nht,nthd->nhd", p, v).reshape(len(Xo), -1) @ Wo.reshape(4096, -1).T
+        out[f"orig_{which}_copy"] = view(cpo, opo)
+        out[f"orig_{which}_eq"] = view(Xo[:, 4] + atto, opo)
+        del p, v, Xo
+        gc.collect()
+    for k, v_ in out.items():
+        print(k, len(v_["points"]), {kk: round(vv, 3) for kk, vv in v_["shares"].items()}, np.round(v_["G_sv"], 3),
+              f"e3 in D10 {v_['e3_in_D10']:.3f}", flush=True)  # fmt: skip
+    (out_dir / "mod20_clumps3d_after.json").write_text(json.dumps(out))
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--out", type=Path, required=True)
+    ap.add_argument(
+        "--after", action="store_true", help="views at the last position after the copy"
+    )
     args = ap.parse_args()
+    if args.after:
+        after(args.out)
+        return
     (snap,) = glob.glob(HUB)
     wmap = json.loads(Path(snap, "model.safetensors.index.json").read_text())["weight_map"]
 

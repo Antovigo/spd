@@ -733,9 +733,10 @@ def sec12(c3: dict) -> str:
         return f"{c3[k]['shares'][f]:.2f}"
 
     return f"""<h3>12. The four clumps in 3D, just before the copy</h3>
-<p>Section 2 of chapter 1.2 and the clump analysis showed that, after block 12, the 20 residues gather into four clumps (the
-quarters <i>Q</i> = ⌊<i>s</i>/5⌋, with <i>s</i> = <i>o</i> mod 20 for the operand <i>o</i>), and that the four clump centres need three
-dimensions: two in the mod-20 plane and one in the mod-10 representation. The two views below show those three dimensions at
+<p>After block 12 the 20 residues gather into four clumps (section 2), the quarters <i>Q</i> = ⌊<i>s</i>/5⌋, with
+<i>s</i> = <i>o</i> mod 20 for the operand <i>o</i>. The four clump centres need three dimensions: two in the mod-20 plane and one in
+the mod-10 representation (the singular values of their differences are in the ratio 1 : 0.5 : 0.4, and more than 99% of
+those differences lie in the mod-20 plane or the mod-10 subspace; <code>mod20_clumps.py</code>). The two views below show those three dimensions at
 the moment the operand is copied: <i>a</i> at position 1 entering block 16, and <i>b</i> at position 3 entering block 15, in the
 attention input of the copying block (after its input RMSNorm). Drag to rotate, scroll to zoom, and use the buttons to
 switch between the components model and the original model (<code>mod20_clumps3d.py</code>).</p>
@@ -799,6 +800,84 @@ circles: the 20 residue means. Diamonds: the four quarter centres. Click a legen
     }}, {{responsive: true, displaylogo: false}});
   }}
   if (window.Plotly) {{ draw("clumps3d_a", "a"); draw("clumps3d_b", "b"); }}
+}})();
+</script>"""
+
+
+def sec13(c3: dict) -> str:
+    """Rotatable 3D views of the quarter clumps at "=" after the copy (copy alone, and the stream after the attention)."""
+    data = json.dumps(c3, separators=(",", ":"))
+    colors = json.dumps([QHEX[s // 5][s % 5] for s in range(20)])
+
+    def sh(k: str, f: str) -> str:
+        return f"{c3[k]['shares'][f]:.2f}"
+
+    def row(k: str, name: str) -> str:
+        x = c3[k]
+        sv = np.asarray(x["G_sv"])
+        return (f"<tr><td>{name}</td><td>{sh(k, 'G_in_P')}</td><td>{sh(k, 'G_in_D10')}</td><td>{sh(k, 'G_in_view')}</td>"
+                f"<td>1 : {sv[1] / sv[0]:.2f} : {sv[2] / sv[0]:.2f}</td><td>{x['e3_in_D10']:.2f}</td></tr>")  # fmt: skip
+
+    rows = "".join(row(f"{m}_{w}_{n}", f"{mn}, {w}, {nn}") for m, mn in (("alive", "components"), ("orig", "neurons"))
+                   for w in ("a", "b") for n, nn in (("copy", "copy alone"), ("eq", '"=" after the attention')))  # fmt: skip
+    table = ("<table><tr><th>view</th><th>clump layout in the mod-20 plane</th><th>in the mod-10 subspace</th>"
+             "<th>in the three axes</th><th>singular values</th><th>axis 3 in the mod-10 subspace</th></tr>" + rows + "</table>")  # fmt: skip
+    return f"""<h3>13. The four clumps in 3D, after the copy</h3>
+<p>The same construction as section 12, at the last position "=" once the copying block's attention has written: block 16
+for <i>a</i>, block 15 for <i>b</i>, with the prompt sets of section 11 (for <i>a</i>: every <i>a</i>, ten values of <i>b</i>, both
+operations; for <i>b</i>: ten values of <i>a</i>, every <i>b</i>; 8,000 prompts in the components model, 2,000 in the original model).
+Each view has four versions, chosen with the buttons: the <b>copy alone</b> (the part of the attention output at "=" that comes
+from the operand's position, all heads), and the whole <b>stream at "=" after the attention</b> (the stream entering the block
+plus the attention output from all positions), each in the components model and in the original model. The axes, the
+markers and the colours are defined as in section 12, recomputed for each version from its own residue and quarter means.
+Dots are coloured by the copied operand's residue; in the stream at "=" the other operand and the operation also vary, which
+spreads each clump.</p>
+<div class="tw">{table}</div>
+<div class="applet" id="clumps3d_after_a" style="width:100%;height:560px"></div>
+<p class="note">Figure 20. <i>a</i> at "=" after block 16's attention.</p>
+<div class="applet" id="clumps3d_after_b" style="width:100%;height:560px"></div>
+<p class="note">Figure 21. <i>b</i> at "=" after block 15's attention.</p>
+<script>
+(function () {{
+  const C3 = {data};
+  const COL = {colors};
+  const fg = getComputedStyle(document.body).color || "#222";
+  function traces(key, visible) {{
+    const d = C3[key], out = [];
+    for (let s = 0; s < 20; s++) {{
+      const idx = d.s.map((v, i) => v === s ? i : -1).filter(i => i >= 0);
+      out.push({{type: "scatter3d", mode: "markers", name: "s = " + s, legendgroup: "s" + s, visible: visible, showlegend: visible,
+        x: idx.map(i => d.points[i][0]), y: idx.map(i => d.points[i][1]), z: idx.map(i => d.points[i][2]),
+        text: idx.map(i => "operand " + d.operand[i] + ", s = " + s), hoverinfo: "text",
+        marker: {{size: 2, color: COL[s], opacity: 0.5}}}});
+    }}
+    out.push({{type: "scatter3d", mode: "markers+text", name: "residue means", visible: visible, showlegend: visible,
+      x: d.residue_means.map(p => p[0]), y: d.residue_means.map(p => p[1]), z: d.residue_means.map(p => p[2]),
+      text: d.residue_means.map((p, s) => String(s)), textfont: {{color: fg, size: 11}}, hoverinfo: "text",
+      marker: {{size: 6, color: COL, line: {{color: fg, width: 1}}}}}});
+    out.push({{type: "scatter3d", mode: "markers", name: "quarter centres", visible: visible, showlegend: visible,
+      x: d.quarter_means.map(p => p[0]), y: d.quarter_means.map(p => p[1]), z: d.quarter_means.map(p => p[2]),
+      text: ["Q = 0 (s 0–4)", "Q = 1 (s 5–9)", "Q = 2 (s 10–14)", "Q = 3 (s 15–19)"], hoverinfo: "text",
+      marker: {{size: 9, symbol: "diamond", color: [COL[2], COL[7], COL[12], COL[17]], line: {{color: fg, width: 1.5}}}}}});
+    out.push({{type: "scatter3d", mode: "markers", name: "activation zero", visible: visible, showlegend: visible, x: [0], y: [0], z: [0],
+      hoverinfo: "name", marker: {{size: 5, symbol: "cross", color: fg}}}});
+    return out;
+  }}
+  function draw(div, w) {{
+    const keys = ["alive_" + w + "_copy", "alive_" + w + "_eq", "orig_" + w + "_copy", "orig_" + w + "_eq"];
+    const labels = ["components: copy", 'components: "=" after', "neurons: copy", 'neurons: "=" after'];
+    const all = keys.map((k, i) => traces(k, i === 0)), n = all[0].length;
+    const vis = (j) => all.flatMap((t, i) => Array(n).fill(i === j));
+    const ax = (t) => ({{title: {{text: t, font: {{color: fg}}}}, color: fg, gridcolor: "rgba(128,128,128,0.3)", zerolinecolor: "rgba(128,128,128,0.6)"}});
+    Plotly.newPlot(div, all.flat(), {{
+      paper_bgcolor: "rgba(0,0,0,0)", font: {{color: fg}}, margin: {{l: 0, r: 0, t: 30, b: 0}},
+      legend: {{font: {{size: 10}}, itemsizing: "constant"}},
+      scene: {{xaxis: ax("axis 1 (mod-20 plane)"), yaxis: ax("axis 2 (mod-20 plane)"), zaxis: ax("axis 3 (mod-10)"), aspectmode: "data"}},
+      updatemenus: [{{type: "buttons", direction: "right", x: 0, y: 1.08, xanchor: "left", showactive: true,
+        buttons: labels.map((l, j) => ({{label: l, method: "restyle", args: [{{visible: vis(j), showlegend: vis(j)}}]}}))}}]
+    }}, {{responsive: true, displaylogo: false}});
+  }}
+  if (window.Plotly) {{ draw("clumps3d_after_a", "a"); draw("clumps3d_after_b", "b"); }}
 }})();
 </script>"""
 
@@ -877,6 +956,8 @@ def page(res, rings, counts, scan, pr) -> str:
     )
     c3p = Path(__file__).resolve().parent / "notebook_mod20" / "mod20_clumps3d.json"
     sec12_html = sec12(json.loads(c3p.read_text())) if c3p.exists() else ""
+    c3a = Path(__file__).resolve().parent / "notebook_mod20" / "mod20_clumps3d_after.json"
+    sec13_html = sec13(json.loads(c3a.read_text())) if c3a.exists() else ""
     cpy = OUT / "copy.json"
     sec11_html = sec11(json.loads(cpy.read_text()), f2, rng) if cpy.exists() else ""
     cpath = OUT / "components.json"
@@ -1179,6 +1260,7 @@ kept readers' span).</figcaption></figure>
 <figure><img src="fig/mod20_geom_cohen_x_V.png"><figcaption>Figure 15. As figure 11, in <i>x<sub>V</sub></i>.</figcaption></figure>
 {sec11_html}
 {sec12_html}
+{sec13_html}
 """
 
 
