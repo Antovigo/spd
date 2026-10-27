@@ -600,6 +600,41 @@ spreads each clump.</p>
   if (window.Plotly) { draw("clumps3d_after_a", "a"); draw("clumps3d_after_b", "b"); }
 })();
 </script>
+<h3>14. The plane at "=" after the copy, and where its content comes from</h3>
+<p>The stream at "=" after the copying attention, <i>E′</i>, is the sum of the stream before it, <i>E</i>, and of the attention's
+whole write, <i>W</i> (all heads, all source positions): <i>E′</i> = <i>E</i> + <i>W</i>. Figure 22 finds the mod-20 plane <i>P′</i> of
+<i>E′</i> (the frequency-1 plane of the copied operand <i>o</i> mod 20, as in section 0.2, computed from <i>E′</i>'s residue means) and
+projects all three on it, so the first panel of each row is the sum of the other two. Points are coloured by the raw value
+of the copied operand <i>o</i> (1–400); labels are the residue means of <i>s</i> = <i>o</i> mod 20; the cross is the activation zero.
+The prompt sets are those of section 11 (<code>mod20_eq_planes.py</code>).</p>
+<figure><img src="fig/mod20_eq_planes.png"><figcaption>Figure 22. Rows: components model, copy of <i>a</i> (block 16) and of
+<i>b</i> (block 15); original model, the same. Columns: the stream at "=" after the attention (<i>E′</i>), the attention's write
+(<i>W</i>), and the stream before the attention (<i>E</i>), all projected on the mod-20 plane of <i>E′</i>, turned so that the vector from
+residue 10's mean to residue 0's mean points right. The three panels of a row share their axes.</figcaption></figure>
+<p>In each panel, ‖Ψ<sub>1</sub>‖ is the norm of the frequency-1 coefficient of the 20 residue means in the plane (the size of the
+circle), "spread" the root-mean-square distance of the points to their own mean, and ‖mean‖ the distance of that mean from
+the activation zero:</p>
+<table><tr><th>model</th><th>copy</th><th>‖Ψ<sub>1</sub>‖ after</th><th>‖Ψ<sub>1</sub>‖ write</th><th>‖Ψ<sub>1</sub>‖ before</th><th>spread after</th><th>spread write</th><th>spread before</th><th>‖mean‖ before</th></tr><tr><td>components</td><td>a</td><td>8.77</td><td>8.72</td><td>0.09</td><td>0.76</td><td>0.70</td><td>0.24</td><td>0.15</td></tr><tr><td>components</td><td>b</td><td>5.85</td><td>5.78</td><td>0.42</td><td>1.48</td><td>0.76</td><td>0.93</td><td>1.19</td></tr><tr><td>neurons</td><td>a</td><td>8.45</td><td>7.55</td><td>0.92</td><td>0.74</td><td>0.63</td><td>0.29</td><td>0.09</td></tr><tr><td>neurons</td><td>b</td><td>6.51</td><td>5.67</td><td>1.39</td><td>1.61</td><td>0.52</td><td>1.47</td><td>0.70</td></tr></table>
+<p>The circle comes from the write: ‖Ψ<sub>1</sub>‖ of the stream before the attention is 0.09
+and 0.42 (components, <i>a</i> and <i>b</i>) against 8.72 and
+5.78 in the write. In the original model the stream before the attention already
+holds a small circle (0.92 and 1.39, against
+7.55 and 5.67 in the write). What the stream already holds in the plane is a shift and a spread that
+do not follow <i>s</i>: for <i>b</i> its spread is 0.93 (components) and
+1.47 (neurons), as large as the write's or larger.</p>
+<p><b>What that content is.</b> The split below (<code>mod20_eq_origin.py</code>) takes each term's coordinates on the three clump
+axes of section 13 and divides their energy (Σ over prompts of the squared coordinates, uncentred) into a constant, a part that
+depends on the copied operand's value (and, within it, the part that depends on its residue mod 20 only), a part that depends
+on the context (the other operand and the operation), and the rest. In the components model the prompt sets are complete
+crosses of operand and context, and the shares add to 1. The original model's 2,000 prompts are not, so its shares overlap and
+can add to more than 1.</p>
+<table><tr><th>model</th><th>copy</th><th>term</th><th>constant</th><th>copied operand</th><th>of which its mod 20</th><th>context (other operand, operation)</th><th>interaction</th></tr><tr><td>components</td><td>a</td><td>before the attention</td><td>0.27</td><td>0.16</td><td>0.00</td><td>0.51</td><td>0.06</td></tr><tr><td>components</td><td>a</td><td>copy from the operand</td><td>0.05</td><td>0.94</td><td>0.86</td><td>0.00</td><td>0.01</td></tr><tr><td>components</td><td>a</td><td>attention from other positions</td><td>0.23</td><td>0.04</td><td>0.00</td><td>0.43</td><td>0.30</td></tr><tr><td>components</td><td>b</td><td>before the attention</td><td>0.63</td><td>0.06</td><td>0.00</td><td>0.26</td><td>0.05</td></tr><tr><td>components</td><td>b</td><td>copy from the operand</td><td>0.62</td><td>0.26</td><td>0.20</td><td>0.08</td><td>0.05</td></tr><tr><td>components</td><td>b</td><td>attention from other positions</td><td>0.04</td><td>0.01</td><td>0.00</td><td>0.89</td><td>0.06</td></tr><tr><td>neurons</td><td>a</td><td>before the attention</td><td>0.18</td><td>0.52</td><td>0.43</td><td>0.65</td><td>0.46</td></tr><tr><td>neurons</td><td>a</td><td>copy from the operand</td><td>0.01</td><td>0.94</td><td>0.82</td><td>0.01</td><td>0.06</td></tr><tr><td>neurons</td><td>a</td><td>attention from other positions</td><td>0.06</td><td>0.16</td><td>0.01</td><td>0.39</td><td>0.40</td></tr><tr><td>neurons</td><td>b</td><td>before the attention</td><td>0.17</td><td>0.16</td><td>0.01</td><td>0.79</td><td>0.15</td></tr><tr><td>neurons</td><td>b</td><td>copy from the operand</td><td>0.15</td><td>0.70</td><td>0.62</td><td>0.03</td><td>0.14</td></tr><tr><td>neurons</td><td>b</td><td>attention from other positions</td><td>0.38</td><td>0.11</td><td>0.01</td><td>0.46</td><td>0.18</td></tr></table>
+<p>Before the copy, "=" holds almost nothing of the copied operand's mod 20 (at most 0.002
+of its energy in the components model). It holds a constant and the context. For the copy of <i>a</i>, about half of the context
+part is the operation; for the copy of <i>b</i>, it is mostly the size of <i>a</i> (the operation explains 3%). In the components model
+the earlier sublayers that write the context part are mainly the MLPs and attention of blocks 12–15: block 15's MLP (32%) and the
+attention of blocks 14 and 15 (15%, 13%) for <i>a</i>; the MLPs of blocks 12–14 and block 13's attention (11–25% each) for <i>b</i>.
+The constant is the sum of large, partly cancelling writes of many blocks.</p>
 `
 },
 ];

@@ -882,6 +882,76 @@ spreads each clump.</p>
 </script>"""
 
 
+def sec14(eqp: dict, eo: dict) -> str:
+    """The plane of the stream at "=" after the copy, with the attention's write and the pre-copy stream in it."""
+
+    def st(m: str, w: str, part: str, k: str) -> float:
+        v = eqp[f"{m}_{w}_{part}"][k]
+        return float(np.linalg.norm(v)) if isinstance(v, list) else float(v)
+
+    def fs(m: str, w: str, term: str, k: str) -> float:
+        name = {"E": "E (stream before the attention)", "C": "C (copy from the operand)",
+                "R": "R (attention from the other positions)", "E'": "E' (after the attention)"}[term]  # fmt: skip
+        return float(eo[f"{m}_{w}"]["terms"][name][k])
+
+    rows = ""
+    for m, mn in (("alive", "components"), ("orig", "neurons")):
+        for w in ("a", "b"):
+            rows += (f"<tr><td>{mn}</td><td>{w}</td><td>{st(m, w, 'after', 'psi1_norm_in_plane'):.2f}</td>"
+                     f"<td>{st(m, w, 'write', 'psi1_norm_in_plane'):.2f}</td><td>{st(m, w, 'before', 'psi1_norm_in_plane'):.2f}</td>"
+                     f"<td>{st(m, w, 'after', 'rms_spread'):.2f}</td><td>{st(m, w, 'write', 'rms_spread'):.2f}</td>"
+                     f"<td>{st(m, w, 'before', 'rms_spread'):.2f}</td><td>{st(m, w, 'before', 'mean'):.2f}</td></tr>")  # fmt: skip
+    table = ("<table><tr><th>model</th><th>copy</th><th>‖Ψ<sub>1</sub>‖ after</th><th>‖Ψ<sub>1</sub>‖ write</th><th>‖Ψ<sub>1</sub>‖ before</th>"
+             "<th>spread after</th><th>spread write</th><th>spread before</th><th>‖mean‖ before</th></tr>" + rows + "</table>")  # fmt: skip
+    srows = ""
+    for m, mn in (("alive", "components"), ("orig", "neurons")):
+        for w in ("a", "b"):
+            for t, tn in (
+                ("E", "before the attention"),
+                ("C", "copy from the operand"),
+                ("R", "attention from other positions"),
+            ):
+                srows += (f"<tr><td>{mn}</td><td>{w}</td><td>{tn}</td><td>{fs(m, w, t, 'offset'):.2f}</td><td>{fs(m, w, t, 'own'):.2f}</td>"
+                          f"<td>{fs(m, w, t, 'own_s'):.2f}</td><td>{fs(m, w, t, 'context'):.2f}</td><td>{fs(m, w, t, 'interaction'):.2f}</td></tr>")  # fmt: skip
+    split = ("<table><tr><th>model</th><th>copy</th><th>term</th><th>constant</th><th>copied operand</th><th>of which its mod 20</th>"
+             "<th>context (other operand, operation)</th><th>interaction</th></tr>" + srows + "</table>")  # fmt: skip
+    return f"""<h3>14. The plane at "=" after the copy, and where its content comes from</h3>
+<p>The stream at "=" after the copying attention, <i>E′</i>, is the sum of the stream before it, <i>E</i>, and of the attention's
+whole write, <i>W</i> (all heads, all source positions): <i>E′</i> = <i>E</i> + <i>W</i>. Figure 22 finds the mod-20 plane <i>P′</i> of
+<i>E′</i> (the frequency-1 plane of the copied operand <i>o</i> mod 20, as in section 0.2, computed from <i>E′</i>'s residue means) and
+projects all three on it, so the first panel of each row is the sum of the other two. Points are coloured by the raw value
+of the copied operand <i>o</i> (1–400); labels are the residue means of <i>s</i> = <i>o</i> mod 20; the cross is the activation zero.
+The prompt sets are those of section 11 (<code>mod20_eq_planes.py</code>).</p>
+<figure><img src="fig/mod20_eq_planes.png"><figcaption>Figure 22. Rows: components model, copy of <i>a</i> (block 16) and of
+<i>b</i> (block 15); original model, the same. Columns: the stream at "=" after the attention (<i>E′</i>), the attention's write
+(<i>W</i>), and the stream before the attention (<i>E</i>), all projected on the mod-20 plane of <i>E′</i>, turned so that the vector from
+residue 10's mean to residue 0's mean points right. The three panels of a row share their axes.</figcaption></figure>
+<p>In each panel, ‖Ψ<sub>1</sub>‖ is the norm of the frequency-1 coefficient of the 20 residue means in the plane (the size of the
+circle), "spread" the root-mean-square distance of the points to their own mean, and ‖mean‖ the distance of that mean from
+the activation zero:</p>
+{table}
+<p>The circle comes from the write: ‖Ψ<sub>1</sub>‖ of the stream before the attention is {st("alive", "a", "before", "psi1_norm_in_plane"):.2f}
+and {st("alive", "b", "before", "psi1_norm_in_plane"):.2f} (components, <i>a</i> and <i>b</i>) against {st("alive", "a", "write", "psi1_norm_in_plane"):.2f} and
+{st("alive", "b", "write", "psi1_norm_in_plane"):.2f} in the write. In the original model the stream before the attention already
+holds a small circle ({st("orig", "a", "before", "psi1_norm_in_plane"):.2f} and {st("orig", "b", "before", "psi1_norm_in_plane"):.2f}, against
+{st("orig", "a", "write", "psi1_norm_in_plane"):.2f} and {st("orig", "b", "write", "psi1_norm_in_plane"):.2f} in the write). What the stream already holds in the plane is a shift and a spread that
+do not follow <i>s</i>: for <i>b</i> its spread is {st("alive", "b", "before", "rms_spread"):.2f} (components) and
+{st("orig", "b", "before", "rms_spread"):.2f} (neurons), as large as the write's or larger.</p>
+<p><b>What that content is.</b> The split below (<code>mod20_eq_origin.py</code>) takes each term's coordinates on the three clump
+axes of section 13 and divides their energy (Σ over prompts of the squared coordinates, uncentred) into a constant, a part that
+depends on the copied operand's value (and, within it, the part that depends on its residue mod 20 only), a part that depends
+on the context (the other operand and the operation), and the rest. In the components model the prompt sets are complete
+crosses of operand and context, and the shares add to 1. The original model's 2,000 prompts are not, so its shares overlap and
+can add to more than 1.</p>
+{split}
+<p>Before the copy, "=" holds almost nothing of the copied operand's mod 20 (at most {max(fs(m, w, "E", "own_s") for m in ("alive",) for w in "ab"):.3f}
+of its energy in the components model). It holds a constant and the context. For the copy of <i>a</i>, about half of the context
+part is the operation; for the copy of <i>b</i>, it is mostly the size of <i>a</i> (the operation explains 3%). In the components model
+the earlier sublayers that write the context part are mainly the MLPs and attention of blocks 12–15: block 15's MLP (32%) and the
+attention of blocks 14 and 15 (15%, 13%) for <i>a</i>; the MLPs of blocks 12–14 and block 13's attention (11–25% each) for <i>b</i>.
+The constant is the sum of large, partly cancelling writes of many blocks.</p>"""
+
+
 def page(res, rings, counts, scan, pr) -> str:
     b12 = json.loads((OUT / "b12_fig.json").read_text())
     geo = json.loads((OUT / "geometry.json").read_text())
@@ -958,6 +1028,9 @@ def page(res, rings, counts, scan, pr) -> str:
     sec12_html = sec12(json.loads(c3p.read_text())) if c3p.exists() else ""
     c3a = Path(__file__).resolve().parent / "notebook_mod20" / "mod20_clumps3d_after.json"
     sec13_html = sec13(json.loads(c3a.read_text())) if c3a.exists() else ""
+    eqp_path, eo_path = OUT / "eq_planes.json", OUT / "eq_origin.json"
+    sec14_html = (sec14(json.loads(eqp_path.read_text()), json.loads(eo_path.read_text()))
+                  if eqp_path.exists() and eo_path.exists() else "")  # fmt: skip
     cpy = OUT / "copy.json"
     sec11_html = sec11(json.loads(cpy.read_text()), f2, rng) if cpy.exists() else ""
     cpath = OUT / "components.json"
@@ -1261,6 +1334,7 @@ kept readers' span).</figcaption></figure>
 {sec11_html}
 {sec12_html}
 {sec13_html}
+{sec14_html}
 """
 
 
