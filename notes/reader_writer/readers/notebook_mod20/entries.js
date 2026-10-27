@@ -202,7 +202,7 @@ period-20 signal it receives, and the plane turns: its mean principal cosine wit
 0.55 (0.37) of that output is caused by the plane: block 0 builds
 most of the new ring from other features of the token. The work is spread thin: no reader carries more than
 9% of the plane-driven write, and 28 readers carry 90% of it. Components:
-readers g70 (9%, little period-20 signal), g76 (9%, little period-20 signal), u77 (7%, little period-20 signal), g55 (7%, little period-20 signal); writers: coming soon.</p>
+readers g70 (9%, little period-20 signal), g76 (9%, little period-20 signal), u77 (7%, little period-20 signal), g55 (7%, little period-20 signal); writers d53 (+6%), d68 (+6%), d70 (+6%).</p>
 
 <p><b>Blocks 1–11: small linear touch-ups.</b> Each MLP writes 0.14–0.78
 (0.25–0.67) of the period-20 signal it receives. Its effect is a linear map of the plane:
@@ -214,8 +214,8 @@ reader path is itself linear (secant 0.84–0.97) and the paths add up
 0.52–0.79). The plane drifts slowly: entering block 12, its mean principal
 cosine with the embedding's plane is 0.36 (0.24).
 The two largest writes are in blocks 3 and 11 (gains 0.78 and 0.76). Block 3's is
-almost one reader, u141 (79%), which reads <i>h</i> (figure 4); its components: readers u141 (79%, reads <i>h</i>), g255 (3%, reads the ring), u281 (1%, little period-20 signal), g285 (1%, little period-20 signal); writers: coming soon.
-Block 11's: readers g24 (22%, little period-20 signal), g17 (17%, little period-20 signal), g30 (11%, little period-20 signal), u86 (9%, little period-20 signal); writers: coming soon. The components of every other block are in the table below.</p>
+almost one reader, u141 (79%), which reads <i>h</i> (figure 4); its components: readers u141 (79%, reads <i>h</i>), g255 (3%, reads the ring), u281 (1%, little period-20 signal), g285 (1%, little period-20 signal); writers d141 (+70%), d201 (+4%), d285 (+3%).
+Block 11's: readers g24 (22%, little period-20 signal), g17 (17%, little period-20 signal), g30 (11%, little period-20 signal), u86 (9%, little period-20 signal); writers d24 (+19%), d17 (+16%), d30 (+16%). The components of every other block are in the table below.</p>
 
 <p><b>Block 12: the ring becomes four quarters.</b> This MLP turns the ring into the four clumps of section 2.1. Its gain is
 0.90 (0.61), and 0.89
@@ -233,7 +233,7 @@ product that turns <i>h</i> into <i>g</i>: in ±1 coding, <i>g</i> = <i>h</i>·(
 which writes a vector only for that quarter.</li>
 <li>g7 (1%).</li>
 </ul>
-<p>Sections 3.2 and 4.2 draw these readers in the plane. Writers: coming soon.</p>
+<p>Sections 3.2 and 4.2 draw these readers in the plane. Writers: d11 (+58%), d57 (+19%), d7 (+5%), d16 (+4%).</p>
 
 <p><b>Block 13: <i>g</i> is read and the clouds tighten.</b> The quarter structure stays (<i>α</i> barely moves), and the clouds
 separate: held-out quarter accuracy goes from 0.83 to 0.91
@@ -243,13 +243,13 @@ separate: held-out quarter accuracy goes from 0.83 to 0.91
 (65%), which reads <i>g</i>; in the original model neuron 10534 (gate and up) does the same.
 Removing the plane changes both the gate and the up input of neuron 10534, and the product of the two changes belongs to
 neither reader alone, which is why the neuron-basis additivity is -0.17. Components:
-readers g58 (65%, reads <i>g</i>), g6 (4%, little period-20 signal), u34 (4%, reads the ring), g21 (2%, little period-20 signal); writers: coming soon.</p>
+readers g58 (65%, reads <i>g</i>), g6 (4%, little period-20 signal), u34 (4%, reads the ring), g21 (2%, little period-20 signal); writers d6 (+13%), d21 (+10%), d34 (+10%).</p>
 
 <p><b>Block 14: <i>g</i> read again, gated by the units digit.</b> r²<sub>lin</sub> 0.46 →
 r²<sub>gated</sub> 0.73 (0.42 → 0.64). The
 largest reader, u33 (49%), and the largest neuron path, up neuron 6838, both read <i>g</i>
 (figure 5, right); their writes are largest for units digits 2, 3 and 8 (component) and 2, 3, 8 and 9 (neuron). Components:
-readers u33 (49%, reads <i>g</i>), g73 (19%, reads <i>g</i>), g69 (4%, reads the ring), g67 (3%, little period-20 signal); writers: coming soon.</p>
+readers u33 (49%, reads <i>g</i>), g73 (19%, reads <i>g</i>), g69 (4%, reads the ring), g67 (3%, little period-20 signal); writers d33 (+30%), d67 (+5%), d69 (+4%).</p>
 <figure><img src="fig/mod20_gating.png"><figcaption>Figure 5. The gated up readers of blocks 12 and 14. First and
 third panels: per residue <i>s</i>, the mean size of the reader's write per unit of its activation (component: the norm of the
 MLP output's derivative in <i>t<sub>c</sub></i>; neuron: silu of the same neuron's gate pre-activation). Second and fourth panels: the
@@ -262,10 +262,10 @@ reader's mean activation. Solid: component, dashed: neuron.</figcaption></figure
 distance of the plane coordinates' mean from zero grows from 0.48 to 1.08
 while the mean residue radius goes from 1.07 to 1.43). The work is
 spread over more readers (23 and 33 for 90%). Block 15:
-readers g123 (14%, reads <i>g</i>), g142 (9%, little period-20 signal), u41 (8%, reads the plane), g70 (7%, little period-20 signal); writers: coming soon. Block 16: readers u256 (8%, little period-20 signal), u216 (7%, reads the ring), g795 (6%, little period-20 signal), g149 (6%, little period-20 signal); writers: coming soon.</p>
+readers g123 (14%, reads <i>g</i>), g142 (9%, little period-20 signal), u41 (8%, reads the plane), g70 (7%, little period-20 signal); writers d123 (+13%), d142 (+8%), d497 (+6%). Block 16: readers u256 (8%, little period-20 signal), u216 (7%, reads the ring), g795 (6%, little period-20 signal), g149 (6%, little period-20 signal); writers d252 (+8%), d186 (+6%), d344 (+5%).</p>
 
 <p><b>All blocks.</b> Gain, linearity and the main components of every MLP (components model):</p>
-<table><tr><th>block</th><th>gain</th><th>r²<sub>lin</sub></th><th>r²<sub>gated</sub></th><th>components (readers: share of the plane-driven write, what they read; writers: share of the period-20 output)</th></tr><tr><td>0</td><td>1.79</td><td>0.71</td><td>0.71</td><td>readers g70 (9%, little period-20 signal), g76 (9%, little period-20 signal), u77 (7%, little period-20 signal), g55 (7%, little period-20 signal); writers: coming soon</td></tr><tr><td>1</td><td>0.14</td><td>0.76</td><td>0.76</td><td>readers u223 (28%, little period-20 signal), u61 (9%, little period-20 signal), g166 (9%, little period-20 signal), g116 (9%, little period-20 signal); writers: coming soon</td></tr><tr><td>2</td><td>0.33</td><td>0.77</td><td>0.78</td><td>readers u277 (17%, reads the ring), g335 (13%, little period-20 signal), u67 (13%, little period-20 signal), u77 (11%, little period-20 signal); writers: coming soon</td></tr><tr><td>3</td><td>0.78</td><td>0.91</td><td>0.92</td><td>readers u141 (79%, reads <i>h</i>), g255 (3%, reads the ring), u281 (1%, little period-20 signal), g285 (1%, little period-20 signal); writers: coming soon</td></tr><tr><td>4</td><td>0.22</td><td>0.80</td><td>0.80</td><td>readers u52 (24%, little period-20 signal), u94 (13%, little period-20 signal), g27 (9%, little period-20 signal), g101 (7%, little period-20 signal); writers: coming soon</td></tr><tr><td>5</td><td>0.20</td><td>0.71</td><td>0.71</td><td>readers u40 (14%, little period-20 signal), u33 (12%, little period-20 signal), u307 (11%, little period-20 signal), g138 (6%, little period-20 signal); writers: coming soon</td></tr><tr><td>6</td><td>0.19</td><td>0.86</td><td>0.84</td><td>readers u185 (21%, little period-20 signal), u545 (10%, little period-20 signal), u125 (9%, little period-20 signal), u27 (8%, little period-20 signal); writers: coming soon</td></tr><tr><td>7</td><td>0.17</td><td>0.86</td><td>0.80</td><td>readers u198 (17%, little period-20 signal), u286 (16%, little period-20 signal), g0 (12%, little period-20 signal), u828 (10%, little period-20 signal); writers: coming soon</td></tr><tr><td>8</td><td>0.14</td><td>0.82</td><td>0.76</td><td>readers g44 (30%, little period-20 signal), g109 (25%, little period-20 signal), u81 (11%, little period-20 signal), u660 (9%, little period-20 signal); writers: coming soon</td></tr><tr><td>9</td><td>0.15</td><td>0.86</td><td>0.83</td><td>readers u33 (47%, little period-20 signal), g692 (10%, little period-20 signal), u115 (10%, little period-20 signal), u131 (8%, little period-20 signal); writers: coming soon</td></tr><tr><td>10</td><td>0.14</td><td>0.71</td><td>0.69</td><td>readers g195 (36%, little period-20 signal), g7 (13%, little period-20 signal), g573 (11%, little period-20 signal), g15 (10%, little period-20 signal); writers: coming soon</td></tr><tr><td>11</td><td>0.76</td><td>0.79</td><td>0.77</td><td>readers g24 (22%, little period-20 signal), g17 (17%, little period-20 signal), g30 (11%, little period-20 signal), u86 (9%, little period-20 signal); writers: coming soon</td></tr><tr><td>12</td><td>0.90</td><td>0.63</td><td>0.90</td><td>readers g11 (69%, reads the ring), u57 (21%, reads <i>h</i>), g7 (1%, little period-20 signal); writers: coming soon</td></tr><tr><td>13</td><td>0.53</td><td>0.46</td><td>0.47</td><td>readers g58 (65%, reads <i>g</i>), g6 (4%, little period-20 signal), u34 (4%, reads the ring), g21 (2%, little period-20 signal); writers: coming soon</td></tr><tr><td>14</td><td>0.52</td><td>0.46</td><td>0.73</td><td>readers u33 (49%, reads <i>g</i>), g73 (19%, reads <i>g</i>), g69 (4%, reads the ring), g67 (3%, little period-20 signal); writers: coming soon</td></tr><tr><td>15</td><td>0.42</td><td>0.56</td><td>0.64</td><td>readers g123 (14%, reads <i>g</i>), g142 (9%, little period-20 signal), u41 (8%, reads the plane), g70 (7%, little period-20 signal); writers: coming soon</td></tr><tr><td>16</td><td>0.33</td><td>0.57</td><td>0.63</td><td>readers u256 (8%, little period-20 signal), u216 (7%, reads the ring), g795 (6%, little period-20 signal), g149 (6%, little period-20 signal); writers: coming soon</td></tr></table>
+<table><tr><th>block</th><th>gain</th><th>r²<sub>lin</sub></th><th>r²<sub>gated</sub></th><th>components (readers: share of the plane-driven write, what they read; writers: share of the period-20 output)</th></tr><tr><td>0</td><td>1.79</td><td>0.71</td><td>0.71</td><td>readers g70 (9%, little period-20 signal), g76 (9%, little period-20 signal), u77 (7%, little period-20 signal), g55 (7%, little period-20 signal); writers d53 (+6%), d68 (+6%), d70 (+6%)</td></tr><tr><td>1</td><td>0.14</td><td>0.76</td><td>0.76</td><td>readers u223 (28%, little period-20 signal), u61 (9%, little period-20 signal), g166 (9%, little period-20 signal), g116 (9%, little period-20 signal); writers d234 (+32%), d109 (+16%), d937 (+12%)</td></tr><tr><td>2</td><td>0.33</td><td>0.77</td><td>0.78</td><td>readers u277 (17%, reads the ring), g335 (13%, little period-20 signal), u67 (13%, little period-20 signal), u77 (11%, little period-20 signal); writers d77 (+8%), d327 (+7%), d18 (+7%)</td></tr><tr><td>3</td><td>0.78</td><td>0.91</td><td>0.92</td><td>readers u141 (79%, reads <i>h</i>), g255 (3%, reads the ring), u281 (1%, little period-20 signal), g285 (1%, little period-20 signal); writers d141 (+70%), d201 (+4%), d285 (+3%)</td></tr><tr><td>4</td><td>0.22</td><td>0.80</td><td>0.80</td><td>readers u52 (24%, little period-20 signal), u94 (13%, little period-20 signal), g27 (9%, little period-20 signal), g101 (7%, little period-20 signal); writers d94 (+11%), d85 (+11%), d87 (+10%)</td></tr><tr><td>5</td><td>0.20</td><td>0.71</td><td>0.71</td><td>readers u40 (14%, little period-20 signal), u33 (12%, little period-20 signal), u307 (11%, little period-20 signal), g138 (6%, little period-20 signal); writers d273 (+13%), d101 (+11%), d33 (+10%)</td></tr><tr><td>6</td><td>0.19</td><td>0.86</td><td>0.84</td><td>readers u185 (21%, little period-20 signal), u545 (10%, little period-20 signal), u125 (9%, little period-20 signal), u27 (8%, little period-20 signal); writers d185 (+20%), d311 (+14%), d576 (+14%)</td></tr><tr><td>7</td><td>0.17</td><td>0.86</td><td>0.80</td><td>readers u198 (17%, little period-20 signal), u286 (16%, little period-20 signal), g0 (12%, little period-20 signal), u828 (10%, little period-20 signal); writers d28 (+33%), d101 (+25%), d432 (+13%)</td></tr><tr><td>8</td><td>0.14</td><td>0.82</td><td>0.76</td><td>readers g44 (30%, little period-20 signal), g109 (25%, little period-20 signal), u81 (11%, little period-20 signal), u660 (9%, little period-20 signal); writers d0 (+28%), d109 (+24%), d44 (+20%)</td></tr><tr><td>9</td><td>0.15</td><td>0.86</td><td>0.83</td><td>readers u33 (47%, little period-20 signal), g692 (10%, little period-20 signal), u115 (10%, little period-20 signal), u131 (8%, little period-20 signal); writers d33 (+30%), d96 (+15%), d875 (+13%)</td></tr><tr><td>10</td><td>0.14</td><td>0.71</td><td>0.69</td><td>readers g195 (36%, little period-20 signal), g7 (13%, little period-20 signal), g573 (11%, little period-20 signal), g15 (10%, little period-20 signal); writers d60 (+26%), d15 (+14%), d840 (+13%)</td></tr><tr><td>11</td><td>0.76</td><td>0.79</td><td>0.77</td><td>readers g24 (22%, little period-20 signal), g17 (17%, little period-20 signal), g30 (11%, little period-20 signal), u86 (9%, little period-20 signal); writers d24 (+19%), d17 (+16%), d30 (+16%)</td></tr><tr><td>12</td><td>0.90</td><td>0.63</td><td>0.90</td><td>readers g11 (69%, reads the ring), u57 (21%, reads <i>h</i>), g7 (1%, little period-20 signal); writers d11 (+58%), d57 (+19%), d7 (+5%)</td></tr><tr><td>13</td><td>0.53</td><td>0.46</td><td>0.47</td><td>readers g58 (65%, reads <i>g</i>), g6 (4%, little period-20 signal), u34 (4%, reads the ring), g21 (2%, little period-20 signal); writers d6 (+13%), d21 (+10%), d34 (+10%)</td></tr><tr><td>14</td><td>0.52</td><td>0.46</td><td>0.73</td><td>readers u33 (49%, reads <i>g</i>), g73 (19%, reads <i>g</i>), g69 (4%, reads the ring), g67 (3%, little period-20 signal); writers d33 (+30%), d67 (+5%), d69 (+4%)</td></tr><tr><td>15</td><td>0.42</td><td>0.56</td><td>0.64</td><td>readers g123 (14%, reads <i>g</i>), g142 (9%, little period-20 signal), u41 (8%, reads the plane), g70 (7%, little period-20 signal); writers d123 (+13%), d142 (+8%), d497 (+6%)</td></tr><tr><td>16</td><td>0.33</td><td>0.57</td><td>0.63</td><td>readers u256 (8%, little period-20 signal), u216 (7%, reads the ring), g795 (6%, little period-20 signal), g149 (6%, little period-20 signal); writers d252 (+8%), d186 (+6%), d344 (+5%)</td></tr></table>
 <figure><img src="fig/mod20_sublayers.png"><figcaption>Figure 6. Per block (solid: components, dashed: neurons).
 (a) Period-20 gain of the MLP and of attention. (b) Share of the MLP's period-20 output caused by the plane, and the
 period-20 output it makes without the plane. (c) Held-out r² of Δ from the plane's coordinates: one linear map, or one
@@ -411,6 +411,67 @@ the antipodal and lag-1 pairs.</figcaption></figure>
 <figure><img src="fig/mod20_geom_cos_x_V.png"><figcaption>Figure 14. As figure 10, in <i>x<sub>V</sub></i> (components model,
 kept readers' span).</figcaption></figure>
 <figure><img src="fig/mod20_geom_cohen_x_V.png"><figcaption>Figure 15. As figure 11, in <i>x<sub>V</sub></i>.</figcaption></figure>
+<h3>11. Copying the circle to "="</h3>
+<p>The answer is written at the last token, "=". The operands reach it through attention: block 16 copies <i>a</i> from
+position 1 and block 15 copies <i>b</i> from position 3 (the mod-10 notebook, part 5). This section asks whether the mod-20
+circle is copied too, by which heads and value components, and what it looks like once it arrives (<code>mod20_copy.py</code>).</p>
+<p><b>Setup.</b> The prompts are the two sets of the mod-10 copy analysis: for the copy of <i>a</i>, every <i>a</i> = 1…400 with
+ten values of <i>b</i> and both operations (8,000 prompts); for the copy of <i>b</i>, ten values of <i>a</i> and every <i>b</i>. The
+original model uses 2,000 of each set. In this section <i>s</i> = <i>o</i> mod 20, <i>r</i> = <i>o</i> mod 10 and <i>h</i> = ⌊<i>o</i>/10⌋ mod 2,
+where <i>o</i> is the copied operand (<i>a</i> or <i>b</i>). Four places are compared:</p>
+<ul>
+<li><b>source position</b>: the attention input (after the block's input RMSNorm) at the operand's own position;</li>
+<li><b>copy written at "="</b>: the part of the attention output at "=" that comes from the operand's position (all heads);</li>
+<li><b>"=" before / after the attention</b>: the stream at "=" entering the block, and the same plus the whole attention output.</li>
+</ul>
+<p>For a quantity over the prompts, Ψ<sub><i>j</i></sub> is the Fourier coefficient at frequency <i>j</i> of its 20 residue means
+(section 0.2), and "‖Ψ<sub>1</sub>‖/null" compares the circle's strength with the 99th percentile over 100 random relabellings of
+the prompts. The <b>copy gain</b> at frequency <i>j</i> is ‖Ψ<sub><i>j</i></sub>(copy)‖/‖Ψ<sub><i>j</i></sub>(source)‖. α, the held-out accuracy
+of <i>h</i> given <i>r</i> and the antipodal Cohen's d are as in sections 2.1 and 2.2, computed in the plane of the place in
+question. <b>Roundness</b> is the smaller over the larger singular value of the ten odd parts <i>o<sub>s</sub></i> (1 for a round ring).
+A head's or value component's <b>share</b> is its part of Σ‖Ψ<sub>1</sub>‖² over heads (or components) of the copy, set beside its
+part of Σ<sub><i>k</i>=1…5</sub>‖Ψ<sub>2<i>k</i></sub>‖², the copy of the mod-10 representation.</p>
+
+<p><b>The circle is copied, by the same head as the mod-10 representation.</b> The copy of <i>a</i> carries the circle with a
+gain of 0.22 (0.21), within the range of the mod-10 frequencies'
+gains, 0.10–0.27 (0.14–0.20). For <i>b</i> the
+circle's gain is 0.21 (0.19) against 0.08–0.29
+(0.13–0.24). The heads: for <i>a</i>, head 21 (99% of the period-20 copy, 98% of the period-10 copy), head 3 (1% of the period-20 copy, 1% of the period-10 copy) (original model:
+head 21 (96% of the period-20 copy, 92% of the period-10 copy), head 3 (1% of the period-20 copy, 4% of the period-10 copy)); for <i>b</i>, head 13 (97% of the period-20 copy, 97% of the period-10 copy), head 3 (3% of the period-20 copy, 3% of the period-10 copy) (original model: head 13 (85% of the period-20 copy, 86% of the period-10 copy), head 14 (7% of the period-20 copy, 7% of the period-10 copy)). The same head carries both
+periods in the same proportion.</p>
+<p><b>But through different value components.</b> In the components model, the value components that carry the copied circle
+are not the ones that carry the copied mod-10 representation (each listed with its share of the period-20 copy; then of the
+period-10 copy). For <i>a</i>, period 20: v213 (23%; 2%), v18 (15%; 5%), v65 (14%; 0%), v26 (7%; 0%); period 10: v86 (11%; 0%), v39 (10%; 0%), v114 (8%; 0%), v115 (7%; 0%). For <i>b</i>,
+period 20: v120 (41%; 1%), v112 (12%; 0%), v153 (12%; 12%), v74 (9%; 1%); period 10: v134 (17%; 0%), v153 (12%; 12%), v83 (10%; 0%), v85 (9%; 0%).</p>
+<p><b>The copy is one linear map of the circle, which flattens it.</b> The ten odd parts of the copy are fitted from those at
+the source by one 2 × 2 matrix at r² 0.997 and 0.997 (components; neurons
+0.996 and 0.995). The map is not a rotation: it keeps one direction of the plane
+and shrinks the other. Roundness goes from 0.89 at the source to 0.48 in the copy of
+<i>a</i> (neurons 0.90 → 0.74) and from 0.84 to 0.13
+in the copy of <i>b</i> (0.82 → 0.37); α falls with it (0.56 →
+0.38 and 0.49 → 0.14). The long axis is the rounded-tens parity <i>g</i>, the short one mostly the tens parity <i>h</i>.
+In the components model the copied ring carries <i>g</i> on the long axis (82% of the ring's energy, step r² 0.98) and <i>h</i> on the short axis (18% of the ring's energy, step r² 0.91) for <i>a</i>,
+and <i>g</i> on the long axis (98% of the ring's energy, step r² 0.98) and a step at <i>s</i> = 1 on the short axis (2% of the ring's energy, step r² 0.88) for <i>b</i>. In the original model: <i>g</i> on the long axis (65% of the ring's energy, step r² 0.97) and <i>h</i> on the short axis (35% of the ring's energy, step r² 0.88) for <i>a</i>; <i>g</i> on the long axis (88% of the ring's energy, step r² 0.99) and <i>h</i> on the short axis (12% of the ring's energy, step r² 0.83)
+for <i>b</i>.</p>
+<p><b>What arrives at "=".</b> Before the attention, "=" holds no circle of the operand (‖Ψ<sub>1</sub>‖/null
+0.38 for <i>a</i>, 0.42 for <i>b</i>; <i>h</i> given <i>r</i> at chance). After
+it, the circle is there: <i>h</i> given <i>r</i> is decoded at 0.98 for <i>a</i> and
+0.89 for <i>b</i> (neurons 0.90 and
+0.67), and the plane at "=" is the copy's plane (principal cosines
+0.999, 0.989 for <i>a</i>,
+1.000, 0.803 for <i>b</i>).</p>
+<p><b>A caveat on the null.</b> At the source position the stream depends on the operand alone, so the 400 prompts of one
+residue share 20 identical copies of each value, and the shuffled-label null is weak. Here the odd frequencies <i>j</i> = 3…9
+also exceed it (up to 4.5 times for <i>a</i> at the source), unlike in the
+400-prompt analysis of section 1.1.</p>
+<table><tr><th>model</th><th>copy</th><th>where</th><th>‖Ψ<sub>1</sub>‖/null</th><th>α</th><th>roundness</th><th><i>h</i> given <i>r</i> (held out)</th><th>d(<i>s</i>, <i>s</i>+10)</th></tr><tr><td>components</td><td>a (block 16)</td><td>source position</td><td>10.03</td><td>0.56</td><td>0.89</td><td>1.00</td><td>8.0</td></tr><tr><td>components</td><td>a (block 16)</td><td>copy written at "="</td><td>10.89</td><td>0.38</td><td>0.48</td><td>1.00</td><td>8.0</td></tr><tr><td>components</td><td>a (block 16)</td><td>"=" before the attention</td><td>0.38</td><td>0.44</td><td>0.60</td><td>0.50</td><td>0.1</td></tr><tr><td>components</td><td>a (block 16)</td><td>"=" after the attention</td><td>4.91</td><td>0.38</td><td>0.48</td><td>0.98</td><td>6.4</td></tr><tr><td>components</td><td>b (block 15)</td><td>source position</td><td>5.44</td><td>0.49</td><td>0.84</td><td>1.00</td><td>5.6</td></tr><tr><td>components</td><td>b (block 15)</td><td>copy written at "="</td><td>8.88</td><td>0.14</td><td>0.13</td><td>0.94</td><td>4.3</td></tr><tr><td>components</td><td>b (block 15)</td><td>"=" before the attention</td><td>0.42</td><td>0.64</td><td>0.16</td><td>0.50</td><td>0.1</td></tr><tr><td>components</td><td>b (block 15)</td><td>"=" after the attention</td><td>3.41</td><td>0.18</td><td>0.18</td><td>0.89</td><td>3.1</td></tr><tr><td>neurons</td><td>a (block 16)</td><td>source position</td><td>4.58</td><td>0.65</td><td>0.90</td><td>0.99</td><td>7.4</td></tr><tr><td>neurons</td><td>a (block 16)</td><td>copy written at "="</td><td>5.51</td><td>0.57</td><td>0.74</td><td>0.99</td><td>5.2</td></tr><tr><td>neurons</td><td>a (block 16)</td><td>"=" before the attention</td><td>0.59</td><td>0.60</td><td>0.88</td><td>0.54</td><td>0.5</td></tr><tr><td>neurons</td><td>a (block 16)</td><td>"=" after the attention</td><td>2.06</td><td>0.56</td><td>0.76</td><td>0.90</td><td>4.5</td></tr><tr><td>neurons</td><td>b (block 15)</td><td>source position</td><td>2.82</td><td>0.60</td><td>0.82</td><td>0.88</td><td>3.5</td></tr><tr><td>neurons</td><td>b (block 15)</td><td>copy written at "="</td><td>4.22</td><td>0.36</td><td>0.37</td><td>0.92</td><td>3.5</td></tr><tr><td>neurons</td><td>b (block 15)</td><td>"=" before the attention</td><td>0.67</td><td>1.00</td><td>0.55</td><td>0.51</td><td>0.2</td></tr><tr><td>neurons</td><td>b (block 15)</td><td>"=" after the attention</td><td>1.69</td><td>0.50</td><td>0.50</td><td>0.67</td><td>1.7</td></tr></table>
+<figure><img src="fig/mod20_copy_alive.png"><figcaption>Figure 16. Components model. Rows: the copy of <i>a</i> by block 16
+and of <i>b</i> by block 15. First three panels: the circle's odd parts <i>o<sub>s</sub></i> and −<i>o<sub>s</sub></i> (<i>s</i> = 0…19, coloured by
+quarter as in figure 2) at the source position, in the copy written at "=", and at "=" after the attention, each in its own
+plane, turned so that residue 0 points right; the cross is the plane's zero. Titles give α, the held-out accuracy of <i>h</i>
+given <i>r</i>, and the median antipodal Cohen's d. Last panel: each head's share of the copy's period-20 energy and of its
+period-10 energy.</figcaption></figure>
+<figure><img src="fig/mod20_copy_orig.png"><figcaption>Figure 17. As figure 16, original model (2,000 prompts per copy).</figcaption></figure>
 `
 },
 ];

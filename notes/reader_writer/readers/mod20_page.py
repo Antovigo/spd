@@ -589,6 +589,137 @@ period-20 output it makes without the plane. (c) Held-out r² of Δ from the pla
 per units digit. (d) Reader-level linearity: secant, gated secant, additivity.</figcaption></figure>"""
 
 
+def axis_steps(odd: list) -> list[dict]:
+    """Principal axes of the 10 x 2 odd parts; for each, the best step edge e (sigma_e(s) = -1 for s < e, +1 otherwise,
+    s = 0..9) and its uncentred r2, and the axis' share of the odd-part energy."""
+    o = np.asarray(odd)
+    u, sv, vt = np.linalg.svd(o, full_matrices=False)
+    ss = np.arange(10)
+    out = []
+    for i in range(2):
+        prof = o @ vt[i]
+        r2s = [
+            float((np.where(ss < e, -1.0, 1.0) @ prof) ** 2 / 10 / (prof @ prof)) for e in range(10)
+        ]
+        e = int(np.argmax(r2s))
+        out.append(
+            {"edge": e, "step_r2": r2s[e], "energy_share": float(sv[i] ** 2 / (sv**2).sum())}
+        )
+    return out
+
+
+def sec11(cp: dict, f2, rng) -> str:
+    def g(m: str, w: str, n: str, k: str):
+        return cp[f"{m}_{w}"][n][k]
+
+    def amp(m: str, w: str, n: str, j: int) -> float:
+        x = cp[f"{m}_{w}"][n]
+        return x["amp"][j - 1] / x["null99"][j - 1]
+
+    def gain(m: str, w: str, j: int) -> float:
+        return cp[f"{m}_{w}"]["gain"][j - 1]
+
+    def heads(m: str, w: str) -> str:
+        h20, h10 = (
+            np.asarray(cp[f"{m}_{w}"]["heads"]["p20"]),
+            np.asarray(cp[f"{m}_{w}"]["heads"]["p10"]),
+        )
+        o = np.argsort(-h20)[:2]
+        return ", ".join(
+            f"head {int(h)} ({h20[h] * 100:.0f}% of the period-20 copy, {h10[h] * 100:.0f}% of the period-10 copy)"
+            for h in o
+        )
+
+    def vlist(w: str, key: str, other: str) -> str:
+        rows = cp[f"alive_{w}"]["vcomps" if key == "p20" else "vcomps_p10_top"][:4]
+        return ", ".join(f"v{c['id']} ({c[key] * 100:.0f}%; {c[other] * 100:.0f}%)" for c in rows)
+
+    def edge_name(e: int) -> str:
+        return {0: "<i>h</i>", 5: "<i>g</i>"}.get(e, f"a step at <i>s</i> = {e}")
+
+    def axes(m: str, w: str, n: str) -> str:
+        if "odd" not in cp[f"{m}_{w}"][n]:
+            return ""
+        a = axis_steps(cp[f"{m}_{w}"][n]["odd"])
+        return " and ".join(f"{edge_name(x['edge'])} on the {'long' if i == 0 else 'short'} axis ({x['energy_share'] * 100:.0f}% of the ring's energy, step r² {x['step_r2']:.2f})"
+                            for i, x in enumerate(a))  # fmt: skip
+
+    def rd(m: str, w: str, n: str) -> str:
+        x = cp[f"{m}_{w}"][n]
+        return f"{x['roundness']:.2f}" if "roundness" in x else "–"
+
+    rows = ""
+    for m, mn in (("alive", "components"), ("orig", "neurons")):
+        for w, L in (("a", 16), ("b", 15)):
+            for n, nn in (("source", "source position"), ("copy", 'copy written at "="'), ("eq_before", '"=" before the attention'),
+                          ("eq_after", '"=" after the attention')):  # fmt: skip
+                rows += (f"<tr><td>{mn}</td><td>{w} (block {L})</td><td>{nn}</td><td>{amp(m, w, n, 1):.2f}</td><td>{g(m, w, n, 'alpha'):.2f}</td>"
+                         f"<td>{rd(m, w, n)}</td><td>{g(m, w, n, 'acc_h'):.2f}</td><td>{g(m, w, n, 'd_anti'):.1f}</td></tr>")  # fmt: skip
+    table = ("<table><tr><th>model</th><th>copy</th><th>where</th><th>‖Ψ<sub>1</sub>‖/null</th><th>α</th><th>roundness</th>"
+             "<th><i>h</i> given <i>r</i> (held out)</th><th>d(<i>s</i>, <i>s</i>+10)</th></tr>" + rows + "</table>")  # fmt: skip
+    return f"""<h3>11. Copying the circle to "="</h3>
+<p>The answer is written at the last token, "=". The operands reach it through attention: block 16 copies <i>a</i> from
+position 1 and block 15 copies <i>b</i> from position 3 (the mod-10 notebook, part 5). This section asks whether the mod-20
+circle is copied too, by which heads and value components, and what it looks like once it arrives (<code>mod20_copy.py</code>).</p>
+<p><b>Setup.</b> The prompts are the two sets of the mod-10 copy analysis: for the copy of <i>a</i>, every <i>a</i> = 1…400 with
+ten values of <i>b</i> and both operations (8,000 prompts); for the copy of <i>b</i>, ten values of <i>a</i> and every <i>b</i>. The
+original model uses 2,000 of each set. In this section <i>s</i> = <i>o</i> mod 20, <i>r</i> = <i>o</i> mod 10 and <i>h</i> = ⌊<i>o</i>/10⌋ mod 2,
+where <i>o</i> is the copied operand (<i>a</i> or <i>b</i>). Four places are compared:</p>
+<ul>
+<li><b>source position</b>: the attention input (after the block's input RMSNorm) at the operand's own position;</li>
+<li><b>copy written at "="</b>: the part of the attention output at "=" that comes from the operand's position (all heads);</li>
+<li><b>"=" before / after the attention</b>: the stream at "=" entering the block, and the same plus the whole attention output.</li>
+</ul>
+<p>For a quantity over the prompts, Ψ<sub><i>j</i></sub> is the Fourier coefficient at frequency <i>j</i> of its 20 residue means
+(section 0.2), and "‖Ψ<sub>1</sub>‖/null" compares the circle's strength with the 99th percentile over 100 random relabellings of
+the prompts. The <b>copy gain</b> at frequency <i>j</i> is ‖Ψ<sub><i>j</i></sub>(copy)‖/‖Ψ<sub><i>j</i></sub>(source)‖. α, the held-out accuracy
+of <i>h</i> given <i>r</i> and the antipodal Cohen's d are as in sections 2.1 and 2.2, computed in the plane of the place in
+question. <b>Roundness</b> is the smaller over the larger singular value of the ten odd parts <i>o<sub>s</sub></i> (1 for a round ring).
+A head's or value component's <b>share</b> is its part of Σ‖Ψ<sub>1</sub>‖² over heads (or components) of the copy, set beside its
+part of Σ<sub><i>k</i>=1…5</sub>‖Ψ<sub>2<i>k</i></sub>‖², the copy of the mod-10 representation.</p>
+
+<p><b>The circle is copied, by the same head as the mod-10 representation.</b> The copy of <i>a</i> carries the circle with a
+gain of {gain("alive", "a", 1):.2f} ({gain("orig", "a", 1):.2f}), within the range of the mod-10 frequencies'
+gains, {rng(gain("alive", "a", j) for j in (2, 4, 6, 8, 10))} ({rng(gain("orig", "a", j) for j in (2, 4, 6, 8, 10))}). For <i>b</i> the
+circle's gain is {gain("alive", "b", 1):.2f} ({gain("orig", "b", 1):.2f}) against {rng(gain("alive", "b", j) for j in (2, 4, 6, 8, 10))}
+({rng(gain("orig", "b", j) for j in (2, 4, 6, 8, 10))}). The heads: for <i>a</i>, {heads("alive", "a")} (original model:
+{heads("orig", "a")}); for <i>b</i>, {heads("alive", "b")} (original model: {heads("orig", "b")}). The same head carries both
+periods in the same proportion.</p>
+<p><b>But through different value components.</b> In the components model, the value components that carry the copied circle
+are not the ones that carry the copied mod-10 representation (each listed with its share of the period-20 copy; then of the
+period-10 copy). For <i>a</i>, period 20: {vlist("a", "p20", "p10")}; period 10: {vlist("a", "p10", "p20")}. For <i>b</i>,
+period 20: {vlist("b", "p20", "p10")}; period 10: {vlist("b", "p10", "p20")}.</p>
+<p><b>The copy is one linear map of the circle, which flattens it.</b> The ten odd parts of the copy are fitted from those at
+the source by one 2 × 2 matrix at r² {cp["alive_a"]["map_r2"]:.3f} and {cp["alive_b"]["map_r2"]:.3f} (components; neurons
+{cp["orig_a"]["map_r2"]:.3f} and {cp["orig_b"]["map_r2"]:.3f}). The map is not a rotation: it keeps one direction of the plane
+and shrinks the other. Roundness goes from {rd("alive", "a", "source")} at the source to {rd("alive", "a", "copy")} in the copy of
+<i>a</i> (neurons {rd("orig", "a", "source")} → {rd("orig", "a", "copy")}) and from {rd("alive", "b", "source")} to {rd("alive", "b", "copy")}
+in the copy of <i>b</i> ({rd("orig", "b", "source")} → {rd("orig", "b", "copy")}); α falls with it ({g("alive", "a", "source", "alpha"):.2f} →
+{g("alive", "a", "copy", "alpha"):.2f} and {g("alive", "b", "source", "alpha"):.2f} → {g("alive", "b", "copy", "alpha"):.2f}). The long axis is the rounded-tens parity <i>g</i>, the short one mostly the tens parity <i>h</i>.
+In the components model the copied ring carries {axes("alive", "a", "copy")} for <i>a</i>,
+and {axes("alive", "b", "copy")} for <i>b</i>. In the original model: {axes("orig", "a", "copy")} for <i>a</i>; {axes("orig", "b", "copy")}
+for <i>b</i>.</p>
+<p><b>What arrives at "=".</b> Before the attention, "=" holds no circle of the operand (‖Ψ<sub>1</sub>‖/null
+{amp("alive", "a", "eq_before", 1):.2f} for <i>a</i>, {amp("alive", "b", "eq_before", 1):.2f} for <i>b</i>; <i>h</i> given <i>r</i> at chance). After
+it, the circle is there: <i>h</i> given <i>r</i> is decoded at {g("alive", "a", "eq_after", "acc_h"):.2f} for <i>a</i> and
+{g("alive", "b", "eq_after", "acc_h"):.2f} for <i>b</i> (neurons {g("orig", "a", "eq_after", "acc_h"):.2f} and
+{g("orig", "b", "eq_after", "acc_h"):.2f}), and the plane at "=" is the copy's plane (principal cosines
+{", ".join(f"{x:.3f}" for x in cp["alive_a"]["cos_copy_eq_after_planes"])} for <i>a</i>,
+{", ".join(f"{x:.3f}" for x in cp["alive_b"]["cos_copy_eq_after_planes"])} for <i>b</i>).</p>
+<p><b>A caveat on the null.</b> At the source position the stream depends on the operand alone, so the 400 prompts of one
+residue share 20 identical copies of each value, and the shuffled-label null is weak. Here the odd frequencies <i>j</i> = 3…9
+also exceed it (up to {max(amp("alive", "a", "source", j) for j in (3, 5, 7, 9)):.1f} times for <i>a</i> at the source), unlike in the
+400-prompt analysis of section 1.1.</p>
+{table}
+<figure><img src="fig/mod20_copy_alive.png"><figcaption>Figure 16. Components model. Rows: the copy of <i>a</i> by block 16
+and of <i>b</i> by block 15. First three panels: the circle's odd parts <i>o<sub>s</sub></i> and −<i>o<sub>s</sub></i> (<i>s</i> = 0…19, coloured by
+quarter as in figure 2) at the source position, in the copy written at "=", and at "=" after the attention, each in its own
+plane, turned so that residue 0 points right; the cross is the plane's zero. Titles give α, the held-out accuracy of <i>h</i>
+given <i>r</i>, and the median antipodal Cohen's d. Last panel: each head's share of the copy's period-20 energy and of its
+period-10 energy.</figcaption></figure>
+<figure><img src="fig/mod20_copy_orig.png"><figcaption>Figure 17. As figure 16, original model (2,000 prompts per copy).</figcaption></figure>"""
+
+
 def page(res, rings, counts, scan, pr) -> str:
     b12 = json.loads((OUT / "b12_fig.json").read_text())
     geo = json.loads((OUT / "geometry.json").read_text())
@@ -661,6 +792,8 @@ def page(res, rings, counts, scan, pr) -> str:
         + "".join(rows)
         + "</table>"
     )
+    cpy = OUT / "copy.json"
+    sec11_html = sec11(json.loads(cpy.read_text()), f2, rng) if cpy.exists() else ""
     cpath = OUT / "components.json"
     comp = json.loads(cpath.read_text()) if cpath.exists() else readers_only(res, scan)
     sec4_html = sec4(res, comp, rings, pr, att_gain, f2, rng, sl, bd, mech, alpha)
@@ -959,6 +1092,7 @@ the antipodal and lag-1 pairs.</figcaption></figure>
 <figure><img src="fig/mod20_geom_cos_x_V.png"><figcaption>Figure 14. As figure 10, in <i>x<sub>V</sub></i> (components model,
 kept readers' span).</figcaption></figure>
 <figure><img src="fig/mod20_geom_cohen_x_V.png"><figcaption>Figure 15. As figure 11, in <i>x<sub>V</sub></i>.</figcaption></figure>
+{sec11_html}
 """
 
 
