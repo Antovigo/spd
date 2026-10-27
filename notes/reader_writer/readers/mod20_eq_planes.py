@@ -10,9 +10,9 @@ operand, both operations; 8,000 prompts in the alive-only model, copy_figs.py's 
   P'       the frequency-1 plane of o mod 20 of E': span{Re Psi_1, Im Psi_1}, Psi_1 = sum_s m_s e^{-2 pi i s / 20} with m_s the
            mean of E' over the prompts with o mod 20 = s; turned so that the vector from residue 10's mean to residue 0's mean
            points right
-  panels   P'^T E', P'^T W and P'^T E for every prompt (E' = E + W, so the first panel is the sum of the other two), coloured by
-           the raw value of o; labels: the residue means of s
-Writes <out>/mod20_eq_planes.png and <run>/analysis/reader_writer/track_mod20/eq_planes.json (per panel: the mean of the
+  panels   P'^T E, P'^T W and P'^T E' for every prompt, in that order (E' = E + W, so the last panel is the sum of the first two),
+           coloured by the raw value of o; labels: the residue means of s
+Writes <out>/mod20_eq_planes_<model>_<o>.png (one image per model and copy) and <run>/analysis/reader_writer/track_mod20/eq_planes.json (per panel: the mean of the
 points, their root-mean-square distance to that mean, and the norm of Psi_1 in the plane).
 
     python mod20_eq_planes.py --out notebook_mod20/fig
@@ -78,18 +78,17 @@ def main() -> None:
         Wor = np.einsum("nht,nthd->nhd", p, v).reshape(len(Xo), -1) @ Wo.reshape(4096, -1).T
         data[("orig", which)] = (Xo[:, 4], Wor, st[which][SUB[which]].astype(int))
         del p, v, X
-    fig, axes = plt.subplots(4, 3, figsize=(13.5, 17))
     norm = plt.Normalize(1, 400)
     stats = {}
-    for row, (model, which) in enumerate(
-        (("alive", "a"), ("alive", "b"), ("orig", "a"), ("orig", "b"))
-    ):
+    for model, which in (("alive", "a"), ("alive", "b"), ("orig", "a"), ("orig", "b")):
         E, W, oper = data[(model, which)]
         P = plane(E + W, oper)
         L = WHICH[which]
-        for col, (name, Z) in enumerate(((f'"=" after block {L}\'s attention (E\')', E + W),
-                                         (f"block {L}'s attention write (W)", W), ('"=" before the attention (E)', E))):  # fmt: skip
-            ax = axes[row, col]
+        mn = {"alive": "components", "orig": "neurons"}[model]
+        fig, axes = plt.subplots(1, 3, figsize=(15, 5.2))
+        panels = (("before", f'"=" before block {L}\'s attention (E)', E), ("write", f"block {L}'s attention write (W)", W),
+                  ("after", '"=" after the attention (E\' = E + W)', E + W))  # fmt: skip
+        for ax, (key, name, Z) in zip(axes, panels, strict=True):
             q = Z @ P
             sc = ax.scatter(
                 q[:, 0], q[:, 1], c=oper, cmap="viridis", norm=norm, s=3, alpha=0.6, lw=0
@@ -101,20 +100,19 @@ def main() -> None:
             ax.plot([0], [0], "k+", ms=10, mew=1.5)
             ax.set_aspect("equal")
             ax.tick_params(labelsize=7)
-            mn = {"alive": "components", "orig": "neurons"}[model]
             ax.set_title(f"{mn}, copy of {which}: {name}", fontsize=8.5)
             psi1 = np.linalg.norm(np.exp(-2j * np.pi * np.arange(20) / 20) @ m)
-            stats[f"{model}_{which}_{['after', 'write', 'before'][col]}"] = {
+            stats[f"{model}_{which}_{key}"] = {
                 "mean": q.mean(0).tolist(), "rms_spread": float(np.sqrt(((q - q.mean(0)) ** 2).sum(1).mean())),
                 "psi1_norm_in_plane": float(psi1)}  # fmt: skip
-        # one shared range per row so the three panels are comparable
-        lims = np.asarray([[*axes[row, c].get_xlim(), *axes[row, c].get_ylim()] for c in range(3)])
+        lims = np.asarray([[*a.get_xlim(), *a.get_ylim()] for a in axes])
         lo, hi = lims[:, [0, 2]].min(), lims[:, [1, 3]].max()
-        for c in range(3):
-            axes[row, c].set_xlim(lo, hi)
-            axes[row, c].set_ylim(lo, hi)
-    fig.colorbar(sc, ax=axes, fraction=0.02, pad=0.01, label="value of the copied operand")
-    fig.savefig(args.out / "mod20_eq_planes.png", dpi=95, bbox_inches="tight")
+        for a in axes:
+            a.set_xlim(lo, hi)
+            a.set_ylim(lo, hi)
+        fig.colorbar(sc, ax=axes, fraction=0.02, pad=0.01, label="value of the copied operand")
+        fig.savefig(args.out / f"mod20_eq_planes_{model}_{which}.png", dpi=95, bbox_inches="tight")
+        plt.close(fig)
     (OUT / "eq_planes.json").write_text(json.dumps(stats, indent=1))
     for k, v_ in stats.items():
         print(

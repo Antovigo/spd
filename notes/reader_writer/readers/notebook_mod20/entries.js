@@ -602,19 +602,27 @@ spreads each clump.</p>
 </script>
 <h3>14. The plane at "=" after the copy, and where its content comes from</h3>
 <p>The stream at "=" after the copying attention, <i>E′</i>, is the sum of the stream before it, <i>E</i>, and of the attention's
-whole write, <i>W</i> (all heads, all source positions): <i>E′</i> = <i>E</i> + <i>W</i>. Figure 22 finds the mod-20 plane <i>P′</i> of
+whole write, <i>W</i> (all heads, all source positions): <i>E′</i> = <i>E</i> + <i>W</i>. Figures 22–25 find the mod-20 plane <i>P′</i> of
 <i>E′</i> (the frequency-1 plane of the copied operand <i>o</i> mod 20, as in section 0.2, computed from <i>E′</i>'s residue means) and
-projects all three on it, so the first panel of each row is the sum of the other two. Points are coloured by the raw value
+project all three on it, in the order <i>E</i>, <i>W</i>, <i>E′</i>: each prompt's point in the third panel is the sum of its points in
+the first two. Each operand value appears in 20 prompts (ten values of the other operand, two operations), which share a colour
+but not a position in the first panel. Points are coloured by the raw value
 of the copied operand <i>o</i> (1–400); labels are the residue means of <i>s</i> = <i>o</i> mod 20; the cross is the activation zero.
 The prompt sets are those of section 11 (<code>mod20_eq_planes.py</code>).</p>
-<figure><img src="fig/mod20_eq_planes.png"><figcaption>Figure 22. Rows: components model, copy of <i>a</i> (block 16) and of
-<i>b</i> (block 15); original model, the same. Columns: the stream at "=" after the attention (<i>E′</i>), the attention's write
-(<i>W</i>), and the stream before the attention (<i>E</i>), all projected on the mod-20 plane of <i>E′</i>, turned so that the vector from
-residue 10's mean to residue 0's mean points right. The three panels of a row share their axes.</figcaption></figure>
+<figure><img src="fig/mod20_eq_planes_alive_a.png"><figcaption>Figure 22. Components model, copy of <i>a</i> by block 16: the
+stream at "=" before the attention (<i>E</i>), the attention's write (<i>W</i>), and the stream after it (<i>E′</i>), all projected on the
+mod-20 plane of <i>E′</i>, turned so that the vector from residue 10's mean to residue 0's mean points right. The three panels
+share their axes.</figcaption></figure>
+<figure><img src="fig/mod20_eq_planes_alive_b.png"><figcaption>Figure 23. As figure 22, components model, copy of <i>b</i> by
+block 15.</figcaption></figure>
+<figure><img src="fig/mod20_eq_planes_orig_a.png"><figcaption>Figure 24. As figure 22, original model, copy of <i>a</i> by
+block 16.</figcaption></figure>
+<figure><img src="fig/mod20_eq_planes_orig_b.png"><figcaption>Figure 25. As figure 22, original model, copy of <i>b</i> by
+block 15.</figcaption></figure>
 <p>In each panel, ‖Ψ<sub>1</sub>‖ is the norm of the frequency-1 coefficient of the 20 residue means in the plane (the size of the
 circle), "spread" the root-mean-square distance of the points to their own mean, and ‖mean‖ the distance of that mean from
 the activation zero:</p>
-<table><tr><th>model</th><th>copy</th><th>‖Ψ<sub>1</sub>‖ after</th><th>‖Ψ<sub>1</sub>‖ write</th><th>‖Ψ<sub>1</sub>‖ before</th><th>spread after</th><th>spread write</th><th>spread before</th><th>‖mean‖ before</th></tr><tr><td>components</td><td>a</td><td>8.77</td><td>8.72</td><td>0.09</td><td>0.76</td><td>0.70</td><td>0.24</td><td>0.15</td></tr><tr><td>components</td><td>b</td><td>5.85</td><td>5.78</td><td>0.42</td><td>1.48</td><td>0.76</td><td>0.93</td><td>1.19</td></tr><tr><td>neurons</td><td>a</td><td>8.45</td><td>7.55</td><td>0.92</td><td>0.74</td><td>0.63</td><td>0.29</td><td>0.09</td></tr><tr><td>neurons</td><td>b</td><td>6.51</td><td>5.67</td><td>1.39</td><td>1.61</td><td>0.52</td><td>1.47</td><td>0.70</td></tr></table>
+<table><tr><th>model</th><th>copy</th><th>‖Ψ<sub>1</sub>‖ before</th><th>‖Ψ<sub>1</sub>‖ write</th><th>‖Ψ<sub>1</sub>‖ after</th><th>spread before</th><th>spread write</th><th>spread after</th><th>‖mean‖ before</th></tr><tr><td>components</td><td>a</td><td>0.09</td><td>8.72</td><td>8.77</td><td>0.24</td><td>0.70</td><td>0.76</td><td>0.15</td></tr><tr><td>components</td><td>b</td><td>0.42</td><td>5.78</td><td>5.85</td><td>0.93</td><td>0.76</td><td>1.48</td><td>1.19</td></tr><tr><td>neurons</td><td>a</td><td>0.92</td><td>7.55</td><td>8.45</td><td>0.29</td><td>0.63</td><td>0.74</td><td>0.09</td></tr><tr><td>neurons</td><td>b</td><td>1.39</td><td>5.67</td><td>6.51</td><td>1.47</td><td>0.52</td><td>1.61</td><td>0.70</td></tr></table>
 <p>The circle comes from the write: ‖Ψ<sub>1</sub>‖ of the stream before the attention is 0.09
 and 0.42 (components, <i>a</i> and <i>b</i>) against 8.72 and
 5.78 in the write. In the original model the stream before the attention already
