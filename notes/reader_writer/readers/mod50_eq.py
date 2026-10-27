@@ -1,4 +1,4 @@
-"""Where the inputs of the block-15 gate readers g19 and g29 come from at the token "=" (position 4).
+"""Where the inputs of the block-15 readers g19, g29 (gate) and u32 (up) come from at the token "=" (position 4).
 
 Model: the alive-only model of variance/alive_only (every alive component of the ceiling filter addsub-08-last-pos on,
 every other component and the weight delta off). Its stored activations (float32, every alive component, positions
@@ -8,7 +8,7 @@ BOS position (0), the same on every prompt, from track_mod10/stream.npz (bos_pre
 + (b - 1). Nothing is centred: zero is the zero of the activation space.
 
 Notation (position 4 unless stated; x a prompt):
-  c            a reader: block-15 gate component 19 or 29; V_c in R^4096 its read vector
+  c            a reader: block-15 gate component 19 or 29, or up component 32; V_c in R^4096 its read vector
   gamma        (4096,) the gain of block 15's post-attention RMSNorm
   r_c          = gamma * V_c / ||V_c||: the read direction with the gain folded in
   X(x)         mid_15(x) in R^4096: the stream after block 15's attention, read by the MLP;
@@ -36,7 +36,11 @@ Plots (raw stream, no division by rho): the coordinates x . r_19 and x . r_29 of
 by b mod 50, on 20,000 random prompts per op: mid_l (before block l's MLP) for l = 0..15 and pre_15 (before block 15's
 attention); and block 15's writes (attention, by source position, and MLP: pre_16 - mid_15).
 
-Writes <run>/analysis/reader_writer/mod50_eq/{attribution.json, proj.npz, fig/*.png}.
+Writes <run>/analysis/reader_writer/mod50_eq/{attribution.json, proj.npz, chain.npz, fig/*.png}. chain.npz holds, per
+prompt, what mod50_chain.py needs to rewrite block 15's attention term: p (N, 32, 5) the attention pattern at "=" (query
+head, source position), tau3 (N, n_v) the activations of block 15's alive v components at position 3 (computed from
+pre_15 at position 3, checked against the stored ones), o3 (N, n_o) the o activations from source 3, rho (N,), f (N, 3),
+and R (4096, 3), wo (n_o, 3) = U_o . r_c.
 
     python mod50_eq.py prepare            # on the cluster: OUT/inputs.npz (embeddings, gains, config, BOS stream)
     python mod50_eq.py [compute|plot|all]  # anywhere with numpy + matplotlib; RUN_DIR env overrides the run path
@@ -63,7 +67,8 @@ SRC_ATTN = RUN / "analysis/reader_writer/variance/alive_only_attn"
 BOS_STREAM = RUN / "analysis/reader_writer/track_mod10/stream.npz"
 OUT = RUN / "analysis/reader_writer/mod50_eq"
 RB = 15
-READERS = (19, 29)
+READERS = (("gate", 19), ("gate", 29), ("up", 32))
+NR = len(READERS)
 OPS = ("+", "-")
 N = 320000
 CHUNK = 4000
@@ -151,11 +156,11 @@ def compute() -> None:
     }
     g1, g2, e_num, e_op, e_eq = W["g1"], W["g2"], W["e_num"], W["e_op"], W["e_eq"]
     m15, a15 = mlp[RB], att[RB]
-    gsel = [int(np.flatnonzero((m15["kind"] == "gate") & (m15["index"] == c))[0]) for c in READERS]
-    gi = {int(c): j for j, c in enumerate(m15["index"][m15["kind"] == "gate"])}
-    Vc = m15["V_gate"][:, [gi[c] for c in READERS]]
+    gsel = [int(np.flatnonzero((m15["kind"] == kd) & (m15["index"] == c))[0]) for kd, c in READERS]
+    Vc = np.stack([m15[f"V_{kd}"][:, int(np.flatnonzero(m15["index"][m15["kind"] == kd] == c)[0])]
+                   for kd, c in READERS], 1)  # fmt: skip
     vn = np.linalg.norm(Vc, axis=0)
-    R = g2[:, None] * Vc / vn  # (4096, 2)
+    R = g2[:, None] * Vc / vn  # (4096, NR)
     bos = W["bos"]
 
     # writer list
@@ -175,10 +180,14 @@ def compute() -> None:
     H, KV, dh = cfg["num_attention_heads"], cfg["num_key_value_heads"], 128
     rep = np.arange(H) // (H // KV)
     acc = {(o, j): {"ef": np.zeros(nw), "G": np.zeros((nw, nw)), "e": np.zeros(nw), "f2": 0.0,
-                    "f": 0.0, "n": 0} for o in range(2) for j in range(2)}  # fmt: skip
-    proj = {"pre": np.zeros((N, RB + 2, 2), np.float32), "mid": np.zeros((N, RB + 1, 2), np.float32),
-            "src15": np.zeros((N, 5, 2), np.float32), "f": np.zeros((N, 2), np.float32)}  # fmt: skip
-    checks = {"o15_rel_max": 0.0, "f_rel_max": 0.0, "f_sq_err": np.zeros(2), "f_sq": np.zeros(2)}
+                    "f": 0.0, "n": 0} for o in range(2) for j in range(NR)}  # fmt: skip
+    proj = {"pre": np.zeros((N, RB + 2, NR), np.float32), "mid": np.zeros((N, RB + 1, NR), np.float32),
+            "src15": np.zeros((N, 5, NR), np.float32), "f": np.zeros((N, NR), np.float32)}  # fmt: skip
+    vsel = a15["kind"] == "v"
+    chain = {"p": np.zeros((N, H, 5), np.float32), "tau3": np.zeros((N, int(vsel.sum())), np.float32),
+             "o3": np.zeros((N, int((a15["kind"] == "o").sum())), np.float32), "rho": np.zeros(N)}  # fmt: skip
+    checks = {"o15_rel_max": 0.0, "tau3_rel_max": 0.0, "f_rel_max": 0.0, "f_sq_err": np.zeros(NR),
+              "f_sq": np.zeros(NR)}  # fmt: skip
     rows = np.arange(N)
     op_of, a_of, b_of = rows // 160000, (rows % 160000) // 400 + 1, rows % 400 + 1
     t0 = time.time()
@@ -188,8 +197,8 @@ def compute() -> None:
         op, a, b = op_of[sl], a_of[sl], b_of[sl]
         # stream at positions 1..4 entering block 0, then the writes of blocks 0..14
         X = np.stack([e_num[a - 1], e_op[op], e_num[b - 1], np.broadcast_to(e_eq, (n, 4096))], 1)
-        terms = [np.broadcast_to(e_eq @ R, (n, 2))[:, None]]
-        cum = np.broadcast_to(e_eq @ R, (n, 2)).copy()
+        terms = [np.broadcast_to(e_eq @ R, (n, NR))[:, None]]
+        cum = np.broadcast_to(e_eq @ R, (n, NR)).copy()
         for blk in range(RB):
             proj["pre"][sl, blk] = cum
             ta = np.asarray(inner_a[blk][sl], np.float64)[
@@ -224,6 +233,12 @@ def compute() -> None:
         ref = np.asarray(inner_a[RB][sl, 3], np.float64)[:, a15["kind"] == "o"]
         checks["o15_rel_max"] = max(checks["o15_rel_max"],
                                     float(np.abs(o_src.sum(1) - ref).max() / np.abs(ref).max()))  # fmt: skip
+        tau3 = xn[:, 3] @ a15["V_v"]
+        tref = np.asarray(inner_a[RB][sl, 2], np.float64)[:, vsel]
+        checks["tau3_rel_max"] = max(
+            checks["tau3_rel_max"], float(np.abs(tau3 - tref).max() / np.abs(tref).max())
+        )
+        chain["p"][sl], chain["tau3"][sl], chain["o3"][sl] = p, tau3, o_src[:, 3]
         mid = X[:, 3] + o_src.sum(1) @ a15["U_o"]
         for s in range(5):
             e = o_src[:, s, :, None] * (a15["U_o"] @ R)[None]
@@ -235,6 +250,7 @@ def compute() -> None:
         td = np.asarray(inner[RB][sl, 3], np.float64)[:, m15["kind"] == "down"]
         proj["pre"][sl, RB + 1] = cum + td @ (m15["U_down"] @ R)
         rho = np.sqrt((mid**2).mean(-1) + EPS)
+        chain["rho"][sl] = rho
         f = (mid @ R) / rho[:, None]
         fref = np.asarray(inner[RB][sl, 3], np.float64)[:, gsel] / vn
         checks["f_rel_max"] = max(
@@ -250,7 +266,7 @@ def compute() -> None:
             m = op == o
             if not m.any():
                 continue
-            for j in range(2):
+            for j in range(NR):
                 Ej, fj = E[m, :, j], f[m, j]
                 A = acc[(o, j)]
                 A["ef"] += Ej.T @ fj
@@ -264,13 +280,14 @@ def compute() -> None:
                   flush=True)  # fmt: skip
 
     res: dict[str, Any] = {"definitions": __doc__, "n_writers": nw,
-                           "checks": {"o15_rel_max": checks["o15_rel_max"], "f_rel_max": checks["f_rel_max"],
+                           "checks": {"o15_rel_max": checks["o15_rel_max"], "tau3_rel_max": checks["tau3_rel_max"],
+                                      "f_rel_max": checks["f_rel_max"],
                                       "f_r2_vs_stored": (1 - checks["f_sq_err"] / checks["f_sq"]).tolist()},
                            "readers": {}}  # fmt: skip
     gnames = sorted(set(groups), key=lambda g: (g != "emb", groups.index(g)))
     garr = np.asarray(groups)
-    for j, c in enumerate(READERS):
-        cid = f"L{RB}.gate.{c}"
+    for j, (kd, c) in enumerate(READERS):
+        cid = f"L{RB}.{kd}.{c}"
         res["readers"][cid] = {}
         for o in range(2):
             A = acc[(o, j)]
@@ -322,6 +339,7 @@ def compute() -> None:
         b=b_of.astype(np.int16),
         **proj,
     )
+    np.savez(OUT / "chain.npz", f=proj["f"], R=R, wo=a15["U_o"] @ R, **chain)
 
 
 def scatter(ax, P: np.ndarray, col: np.ndarray, title: str, lim=None):  # noqa: ANN001, ANN201
