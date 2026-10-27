@@ -720,6 +720,89 @@ period-10 energy.</figcaption></figure>
 <figure><img src="fig/mod20_copy_orig.png"><figcaption>Figure 17. As figure 16, original model (2,000 prompts per copy).</figcaption></figure>"""
 
 
+QHEX = [["#9ecae1", "#6baed6", "#4292c6", "#2171b5", "#08519c"], ["#fdae6b", "#fd8d3c", "#f16913", "#d94801", "#a63603"],
+        ["#a1d99b", "#74c476", "#41ab5d", "#238b45", "#006d2c"], ["#bcbddc", "#9e9ac8", "#807dba", "#6a51a3", "#54278f"]]  # fmt: skip
+
+
+def sec12(c3: dict) -> str:
+    """Rotatable 3D views (plotly) of the quarter clumps at the source positions; data inlined."""
+    data = json.dumps(c3, separators=(",", ":"))
+    colors = json.dumps([QHEX[s // 5][s % 5] for s in range(20)])
+
+    def sh(k: str, f: str) -> str:
+        return f"{c3[k]['shares'][f]:.2f}"
+
+    return f"""<h3>12. The four clumps in 3D, just before the copy</h3>
+<p>Section 2 of chapter 1.2 and the clump analysis showed that, after block 12, the 20 residues gather into four clumps (the
+quarters <i>Q</i> = ⌊<i>s</i>/5⌋, with <i>s</i> = <i>o</i> mod 20 for the operand <i>o</i>), and that the four clump centres need three
+dimensions: two in the mod-20 plane and one in the mod-10 representation. The two views below show those three dimensions at
+the moment the operand is copied: <i>a</i> at position 1 entering block 16, and <i>b</i> at position 3 entering block 15, in the
+attention input of the copying block (after its input RMSNorm). Drag to rotate, scroll to zoom, and use the buttons to
+switch between the components model and the original model (<code>mod20_clumps3d.py</code>).</p>
+<p><b>Axes.</b> <i>ν<sub>Q</sub></i> ∈ ℝ<sup>4096</sup> is the mean of the attention input over the prompts of quarter <i>Q</i>, and the
+clump layout is spanned by the three differences <i>ν</i><sub>1</sub> − <i>ν</i><sub>0</sub>, <i>ν</i><sub>2</sub> − <i>ν</i><sub>0</sub>,
+<i>ν</i><sub>3</sub> − <i>ν</i><sub>0</sub>. Axes 1 and 2 are an orthonormal basis of the part of that span that lies in the mod-20 plane
+<i>P</i>, turned so that residue 0 is on the positive side of axis 1. Axis 3 is the unit vector along the rest, oriented so that
+quarter 1 (units digit 5–9) lies above quarter 0. Every point is a prompt's projection onto the three axes; nothing is
+centred, so the origin (the black cross) is the activation zero. Axis 3 lies in the mod-10 subspace: its share there is
+{c3["alive_a"]["e3_in_D10"]:.2f} for <i>a</i> and {c3["alive_b"]["e3_in_D10"]:.2f} for <i>b</i> (components;
+{c3["orig_a"]["e3_in_D10"]:.2f} and {c3["orig_b"]["e3_in_D10"]:.2f} in the original model). Of the clump layout's energy
+(Σ‖<i>ν<sub>Q</sub></i> − <i>ν</i><sub>0</sub>‖²), the three axes hold {sh("alive_a", "G_in_view")} for <i>a</i> and {sh("alive_b", "G_in_view")}
+for <i>b</i>; the mod-20 plane holds {sh("alive_a", "G_in_P")} and {sh("alive_b", "G_in_P")}, and the mod-10 subspace {sh("alive_a", "G_in_D10")}
+and {sh("alive_b", "G_in_D10")} (the two overlap slightly).</p>
+<p><b>Markers.</b> Small dots: prompts (400 for <i>a</i>, one per value; for <i>b</i>, 8,000 prompts in the components model and 2,000
+in the original model, since position 3 also depends on <i>a</i> and the operation). Colour: residue <i>s</i>, one colour family
+per quarter (blue 0–4, orange 5–9, green 10–14, purple 15–19), darker for larger <i>s</i> within the quarter. Labelled
+circles: the 20 residue means. Diamonds: the four quarter centres. Click a legend entry to hide a residue.</p>
+<div class="applet" id="clumps3d_a" style="width:100%;height:560px"></div>
+<p class="note">Figure 18. <i>a</i> at position 1 entering block 16, projected onto the three axes above.</p>
+<div class="applet" id="clumps3d_b" style="width:100%;height:560px"></div>
+<p class="note">Figure 19. <i>b</i> at position 3 entering block 15, projected onto the three axes above.</p>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/plotly.js/2.27.0/plotly.min.js"></script>
+<script>
+(function () {{
+  const C3 = {data};
+  const COL = {colors};
+  const fg = getComputedStyle(document.body).color || "#222";
+  function traces(key, visible) {{
+    const d = C3[key], out = [];
+    for (let s = 0; s < 20; s++) {{
+      const idx = d.s.map((v, i) => v === s ? i : -1).filter(i => i >= 0);
+      out.push({{type: "scatter3d", mode: "markers", name: "s = " + s, legendgroup: "s" + s, visible: visible,
+        x: idx.map(i => d.points[i][0]), y: idx.map(i => d.points[i][1]), z: idx.map(i => d.points[i][2]),
+        text: idx.map(i => "operand " + d.operand[i] + ", s = " + s), hoverinfo: "text",
+        marker: {{size: 2.2, color: COL[s], opacity: 0.55}}}});
+    }}
+    out.push({{type: "scatter3d", mode: "markers+text", name: "residue means", visible: visible,
+      x: d.residue_means.map(p => p[0]), y: d.residue_means.map(p => p[1]), z: d.residue_means.map(p => p[2]),
+      text: d.residue_means.map((p, s) => String(s)), textfont: {{color: fg, size: 11}}, hoverinfo: "text",
+      marker: {{size: 6, color: COL, line: {{color: fg, width: 1}}}}}});
+    out.push({{type: "scatter3d", mode: "markers", name: "quarter centres", visible: visible,
+      x: d.quarter_means.map(p => p[0]), y: d.quarter_means.map(p => p[1]), z: d.quarter_means.map(p => p[2]),
+      text: ["Q = 0 (s 0–4)", "Q = 1 (s 5–9)", "Q = 2 (s 10–14)", "Q = 3 (s 15–19)"], hoverinfo: "text",
+      marker: {{size: 9, symbol: "diamond", color: [COL[2], COL[7], COL[12], COL[17]], line: {{color: fg, width: 1.5}}}}}});
+    out.push({{type: "scatter3d", mode: "markers", name: "activation zero", visible: visible, x: [0], y: [0], z: [0],
+      hoverinfo: "name", marker: {{size: 5, symbol: "cross", color: fg}}}});
+    return out;
+  }}
+  function draw(div, w) {{
+    const a = traces("alive_" + w, true), o = traces("orig_" + w, false), n = a.length;
+    const vis = (on) => Array(n).fill(on).concat(Array(n).fill(!on));
+    const ax = (t) => ({{title: {{text: t, font: {{color: fg}}}}, color: fg, gridcolor: "rgba(128,128,128,0.3)", zerolinecolor: "rgba(128,128,128,0.6)"}});
+    Plotly.newPlot(div, a.concat(o), {{
+      paper_bgcolor: "rgba(0,0,0,0)", font: {{color: fg}}, margin: {{l: 0, r: 0, t: 30, b: 0}},
+      legend: {{font: {{size: 10}}, itemsizing: "constant"}},
+      scene: {{xaxis: ax("axis 1 (mod-20 plane)"), yaxis: ax("axis 2 (mod-20 plane)"), zaxis: ax("axis 3 (mod-10)"), aspectmode: "data"}},
+      updatemenus: [{{type: "buttons", direction: "right", x: 0, y: 1.08, xanchor: "left", showactive: true,
+        buttons: [{{label: "components", method: "restyle", args: ["visible", vis(true)]}},
+                  {{label: "neurons (original model)", method: "restyle", args: ["visible", vis(false)]}}]}}]
+    }}, {{responsive: true, displaylogo: false}});
+  }}
+  if (window.Plotly) {{ draw("clumps3d_a", "a"); draw("clumps3d_b", "b"); }}
+}})();
+</script>"""
+
+
 def page(res, rings, counts, scan, pr) -> str:
     b12 = json.loads((OUT / "b12_fig.json").read_text())
     geo = json.loads((OUT / "geometry.json").read_text())
@@ -792,6 +875,8 @@ def page(res, rings, counts, scan, pr) -> str:
         + "".join(rows)
         + "</table>"
     )
+    c3p = Path(__file__).resolve().parent / "notebook_mod20" / "mod20_clumps3d.json"
+    sec12_html = sec12(json.loads(c3p.read_text())) if c3p.exists() else ""
     cpy = OUT / "copy.json"
     sec11_html = sec11(json.loads(cpy.read_text()), f2, rng) if cpy.exists() else ""
     cpath = OUT / "components.json"
@@ -1093,6 +1178,7 @@ the antipodal and lag-1 pairs.</figcaption></figure>
 kept readers' span).</figcaption></figure>
 <figure><img src="fig/mod20_geom_cohen_x_V.png"><figcaption>Figure 15. As figure 11, in <i>x<sub>V</sub></i>.</figcaption></figure>
 {sec11_html}
+{sec12_html}
 """
 
 
