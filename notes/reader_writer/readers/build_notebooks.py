@@ -1,4 +1,4 @@
-"""Assemble one notebook per period (mod 2, mod 10, mod 20) from the notebook pages, in a fixed five-part order:
+"""Assemble one notebook per period (mod 2, mod 10, mod 20, mod 50) from the notebook pages, in a fixed five-part order:
 
     1. How the period is represented at the operand positions, blocks 0-16
     2. How the geometry changes along the way (compression, distortion, separation, the SwiGLU lens)
@@ -6,8 +6,8 @@
     4. Which neurons read the representation
     5. How the information is copied to the last token by the attention of blocks 15 and 16
 
-Sources are the page entries (`entries.js` of notebook/, notebook_mod2/, notebook_neurons/, notebook_mod20/), loaded
-with node so the template literals are evaluated exactly. Each page is split at its <h3> sections; LAYOUT says where
+Sources are the page entries (`entries.js` of notebook/, notebook_mod2/, notebook_neurons/, notebook_mod20/,
+notebook_mod50/), loaded with node so the template literals are evaluated exactly. Each page is split at its <h3> sections; LAYOUT says where
 every section goes. Sections are renumbered "<part>.<k>", and each page's references to its own sections ("section 8",
 "sections 1 and 7") are rewritten to the new numbers (an unmapped reference fails the build). A part with no section is
 a "Coming soon" placeholder. Every page's "Setup and notation" goes to the notebook's preface, so every symbol is defined
@@ -29,7 +29,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 OUT = HERE / "notebooks"
 SOURCES = {"notebook": "notebook/fig", "notebook_mod2": "notebook_mod2/fig", "notebook_neurons": "notebook_neurons/fig",
-           "notebook_mod20": "notebook_mod20/fig"}  # fmt: skip
+           "notebook_mod20": "notebook_mod20/fig", "notebook_mod50": "notebook_mod50/fig"}  # fmt: skip
 PARTS = (
     "How the period is represented at the operand positions, blocks 0–16",
     "How the geometry changes from block 0 to block 16",
@@ -45,6 +45,7 @@ PAGES = {
     "mod10-neurons": ("notebook_neurons", "Mod 10 representations in the neuron basis"),
     "mod2_l3": ("notebook_mod2", "Mod 2: block-3 d189 and the parity line"),
     "mod20": ("notebook_mod20", "Mod 20 representation at a (position 1)"),
+    "mod50_eq": ("notebook_mod50", "Mod 50: the block-15 readers g19 and g29 at ="),
 }
 # period -> {"title", "pages" (preface order), "parts": [[(page id, old section number), ...] x 5]}
 LAYOUT = {
@@ -79,6 +80,12 @@ LAYOUT = {
         "parts": [[("mod20", 1), ("mod20", 4)], [("mod20", 2), ("mod20", 5), ("mod20", 6), ("mod20", 10)], [("mod20", 3), ("mod20", 8)],
                   [("mod20", 7), ("mod20", 9)], [("mod20", 11), ("mod20", 12), ("mod20", 13), ("mod20", 14)]],
         "refs": {"mod20": [("representation of the mod-10 page", "representation of the mod-10 notebook")]},
+    },
+    "mod50": {
+        "title": "Mod 50 representations",
+        "pages": ["mod50_eq"],
+        "parts": [[], [], [("mod50_eq", 1)], [], [("mod50_eq", 2), ("mod50_eq", 3)]],
+        "refs": {},
     },
 }  # fmt: skip
 
