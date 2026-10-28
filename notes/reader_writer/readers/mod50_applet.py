@@ -2,7 +2,8 @@
 
 Data: <run>/analysis/reader_writer/mod50_eq/applet_data.json (mod50_chain.py): for 6,000 random prompts per op, the
 reader activations f_c = t_c / ||V_c|| (t_c the inner activation, V_c the read vector). Writes
-notebooks/mod50_3d/index.html (one self-contained page, no external scripts).
+notebooks/mod50_3d/index.html (one self-contained page, no external scripts) and notebook_mod50/fig/mod50_3d.js, the
+same view for the mod-50 notebook: it mounts itself into the element with id "m50-3d" (ids prefixed "m50-").
 
     python mod50_applet.py
 """
@@ -13,6 +14,40 @@ from pathlib import Path
 RUN = Path("/mnt/nw/home/a.vigouroux/out/pod-backup/p-ba8b0c08")
 DATA = RUN / "analysis/reader_writer/mod50_eq/applet_data.json"
 OUT = Path(__file__).resolve().parent / "notebooks/mod50_3d/index.html"
+EMBED = Path(__file__).resolve().parent / "notebook_mod50/fig/mod50_3d.js"
+IDS = ("op", "up", "scale", "sz", "shadow", "reset", "cv", "grad")
+EMBED_CSS = """
+#m50-3d .controls { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; font-size: 13px; margin: 8px 0; }
+#m50-3d .controls label { display: flex; gap: 6px; align-items: center; }
+#m50-3d select, #m50-3d input, #m50-3d button { font: inherit; color: inherit; }
+#m50-3d button { background: transparent; border: 1px solid var(--line); border-radius: 4px; padding: 2px 10px; cursor: pointer; }
+#m50-3d .stage { border: 1px solid var(--line); border-radius: 6px; max-width: 760px; }
+#m50-3d canvas { display: block; width: 100%; aspect-ratio: 1 / 1; max-height: 78vh; touch-action: none; cursor: grab;
+  background: var(--bg); border: 0; }
+#m50-3d .cbar { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); padding: 6px 10px; }
+#m50-3d .cbar span.grad { flex: 1; height: 10px; border-radius: 2px; max-width: 320px; }
+"""
+
+
+def embed_js(data_json: str) -> str:
+    """The page's controls, canvas and script as one file that mounts into #m50-3d (ids prefixed with m50-)."""
+    body = PAGE.split("<script>", 1)[1].split("</script>", 1)[0].replace("__DATA__", data_json)
+    html = PAGE.split('<div class="controls">', 1)[1].split('<ul class="defs">', 1)[0]
+    html = '<div class="controls">' + html
+    for i in IDS:
+        for q in ('id="{}"', 'for="{}"'):
+            html = html.replace(q.format(i), q.format("m50-" + i))
+        body = body.replace(f'getElementById("{i}")', f'getElementById("m50-{i}")')
+    body = body.replace(
+        'for (const id of ["op", "up", "scale", "sz", "shadow"]) document.getElementById(id)',
+        'for (const id of ["op", "up", "scale", "sz", "shadow"]) document.getElementById("m50-" + id)',
+    )
+    return ("(function () {\n"
+            f"const st = document.createElement('style'); st.textContent = {json.dumps(EMBED_CSS)};\n"
+            "document.head.appendChild(st);\n"
+            f"document.getElementById('m50-3d').innerHTML = {json.dumps(html)};\n"
+            + body + "\n})();\n")  # fmt: skip
+
 
 PAGE = r"""<title>Mod 50 Reader Space</title>
 <meta name="claude:viewport-fit-sides" content="cover">
@@ -98,7 +133,7 @@ R.forEach((r, i) => { const o = document.createElement("option"); o.value = i; o
 upSel.value = String(R.indexOf("L15.up.32") >= 0 ? R.indexOf("L15.up.32") : 2);
 const cv = document.getElementById("cv"), ctx = cv.getContext("2d");
 let yaw = -0.7, pitch = 0.45, zoom = 1;
-function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+function css(v, fb) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim() || fb || ""; }
 function draw() {
   const dpr = window.devicePixelRatio || 1, W = cv.clientWidth, Hh = cv.clientHeight;
   cv.width = Math.round(W * dpr); cv.height = Math.round(Hh * dpr); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -128,7 +163,7 @@ function draw() {
     a = proj(t * B[0], -B[1], -B[2]); b = proj(t * B[0], B[1], -B[2]); ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke(); }
   // shadows
   const P = sel.map(p => { const v = [0, 1, 2].map(i => norm(p[3 + ax[i]], i)); return [v, p[2] % 50]; });
-  if (shadow) { ctx.fillStyle = css("--shadow");
+  if (shadow) { ctx.fillStyle = css("--shadow", "rgba(128, 128, 128, 0.16)");
     for (const [v] of P) { const q = proj(v[0], v[1], -B[2]); ctx.fillRect(q[0] - sz / 2, q[1] - sz / 2, sz, sz); } }
   // zero lines inside the box
   ctx.strokeStyle = css("--muted"); ctx.globalAlpha = 0.6;
@@ -141,7 +176,7 @@ function draw() {
   const Q = P.map(([v, r]) => { const q = proj(v[0], v[1], v[2]); return [q[0], q[1], q[2], r]; }).sort((u, w) => w[2] - u[2]);
   for (const q of Q) { ctx.fillStyle = cols[q[3]]; ctx.beginPath(); ctx.arc(q[0], q[1], sz, 0, 2 * Math.PI); ctx.fill(); }
   // box edges and axis labels
-  ctx.strokeStyle = css("--box");
+  ctx.strokeStyle = css("--box", css("--muted", "#888"));
   const cs = [[-1,-1,-1],[1,-1,-1],[1,1,-1],[-1,1,-1],[-1,-1,1],[1,-1,1],[1,1,1],[-1,1,1]].map(c => proj(c[0]*B[0], c[1]*B[1], c[2]*B[2]));
   for (const [i, j] of [[0,1],[1,2],[2,3],[3,0],[4,5],[5,6],[6,7],[7,4],[0,4],[1,5],[2,6],[3,7]]) {
     ctx.beginPath(); ctx.moveTo(cs[i][0], cs[i][1]); ctx.lineTo(cs[j][0], cs[j][1]); ctx.stroke(); }
@@ -178,7 +213,10 @@ draw();
 def main() -> None:
     data = json.loads(DATA.read_text())
     OUT.parent.mkdir(parents=True, exist_ok=True)
-    OUT.write_text(PAGE.replace("__DATA__", json.dumps(data, separators=(",", ":"))))
+    dj = json.dumps(data, separators=(",", ":"))
+    OUT.write_text(PAGE.replace("__DATA__", dj))
+    EMBED.parent.mkdir(parents=True, exist_ok=True)
+    EMBED.write_text(embed_js(dj))
     print("wrote", OUT, len(data["points"]), "points")
 
 

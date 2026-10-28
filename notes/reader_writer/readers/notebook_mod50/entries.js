@@ -94,6 +94,15 @@ Each panel has its own axis limits.</p>
 <figcaption>Prompts <i>a</i> + <i>b</i>.</figcaption></figure>
 <figure><img src="fig/stream_sub.png" alt="stream at = on r19 and r29, blocks 0 to 15, subtraction">
 <figcaption>Prompts <i>a</i> − <i>b</i>.</figcaption></figure>
+<h4>The three readers in 3D</h4>
+<p>The activations f<sub>19</sub>, f<sub>29</sub> and f<sub>32</sub> of <code>g19</code>, <code>g29</code> and
+<code>u32</code> at the input of block 15's MLP (f<sub>c</sub> = r<sub>c</sub> · mid<sub>15</sub> / ρ, as in the
+setup), for 6,000 random prompts per operator, coloured by <i>b</i> mod 50. Drag to rotate, scroll or pinch to zoom;
+the vertical axis can be any of the three readers, and the shadows are the dots dropped straight down onto the floor
+of the box. Nothing is centred: the grey lines cross at activation zero when it lies inside the box. The same view
+as a separate page: <a href="https://claude.ai/artifact/2SnrbErKDYntUN1pR8xib2">Mod 50 reader space</a>.</p>
+<div id="m50-3d"></div>
+<script src="fig/mod50_3d.js"></script>
 
 <h3>3. What block 15 writes along these directions</h3>
 <p>The same coordinates for block 15's writes: its attention write mid<sub>15</sub> − pre<sub>15</sub>, the same
