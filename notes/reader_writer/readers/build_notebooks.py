@@ -84,7 +84,7 @@ LAYOUT = {
     "mod50": {
         "title": "Mod 50 representations",
         "pages": ["mod50_eq"],
-        "parts": [[], [], [("mod50_eq", 1)], [], [("mod50_eq", 2), ("mod50_eq", 3), ("mod50_eq", 4), ("mod50_eq", 5)]],
+        "parts": [[], [], [("mod50_eq", 1)], [], [("mod50_eq", 2), ("mod50_eq", 3), ("mod50_eq", 4), ("mod50_eq", 5), ("mod50_eq", 6)]],
         "refs": {},
     },
 }  # fmt: skip

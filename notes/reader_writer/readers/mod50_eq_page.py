@@ -36,6 +36,10 @@ FIGS = (
     "chain_pattern_sub.png",
     "pos3_add.png",
     "pos3_sub.png",
+    "mlp3_sharpen_add.png",
+    "mlp3_sharpen_sub.png",
+    "mlp3_interv_add.png",
+    "mlp3_interv_sub.png",
 )
 POS, NEG = "#2a5db0", "#c0392b"
 
@@ -67,6 +71,115 @@ def fig_groups(att: dict, path: Path) -> None:
     plt.close(fig)
 
 
+def emb_periods() -> dict:
+    """Exact-period energy shares (uncentred, summed over the 4096 coordinates) of the embedding e(b), b = 1..400, and the
+    99th percentile of the tau = 50 share over 200 random permutations of the rows (seed 0)."""
+    from math import gcd
+
+    import numpy as np
+
+    E = np.load(SRC / "inputs.npz")["e_num"]
+    k = np.arange(100)
+    tau = np.asarray([100 // gcd(int(v), 100) for v in k])
+    bb = np.arange(1, 401)
+
+    def shares(F: np.ndarray) -> dict[int, float]:
+        m = np.stack([F[bb % 100 == r].mean(0) for r in range(100)])
+        M = np.fft.fft(m, axis=0)
+        return {
+            int(t): float(4 * (np.abs(M[tau == t]) ** 2).sum() / (100 * (F**2).sum()))
+            for t in sorted(set(tau))
+        }
+
+    rng = np.random.default_rng(0)
+    null = [shares(E[rng.permutation(400)])[50] for _ in range(200)]
+    return {"shares": shares(E), "null50_p99": float(np.quantile(null, 0.99))}
+
+
+def mlp3_section(m3: dict, emb: dict) -> str:
+    Bk = m3["blocks"]
+    cols = [(c, op) for c in READERS for op in OPS]
+    head = "".join(f"<th>{short(c)}, a {op} b</th>" for c, op in cols)
+
+    def cell(blk: int, f) -> str:  # noqa: ANN001
+        return "".join(f"<td>{f(Bk[str(blk)][c][op])}</td>" for c, op in cols)
+
+    lin = "".join(
+        f"<tr><td>block {blk}</td>{cell(blk, lambda e: f'{e["r2_lin"]:.2f}')}</tr>"
+        for blk in range(15)
+    )
+    rngs = "".join(f"<tr><td>block {blk}</td>{cell(blk, lambda e: f'{e['range_M']:.3f} / {e['range_lin']:.3f}')}</tr>"
+                   for blk in range(15))  # fmt: skip
+    lab = {
+        "50": "τ = 50",
+        "2": "τ = 2",
+        "25": "τ = 25",
+        "2+25": "τ = 2 and 25",
+        "all|50": "every τ dividing 50",
+    }
+    interv = "".join(
+        f"<tr><td>block {blk}, {lab[q]}</td>{cell(blk, lambda e: f'{e['interventions'][q]['range_ratio']:.2f}')}</tr>"  # noqa: B023
+        for blk in (3, 4, 11, 12, 13, 14) for q in lab)  # fmt: skip
+    es = emb["shares"]
+    r0 = min(Bk["0"][c][op]["r2_lin"] for c, op in cols)
+    return f"""
+<h3>6. How the MLPs at the token b build the pattern</h3>
+<p>Section 5.4 showed the copied signal S<sub>c</sub> taking its b mod 50 shape from the MLPs at position 3. This
+section asks three things: whether the shape is already in the embedding of <i>b</i>, whether each MLP's
+contribution is a linear function of its input, and whether an MLP needs a b mod 50 input or builds the pattern from
+other parts of its input. Notation, besides that of the earlier sections (<i>l</i> ∈ {{0, …, 14}} a block):</p>
+<ul>
+<li>z<sub>l</sub>(<i>x</i>): RMSNorm of the stream at position 3 after block <i>l</i>'s attention, with block
+<i>l</i>'s post-attention gain: what the MLP reads. MLP<sub>l</sub>: the alive-only MLP, which depends on
+z<sub>l</sub> only through its gate and up reader activations F = (z<sub>l</sub> · V<sub>gate</sub>,
+z<sub>l</sub> · V<sub>up</sub>).</li>
+<li><b>M<sub>cl</sub></b>(<i>x</i>) = d<sub>c</sub> · MLP<sub>l</sub>(z<sub>l</sub>(<i>x</i>)) / σ(<i>x</i>): block
+<i>l</i>'s MLP term in S<sub>c</sub> (σ held at its value in the model). <b>in<sub>cl</sub></b>(<i>x</i>) =
+d<sub>c</sub> · mid<sub>l</sub>(<i>x</i>) / σ(<i>x</i>): the stream entering that MLP, along the same direction
+(mid<sub>l</sub> the stream after block <i>l</i>'s attention).</li>
+<li><b>Linear fit</b>: M<sub>cl</sub> regressed on F without intercept, fitted on the prompts with odd <i>b</i>
+and tested on those with even <i>b</i>; <b>r²<sub>lin</sub></b> = 1 − Σ (M − F w)<sup>2</sup> / Σ M<sup>2</sup> on
+the test half (uncentred). This split asks the linear map to generalise to values of <i>b</i> it was not fitted
+on.</li>
+<li><b>Removing periods</b>: for a set <i>Q</i> of exact periods τ, the part of z<sub>l</sub> that is a function of
+<i>b</i> with periods in <i>Q</i> (the frequencies <i>k</i> with τ(<i>k</i>) ∈ <i>Q</i> of the class means of
+z<sub>l</sub> over <i>b</i> mod 100, per operator) is subtracted from z<sub>l</sub> and the MLP is rerun. The
+<b>remaining fraction</b> is the range of the class means over <i>b</i> mod 50 of the new term, divided by that of
+M<sub>cl</sub>. A linear MLP fed an input with no part of period dividing 50 would give flat class means (fraction
+0), since its class means over <i>b</i> mod 50 are a linear map of the input's.</li>
+</ul>
+<p><b>The embedding.</b> Of the energy of the embedding e(<i>b</i>), <i>b</i> = 1, …, 400, summed over its 4096
+coordinates (uncentred), the exact-period-50 part holds {es[50]:.3f}; 200 random rearrangements of its rows give
+at most {emb["null50_p99"]:.3f} (99th percentile). The other shares: τ = 1 (constant) {es[1]:.3f}, τ = 2 {es[2]:.3f},
+τ = 25 {es[25]:.3f}, τ = 100 {es[100]:.3f}. Along d<sub>c</sub>, the embedding's class means over <i>b</i> mod 50
+span 0.015–0.020 (section 5.4), against 0.32–0.50 for S<sub>c</sub>.</p>
+<p><b>Held-out r²<sub>lin</sub></b> of the linear fit:</p>
+<div class="tw"><table><tr><th></th>{head}</tr>{lin}</table></div>
+<p>At block 0 the input at position 3 is close to a function of <i>b</i> alone (the embedding plus block 0's
+attention), so the fit sees about 200 distinct inputs and its held-out r² is negative (down to {r0:.1f}): there the
+test cannot tell nonlinearity from too few distinct inputs.</p>
+<p><b>Range of the class means</b> of M<sub>cl</sub> over <i>b</i> mod 50 / of the linear fit's:</p>
+<div class="tw"><table><tr><th></th>{head}</tr>{rngs}</table></div>
+<figure><img src="fig/mlp3_sharpen_add.png" alt="MLP term against its input along d_c, per block, addition">
+<figcaption>Prompts <i>a</i> + <i>b</i>: for each block, the class means over <i>b</i> mod 50 of M<sub>cl</sub>
+(solid, one point per class) against those of in<sub>cl</sub>, and the linear fit's class means (dashed). Blue
+<code>g19</code>, orange <code>g29</code>, green <code>u32</code>. Each panel has its own axes.</figcaption></figure>
+<figure><img src="fig/mlp3_sharpen_sub.png" alt="the same, subtraction">
+<figcaption>The same for prompts <i>a</i> − <i>b</i>.</figcaption></figure>
+<p><b>Remaining fraction</b> of the class-mean range after removing periods from the MLP's input, for the blocks
+with large shares of S<sub>c</sub>:</p>
+<div class="tw"><table><tr><th></th>{head}</tr>{interv}</table></div>
+<figure><img src="fig/mlp3_interv_add.png" alt="class means of the MLP term with periods removed, addition">
+<figcaption>Prompts <i>a</i> + <i>b</i>: class means of M<sub>cl</sub> (black) and of the term with each set of
+periods removed from the input. Rows: readers; columns: blocks 3, 4, 11, 12, 13, 14.</figcaption></figure>
+<figure><img src="fig/mlp3_interv_sub.png" alt="the same, subtraction">
+<figcaption>The same for prompts <i>a</i> − <i>b</i>.</figcaption></figure>
+<p class="note">Script: <code>readers/mod50_mlp3.py</code> (outputs <code>mlp3.json</code> and the figures above in
+<code>&lt;run&gt;/analysis/reader_writer/mod50_eq/</code>); the rebuilt MLP activations match the stored ones to
+{m3["mlp_rel_max_vs_stored"]:.3f} of their largest value.</p>
+"""
+
+
 def pos3_section(p3: dict) -> str:
     T = p3["targets"]
     cols = [(c, op) for c in READERS for op in OPS]
@@ -86,7 +199,7 @@ def pos3_section(p3: dict) -> str:
             ("attention of blocks 0–14 at position 3", lambda k: k.endswith("attn")),
             ("embedding of <i>b</i>", lambda k: k == "emb")]  # fmt: skip
     rows += [
-        (f"block {b} MLP", (lambda b: lambda k: k == f"L{b}.mlp")(b))
+        (f"block {b} MLP", (lambda bb: lambda k: k == f"L{bb}.mlp")(b))
         for b in (0, 3, 4, 11, 12, 13, 14)
     ]
     table = "".join(f"<tr><td>{lab}</td>{''.join(f'<td>{fmt(gsum(c, op, t))}</td>' for c, op in cols)}</tr>"
@@ -281,7 +394,7 @@ f<sub>c</sub> (term τ<sub>k</sub> Σ<sub><i>h</i></sub> p<sub>h3</sub> A<sub>ch
 """
 
 
-def page(att: dict, per: dict, chn: dict, p3: dict) -> str:
+def page(att: dict, per: dict, chn: dict, p3: dict, m3: dict) -> str:
     R = att["readers"]
     ck = att["checks"]
 
@@ -451,6 +564,7 @@ The 3D view of <code>g19</code>, <code>g29</code> and <code>u32</code> at the in
 """
         + chain_section(chn)
         + pos3_section(p3)
+        + mlp3_section(m3, emb_periods())
     )
 
 
@@ -463,11 +577,12 @@ def main() -> None:
     per = json.loads(PERIODICITY.read_text())
     chn = json.loads((SRC / "chain.json").read_text())
     p3 = json.loads((SRC / "pos3.json").read_text())
+    m3 = json.loads((SRC / "mlp3.json").read_text())
     for f in FIGS:
         shutil.copy(SRC / "fig" / f, args.out / "fig" / f)
     fig_groups(att, args.out / "fig/mod50_eq_groups.png")
     entry = ('{\nid: "mod50_eq",\ntitle: "Mod 50: the block-15 readers g19, g29 and u32 at =",\ndate: "2026-10-28",\nhtml: `'
-             + page(att, per, chn, p3) + "`\n},\n")  # fmt: skip
+             + page(att, per, chn, p3, m3) + "`\n},\n")  # fmt: skip
     p = args.out / "entries.js"
     s = (
         p.read_text()
