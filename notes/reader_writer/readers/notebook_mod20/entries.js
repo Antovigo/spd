@@ -7,8 +7,9 @@ date: "2026-10-22",
 html: `
 <p><b>Summary.</b> At the token <i>a</i>, the information that tells <i>a</i> mod 20 apart from <i>a</i> mod 10, that is,
 whether the tens digit is even or odd, sits in a single plane of the residual stream: the frequency-1 Fourier plane of
-<i>a</i> mod 20. No other frequency that separates <i>s</i> from <i>s</i> + 10 rises above a shuffled-label null at any block
-from the embedding to block 16. In that plane the 20 residues lie on a ring around the activation zero, in order. At the
+<i>a</i> mod 20. Up to block 12, no other harmonic that separates <i>s</i> from <i>s</i> + 10 can be read linearly from
+the MLP input on held-out values of <i>a</i>; harmonic 3 (period 20/3) becomes readable from block 13, when the ring has
+turned into four clumps. In that plane the 20 residues lie on a ring around the activation zero, in order. At the
 embedding the ring is nearly evenly spaced, with a larger gap where the tens digit changes (between 9 and 10, and
 between 19 and 0). The MLP of block 12 turns it into four clumps of five residues, {0–4}, {5–9}, {10–14}, {15–19}: the
 ring then carries two bits, the parity of the tens digit (<i>h</i>) and the parity of <i>a</i> rounded to the nearest ten
@@ -51,7 +52,8 @@ and <i>s</i> = <i>e</i> + 10 ("edge <i>e</i>"); <i>B</i><sub>0</sub> = <i>h</i> 
 block <i>ℓ</i> (<i>ℓ</i> = 0 is the embedding; "entering block 17" is the stream leaving block 16) or after block <i>ℓ</i>'s
 attention. <i>μ<sub>s</sub></i> ∈ ℝ<sup>4096</sup> is the mean of <i>X</i> over the 20 <i>a</i> with <i>a</i> mod 20 = <i>s</i>. For an integer
 frequency <i>j</i> ∈ 1–10, Ψ<sub><i>j</i></sub> = Σ<sub><i>s</i>=0…19</sub> <i>μ<sub>s</sub></i> exp(−2π i <i>j s</i>/20), with i the
-imaginary unit; the exact period of frequency <i>j</i> is <i>τ</i> = 20/gcd(<i>j</i>, 20). The odd frequencies <i>j</i> = 1, 3, 5, 7, 9 are
+imaginary unit; frequency (harmonic) <i>j</i> of <i>a</i> mod 20 has period 20/<i>j</i> in <i>a</i>, and for even <i>j</i> it is
+harmonic <i>k</i> = <i>j</i>/2 of <i>a</i> mod 10, of the same period 10/<i>k</i>. The odd frequencies <i>j</i> = 1, 3, 5, 7, 9 are
 exactly the ones in which residues <i>s</i> and <i>s</i> + 10 differ, so they hold everything <i>a</i> mod 20 adds to
 <i>a</i> mod 10 (the even frequencies are the <i>a</i> mod 10 representation of the mod-10 page). null<sub><i>j</i></sub> is the 99th
 percentile of ‖Ψ<sub><i>j</i></sub>‖ over 100 random relabellings of the 400 values of <i>a</i>. <i>P</i> (a 4096 × 2 matrix with
@@ -74,13 +76,79 @@ accuracies fit the plane and the class means on the <i>a</i> ≤ 200 half and te
 among 4 classes (chance 0.25), <i>s</i> among 20 (0.05), and <i>h</i> given <i>r</i> (choose between residues <i>r</i> and <i>r</i> + 10; 0.5).</p>
 
 <h3>1. One plane carries what a mod 20 adds to a mod 10</h3>
-<p>Figure 1 compares the strength of each frequency with what shuffled labels give. Of the five odd frequencies, only
-<i>j</i> = 1 is above its null: ‖Ψ<sub>1</sub>‖/null<sub>1</sub> is 1.14–2.19 (components) and
-1.48–2.20 (neurons) over the 18 boundaries, while <i>j</i> = 3, 5, 7, 9 stay at
-0.40–0.66 (components) and 0.61–0.82 (neurons) of
-their nulls from block 1 to block 15. At the embedding they reach 1.01, and leaving block 16
-1.00 (components) and 1.08 (neurons). The period-20 information is therefore
-in one plane, <i>P</i>.</p>
+<p><b>Which harmonics can be read.</b> Figures 1a and 1b ask, for every harmonic <i>j</i> = 1–10 of <i>a</i> mod 20 and the MLP
+of every block <i>ℓ</i> = 0–16, whether the harmonic can be read linearly from what that MLP sees, on values of <i>a</i> the
+read never saw. The MLP input is <i>x</i>(<i>a</i>) = RMSNorm(<i>X</i>(<i>a</i>)) ∈ ℝ<sup>4096</sup>, with <i>X</i> the stream after
+block <i>ℓ</i>'s attention and the norm's learned gain included. A ridge regression without intercept predicts the two numbers
+cos(2π<i>j a</i>/20) and sin(2π<i>j a</i>/20) from <i>x</i>(<i>a</i>) (at <i>j</i> = 10 the sine is 0 for every integer <i>a</i> and is
+dropped). The 400 values of <i>a</i> are split into 5 folds of 80; each fold holds 4 of the 20 values of every residue
+<i>s</i>. Each fold is predicted by a regression fitted on the other 320 values, so every <i>a</i> is predicted once, by a fit
+that never saw it. The ridge penalty is chosen for each fold, block and harmonic by a 4-fold cross-validation inside the
+320 training values, on a grid from 10<sup>−12</sup> to 10<sup>2</sup> times the largest squared singular value of the training
+inputs. The held-out r² is 1 − Σ(prediction − target)² / Σ target², summed over the 400 predictions and the two targets. It is
+1 for a perfect read and 0 for predicting 0, and it is negative when the predictions are worse than 0.</p>
+<p>The rows are periods: harmonic <i>j</i> of <i>a</i> mod 20 has period 20/<i>j</i>. The even harmonics <i>j</i> = 2<i>k</i> are harmonic
+<i>k</i> of <i>a</i> mod 10 (periods 10, 5, 10/3, 5/2 and 2), and they take the same value at <i>s</i> and <i>s</i> + 10. The odd
+harmonics (periods 20, 20/3, 4, 20/7 and 20/9) are the only ones that tell <i>s</i> from <i>s</i> + 10.</p>
+<ul>
+<li>Period 20 (<i>j</i> = 1): r² = 0.83 at block 0, then 0.94–0.97 (components)
+and 0.89–0.96 (neurons) in blocks 1–16.</li>
+<li>Periods 20/3, 20/7 and 20/9 (<i>j</i> = 3, 7, 9): r² ≤ 0.00
+in blocks 0–12 in both models. <i>j</i> = 3 then rises: 0.30, 0.35, 0.57, 0.71 in blocks
+13–16 (components) and 0.01, 0.10, 0.39, 0.58 (neurons). <i>j</i> = 7 and 9 stay at 0
+in every block.</li>
+<li>Period 4 (<i>j</i> = 5): 0.27 at block 0, 0.04–0.18 (components) and
+0.00–0.12 (neurons) in blocks 1–14, and 0.52–0.53 and 0.45–0.59 in
+blocks 15–16.</li>
+<li>The mod-10 harmonics (even <i>j</i>): periods 10, 5 and 2 stay at 0.99, 0.98–0.99
+and 0.98–0.99 (components) from block 1. Periods 10/3 and 5/2 are at 0.83–0.86 and
+0.87–0.88 in blocks 1–11 and reach 0.98 and 0.98 at block 16.
+In the original model these two fall to minima of 0.50 and 0.55 in blocks 8–11
+and recover to 0.96 and 0.97 at block 16.</li>
+</ul>
+<p>Up to block 12, then, all of what <i>a</i> mod 20 adds to <i>a</i> mod 10 that a linear read can recover on new values of
+<i>a</i> is in the period-20 sinusoid, apart from a weak period-4 signal (r² ≤ 0.18
+after block 0).</p>
+<p><b>Does the penalty cause false negatives?</b> With 320 training values and 4096 input dimensions, an unpenalised least-squares
+fit is not unique, so the smallest penalty on the grid (10<sup>−12</sup>) stands in for "no penalty" (the minimum-norm fit). On every
+cell where the cross-validated r² exceeds 0.3, the minimum-norm fit gives the same held-out r² to within
+0.07.
+On the cells near 0, the minimum-norm fit is negative, down to −1.69:
+it fits the training values exactly and predicts new values worse than 0. There the inner cross-validation picks the
+largest penalty, which predicts close to 0.</p>
+<figure><img src="fig/mod20_harmonics_alive.png"><figcaption>Figure 1a. Components model. Held-out r² of cos and
+sin(2π<i>j a</i>/20) read linearly from the input of block <i>ℓ</i>'s MLP (columns) at the token <i>a</i>, for every harmonic
+<i>j</i> of <i>a</i> mod 20 (rows, labelled by the period 20/<i>j</i>; for even <i>j</i> also by <i>k</i> = <i>j</i>/2, the harmonic of
+<i>a</i> mod 10). Negative values are coloured as 0.</figcaption></figure>
+<figure><img src="fig/mod20_harmonics_orig.png"><figcaption>Figure 1b. As figure 1a, original model.</figcaption></figure>
+
+<p><b>The mod-20 plane and the mod-10 subspace.</b> At the MLP input of each block, <i>P</i> is the frequency-1 plane of
+<i>a</i> mod 20, built from the residue means of <i>x</i> as in section 0.2. <i>D</i><sub>10</sub> (a 4096 × 9 matrix with
+orthonormal columns) spans the real and imaginary parts of Φ<sub><i>k</i></sub> = Σ<sub><i>r</i>=0…9</sub> <i>ν<sub>r</sub></i>
+exp(−2π i <i>k r</i>/10) for <i>k</i> = 1–5, where <i>ν<sub>r</sub></i> is the mean of <i>x</i> over the 40 values of <i>a</i> with
+<i>a</i> mod 10 = <i>r</i>; Im Φ<sub>5</sub> = 0, so the span has 9 dimensions. <i>D</i><sub>10</sub> is the mod-10 representation. Neither
+<i>P</i> nor <i>D</i><sub>10</sub> contains the mean of <i>x</i> over all <i>a</i>. The overlap between them is measured by
+their two principal cosines: the singular values of <i>P</i><sup>T</sup><i>D</i><sub>10</sub>. They are 1 for a direction of
+<i>P</i> that lies in <i>D</i><sub>10</sub> and 0 for one orthogonal to it.</p>
+<p>The overlap is small (figure 1c). The largest cosine grows from 0.05 at block 0 to
+0.34 at block 11 in the components model, then falls to
+0.12–0.14 in blocks 14–16. In the original model it peaks at 0.20. The second cosine stays
+at or below 0.18 (components) and 0.09 (neurons). A random 9-dimensional subspace gives
+a largest cosine of 0.08 (99th percentile of 200 draws). Removing <i>D</i><sub>10</sub>, that is, replacing
+<i>x</i> by <i>x</i> − <i>D</i><sub>10</sub><i>D</i><sub>10</sub><sup>T</sup><i>x</i>, keeps
+0.74–0.99 (components) and 0.92–0.99 (neurons) of the spread of the 20 residue means in
+<i>P</i> (their sum of squared distances to their own average). Figures 1d and 1e show the clouds in <i>P</i> before and after
+the removal: the ring and, from block 13, the four clumps remain in the bottom row.</p>
+<figure><img src="fig/mod20_vs_mod10_overlap.png"><figcaption>Figure 1c. Principal cosines between the mod-20 plane
+<i>P</i> and the 9-dimensional mod-10 subspace <i>D</i><sub>10</sub> at the input of each block's MLP. Solid: components model;
+dashed: original model. Dotted: the largest cosine of <i>P</i> with a random 9-dimensional subspace, 99th
+percentile.</figcaption></figure>
+<figure><img src="fig/mod20_vs_mod10_alive.png"><figcaption>Figure 1d. Components model. The 400 prompts at the input of
+six blocks' MLPs projected on <i>P</i> (top: <i>P</i><sup>T</sup><i>x</i>) and with the mod-10 subspace removed first (bottom:
+<i>P</i><sup>T</sup>(<i>x</i> − <i>D</i><sub>10</sub><i>D</i><sub>10</sub><sup>T</sup><i>x</i>)). Colour and numbers: <i>s</i> = <i>a</i> mod 20,
+each number at its residue's mean. Same axes in both rows; the origin is the activation zero.</figcaption></figure>
+<figure><img src="fig/mod20_vs_mod10_orig.png"><figcaption>Figure 1e. As figure 1d, original model.</figcaption></figure>
+
 <p>A held-out linear probe checks that nothing linear is missed (figure 7d). An L2 logistic regression (inverse
 regularisation 1) is trained to predict <i>h</i> on the prompts with <i>a</i> ≤ 200 and tested on <i>a</i> &gt; 200, and the
 reverse; the plane used is fitted on the training half only. From the two coordinates <i>z</i> alone it reaches
@@ -94,10 +162,6 @@ whole stream beats the plane alone (for example 0.90 against
 0.67 entering block 11), while the stream without the plane stays at
 0.54: other directions do not carry <i>h</i> themselves but help the probe
 remove the spread of the clouds in the plane (section 5).</p>
-<figure><img src="fig/mod20_fourier.png"><figcaption>Figure 1. ‖Ψ<sub><i>j</i></sub>‖/null<sub><i>j</i></sub> for
-every frequency <i>j</i> of <i>a</i> mod 20 (rows; <i>τ</i> its exact period) at the residual stream entering each block
-(columns). White contour: 1, the 99th percentile of shuffled labels. Odd <i>j</i> (τ = 20 or 4) separate <i>s</i> from
-<i>s</i> + 10; only <i>j</i> = 1 is above 1. Even <i>j</i> are the <i>a</i> mod 10, mod 5 and mod 2 representations.</figcaption></figure>
 
 <h3>2. Geometry: a ring of the 20 residues, which turns into four clumps</h3>
 <p>Figure 2 shows the 400 prompts in the plane at several blocks. The residues sit on a ring around the activation zero,
@@ -304,7 +368,7 @@ block.</p>
 
 <h3>7. Components against neurons</h3>
 <ul>
-<li>One plane, the frequency-1 plane of <i>a</i> mod 20, holds the period-20 information at every block: both models (figure 1,
+<li>One plane, the frequency-1 plane of <i>a</i> mod 20, holds the period-20 information up to block 12: both models (figures 1a–1b,
 probes in figure 7d).</li>
 <li>A ring that turns into four quarter clumps in blocks 12–13: both (figures 2–3; <i>α</i> 0.47 vs
 0.58 entering block 14).</li>
