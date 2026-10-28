@@ -34,6 +34,8 @@ FIGS = (
     "chain_classmeans_sub.png",
     "chain_pattern_add.png",
     "chain_pattern_sub.png",
+    "pos3_add.png",
+    "pos3_sub.png",
 )
 POS, NEG = "#2a5db0", "#c0392b"
 
@@ -63,6 +65,95 @@ def fig_groups(att: dict, path: Path) -> None:
     axs[-1].set_xticks(range(len(keys)), keys, rotation=80, fontsize=6)
     fig.savefig(path)
     plt.close(fig)
+
+
+def pos3_section(p3: dict) -> str:
+    T = p3["targets"]
+    cols = [(c, op) for c in READERS for op in OPS]
+    head = "".join(f"<th>{short(c)}, a {op} b</th>" for c, op in cols)
+
+    def S(c: str, op: str) -> dict:
+        return T[f"S[{c}]{op}"][op]
+
+    def gsum(c: str, op: str, test) -> float:  # noqa: ANN001
+        return sum(v["share"] for k, v in S(c, op)["groups"].items() if test(k))
+
+    def blk(k: str) -> int:
+        return -1 if k == "emb" else int(k.split(".")[0][1:])
+
+    rows = [("MLPs of blocks 11–14", lambda k: k.endswith("mlp") and blk(k) >= 11),
+            ("MLPs of blocks 0–10", lambda k: k.endswith("mlp") and 0 <= blk(k) <= 10),
+            ("attention of blocks 0–14 at position 3", lambda k: k.endswith("attn")),
+            ("embedding of <i>b</i>", lambda k: k == "emb")]  # fmt: skip
+    rows += [
+        (f"block {b} MLP", (lambda b: lambda k: k == f"L{b}.mlp")(b))
+        for b in (0, 3, 4, 11, 12, 13, 14)
+    ]
+    table = "".join(f"<tr><td>{lab}</td>{''.join(f'<td>{fmt(gsum(c, op, t))}</td>' for c, op in cols)}</tr>"
+                    for lab, t in rows)  # fmt: skip
+    g = p3["groups"]
+    after = ["emb", "L3.mlp", "L4.mlp", "L10.mlp", "L11.mlp", "L12.mlp", "L13.mlp", "L14.mlp"]
+
+    def ptp(c: str, op: str, k: str) -> str:
+        v = S(c, op)["classmean_cum"][g.index(k)]
+        return f"{max(v) - min(v):.3f}"
+
+    span = "".join(f"<tr><td>{'the embedding' if k == 'emb' else 'block ' + k.split('.')[0][1:] + ' MLP'}</td>"
+                   + "".join(f"<td>{ptp(c, op, k)}</td>" for c, op in cols) + "</tr>" for k in after)  # fmt: skip
+    tops = "".join(f"<tr><td>{short(c)}, a {op} b</td><td>{', '.join(f'<code>{t['writer']}</code> {fmt(t['share'])}' for t in S(c, op)['top'][:8])}</td></tr>"
+                   for c, op in cols)  # fmt: skip
+    vrows = "".join(
+        f"<tr><td><code>{v}</code></td>" + "".join(
+            "<td>" + ", ".join(f"{k} {fmt(x['share'])}" for k, x in sorted(T[v][op]["groups"].items(),
+                                                                           key=lambda kv: -abs(kv[1]["share"]))[:3])
+            + "; " + ", ".join(f"<code>{t['writer']}</code> {fmt(t['share'])}" for t in T[v][op]["top"][:3]) + "</td>"
+            for op in OPS) + "</tr>"
+        for v in p3["main_v"])  # fmt: skip
+    ck = p3["checks"]
+    return f"""
+<h3>5. Where the copied v activations come from at the token b</h3>
+<p>Section 4 showed that, with the attention pattern held at its mean, block 15 copies to “=” a fixed linear
+combination of the <code>v</code> activations at the token <i>b</i>. This section splits that combination, at
+position 3, into the writers upstream of block 15. Notation, besides that of the setup and of section 4:</p>
+<ul>
+<li>X<sub>3</sub>(<i>x</i>) ∈ ℝ<sup>4096</sup>: pre<sub>15</sub> at position 3, the stream entering block 15 at the
+token <i>b</i>; σ(<i>x</i>) = (mean<sub><i>j</i></sub> X<sub>3,<i>j</i></sub>(<i>x</i>)<sup>2</sup> +
+10<sup>−5</sup>)<sup>1/2</sup> its RMS; γ<sub>1</sub> ∈ ℝ<sup>4096</sup> the gain of block 15's input RMSNorm, so
+τ<sub>k</sub> = V<sub>k</sub> · (γ<sub>1</sub> ⊙ X<sub>3</sub>) / σ.</li>
+<li><b>S<sub>c</sub></b> = Σ<sub><i>k</i></sub> W<sub>ck</sub> τ<sub>k</sub>, W<sub>ck</sub> =
+Σ<sub><i>h</i></sub> p̄<sub>h</sub> A<sub>chk</sub> (per operator): what the constant pattern carries to reader
+<i>c</i>, so E<sub>c</sub><sup>const</sup> = S<sub>c</sub> / ρ at “=”. S<sub>c</sub> = d<sub>c</sub> ·
+X<sub>3</sub> / σ with d<sub>c</sub> = γ<sub>1</sub> ⊙ Σ<sub><i>k</i></sub> W<sub>ck</sub> V<sub>k</sub>.</li>
+<li>Writers at position 3: the embedding of the token <i>b</i>, and every alive attention <code>o</code> and MLP
+<code>down</code> component of blocks 0–14 (activation t<sub>w</sub> at position 3, write vector U<sub>w</sub>).
+Writer <i>w</i>'s term in S<sub>c</sub> is t<sub>w</sub> (d<sub>c</sub> · U<sub>w</sub>) / σ; the terms add up to
+S<sub>c</sub> exactly, and shares are uncentred as before (Σ term · S<sub>c</sub> / Σ S<sub>c</sub><sup>2</sup>,
+per operator).</li>
+<li><b>Range of the class means</b> after a block: the largest minus the smallest, over <i>r</i> ∈ {{0, …, 49}}, of
+the mean over the prompts with <i>b</i> mod 50 = <i>r</i> of the sum of the terms written up to and including that
+block's MLP (the embedding first, then each block's attention and MLP in order). After block 14 the sum is
+S<sub>c</sub> itself.</li>
+</ul>
+<p><b>Checks.</b> The rebuilt τ<sub>k</sub> match the stored <code>v</code> activations to {ck["tau_rel_max"]:.3f}
+of their largest value; σ ranges from {ck["sigma_min"]:.3f} to {ck["sigma_max"]:.3f} over the prompts.</p>
+<p><b>Shares of S<sub>c</sub></b>:</p>
+<div class="tw"><table><tr><th></th>{head}</tr>{table}</table></div>
+<p><b>Range of the class means of the partial sum</b>, after the embedding and after selected blocks' MLPs:</p>
+<div class="tw"><table><tr><th>after</th>{head}</tr>{span}</table></div>
+<figure><img src="fig/pos3_add.png" alt="build-up of S over blocks, addition">
+<figcaption>Prompts <i>a</i> + <i>b</i>. Top: class means over <i>b</i> mod 50 of the partial sum of
+S<sub>c</sub>'s terms up to each block's MLP (dark: early blocks, yellow: late; thick: after block 14, i.e.
+S<sub>c</sub>). Bottom: shares of S<sub>c</sub> by group.</figcaption></figure>
+<figure><img src="fig/pos3_sub.png" alt="build-up of S over blocks, subtraction">
+<figcaption>The same for prompts <i>a</i> − <i>b</i>.</figcaption></figure>
+<p><b>The eight writers with the largest |share| of S<sub>c</sub></b>:</p>
+<div class="tw"><table><tr><th></th><th>writers (share)</th></tr>{tops}</table></div>
+<p><b>The main v components one by one</b> (the main <code>v</code> components of section 4, any reader): the three
+groups and the three writers with the largest |share| of each τ<sub>k</sub>.</p>
+<div class="tw"><table><tr><th>v</th><th>a + b</th><th>a − b</th></tr>{vrows}</table></div>
+<p class="note">Script: <code>readers/mod50_pos3.py</code> (outputs <code>pos3.json</code> and the figures above in
+<code>&lt;run&gt;/analysis/reader_writer/mod50_eq/</code>).</p>
+"""
 
 
 def chain_section(chn: dict) -> str:
@@ -190,7 +281,7 @@ f<sub>c</sub> (term τ<sub>k</sub> Σ<sub><i>h</i></sub> p<sub>h3</sub> A<sub>ch
 """
 
 
-def page(att: dict, per: dict, chn: dict) -> str:
+def page(att: dict, per: dict, chn: dict, p3: dict) -> str:
     R = att["readers"]
     ck = att["checks"]
 
@@ -244,7 +335,8 @@ def page(att: dict, per: dict, chn: dict) -> str:
 
     lo = min(g(c, op, "L15.attn.b") for c, op in cols)
     hi = max(g(c, op, "L15.attn.b") for c, op in cols)
-    return f"""
+    return (
+        f"""
 <p><b>Summary.</b> At the token “=”, the block-15 readers <code>g19</code>, <code>g29</code> (gate) and
 <code>u32</code> (up) carry a pattern of <i>b</i> mod 50. Their activation there splits exactly into one term per
 upstream writer. The block-15
@@ -356,7 +448,10 @@ The first panel repeats mid<sub>15</sub>. All panels of a figure share the same 
 <code>&lt;run&gt;/analysis/reader_writer/mod50_eq/</code>) and <code>readers/mod50_eq_page.py</code> (this page).
 The 3D view of <code>g19</code>, <code>g29</code> and <code>u32</code> at the input of block 15's MLP is at
 <a href="{APPLET}">Mod 50 reader space</a> (<code>readers/mod50_applet.py</code>).</p>
-""" + chain_section(chn)
+"""
+        + chain_section(chn)
+        + pos3_section(p3)
+    )
 
 
 def main() -> None:
@@ -367,11 +462,12 @@ def main() -> None:
     att = json.loads((SRC / "attribution.json").read_text())
     per = json.loads(PERIODICITY.read_text())
     chn = json.loads((SRC / "chain.json").read_text())
+    p3 = json.loads((SRC / "pos3.json").read_text())
     for f in FIGS:
         shutil.copy(SRC / "fig" / f, args.out / "fig" / f)
     fig_groups(att, args.out / "fig/mod50_eq_groups.png")
     entry = ('{\nid: "mod50_eq",\ntitle: "Mod 50: the block-15 readers g19, g29 and u32 at =",\ndate: "2026-10-28",\nhtml: `'
-             + page(att, per, chn) + "`\n},\n")  # fmt: skip
+             + page(att, per, chn, p3) + "`\n},\n")  # fmt: skip
     p = args.out / "entries.js"
     s = (
         p.read_text()
