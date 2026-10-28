@@ -45,7 +45,7 @@ PAGES = {
     "mod10-neurons": ("notebook_neurons", "Mod 10 representations in the neuron basis"),
     "mod2_l3": ("notebook_mod2", "Mod 2: block-3 d189 and the parity line"),
     "mod20": ("notebook_mod20", "Mod 20 representation at a (position 1)"),
-    "mod50_eq": ("notebook_mod50", "Mod 50: the block-15 readers g19 and g29 at ="),
+    "mod50_eq": ("notebook_mod50", "Mod 50: the block-15 readers g19, g29 and u32 at ="),
 }
 # period -> {"title", "pages" (preface order), "parts": [[(page id, old section number), ...] x 5]}
 LAYOUT = {
@@ -84,7 +84,7 @@ LAYOUT = {
     "mod50": {
         "title": "Mod 50 representations",
         "pages": ["mod50_eq"],
-        "parts": [[], [], [("mod50_eq", 1)], [], [("mod50_eq", 2), ("mod50_eq", 3)]],
+        "parts": [[], [], [("mod50_eq", 1)], [], [("mod50_eq", 2), ("mod50_eq", 3), ("mod50_eq", 4)]],
         "refs": {},
     },
 }  # fmt: skip
