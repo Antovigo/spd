@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Residual-stream RMS — addsub -08</title>
+<title>RMSNorm divisors — addsub -08</title>
 <style>
   :root {
     --surface: #fcfcfb; --ink: #1d1d1b; --ink2: #55554f; --muted: #8a8a83; --rule: #e4e3df;
@@ -58,7 +58,7 @@
 </style>
 </head>
 <body>
-<h1>Residual-stream RMS on the addsub pool — Llama-3.1-8B vs two masked decompositions</h1>
+<h1>RMSNorm divisors on the addsub pool — Llama-3.1-8B vs two masked decompositions</h1>
 <div class="defs" id="defs"></div>
 
 <div class="controls" role="toolbar">
@@ -79,14 +79,18 @@
 window.RMS_DATA = {};
 const M = window.RMS_META, N = M.n_side;
 const MODEL_TITLE = {original: "Original (Llama-3.1-8B)", ci_masked: "CI-masked decomposition",
-                     alive_only: "Alive-only decomposition"};
+                     alive_only: "Alive-only decomposition", ratio: "Ratio CI-masked / original"};
+// diverging blue <- grey (ratio 1) -> red, for the ratio panel
+const DIV = ["#184f95","#2a78d6","#6da7ec","#b7d3f6","#f0efec","#f6c8c5","#ec8f8c","#e34948","#a32f2f"]
+  .map(h => [1,3,5].map(i => parseInt(h.slice(i,i+2),16)));
 // sequential blue, steps 100..700 (light = panel minimum, dark = panel maximum)
 const RAMP = ["#cde2fb","#b7d3f6","#9ec5f4","#86b6ef","#6da7ec","#5598e7","#3987e5","#2a78d6",
               "#256abf","#1c5cab","#184f95","#104281","#0d366b"].map(h => [1,3,5].map(i => parseInt(h.slice(i,i+2),16)));
 const LUT = new Uint8Array(256 * 3);
-for (let i = 0; i < 256; i++) {
-  const x = i / 255 * (RAMP.length - 1), j = Math.min(Math.floor(x), RAMP.length - 2), f = x - j;
-  for (let c = 0; c < 3; c++) LUT[3*i+c] = Math.round(RAMP[j][c] * (1-f) + RAMP[j+1][c] * f);
+const DLUT = new Uint8Array(256 * 3);
+for (const [lut, ramp] of [[LUT, RAMP], [DLUT, DIV]]) for (let i = 0; i < 256; i++) {
+  const x = i / 255 * (ramp.length - 1), j = Math.min(Math.floor(x), ramp.length - 2), f = x - j;
+  for (let c = 0; c < 3; c++) lut[3*i+c] = Math.round(ramp[j][c] * (1-f) + ramp[j+1][c] * f);
 }
 const state = {op: 0, t: 4, p: 36};
 const cache = {};
@@ -103,15 +107,18 @@ document.getElementById("defs").innerHTML = `
 <p>Each prompt is <code>a+b=</code> or <code>a-b=</code> with integer operands <b>a</b>, <b>b</b> in 1..400 (320,000 prompts, run
 <code>${M.source.run_dir.split("/").pop()}</code>, step ${M.source.step}, CI filter <code>${M.source.filter}</code>).
 Each heatmap cell is one prompt: row = a (1 at the top), column = b (1 at the left).</p>
-<p><b>r</b> = √(mean over the 4,096 dimensions of x²), where x is the raw residual-stream vector (before any norm, no centring, no ε) at
-stream point <b>p</b> and token position <b>t</b>. Points p = 0..64: p = 0 is the embedding; for block index <b>l</b> = 0..31,
+<p>Each value is the divisor <b>s</b> = √(r² + ε) that an RMSNorm applies, where <b>r</b> = √(mean over the 4,096 dimensions of x²),
+<b>x</b> is the raw residual-stream vector (no centring) at stream point <b>p</b> and token position <b>t</b>, and <b>ε</b> = ${M.eps}
+is Llama-3.1-8B's <code>rms_norm_eps</code>; the norm outputs g ⊙ x / s with <b>g</b> its learned gain vector. Points p = 0..64: p = 0 is the embedding; for block index <b>l</b> = 0..31,
 p = 2l + 1 is after block l's attention add and p = 2l + 2 after its MLP add — point p is the input of the p-th RMSNorm.
 Positions t = 0..4 are the tokens &lt;BOS&gt;, a, op, b, =.</p>
 <p><b>Original</b>: Llama-3.1-8B. <b>CI-masked</b>: on each prompt and position, exactly the components whose filter CI on the original
 model's activations exceeds ${M.source.threshold} are on; all other components and the weight delta are off
 (last-position KL to the original, pool mean: ${M.kl_mean.ci_masked.toFixed(4)} nats). <b>Alive-only</b>: all 15,768 alive components
 of the filter on at every prompt and position; all others and the delta off (KL ${M.kl_mean.alive_only.toFixed(4)} nats).
-Every panel has its own linear colour scale, from its minimum (lightest) to its maximum (darkest).</p>`;
+The first three panels each have their own linear colour scale, from the panel's minimum (lightest) to its maximum (darkest).
+The fourth panel is the per-prompt ratio s<sub>CI-masked</sub> / s<sub>original</sub>: grey = 1, blue &lt; 1 (CI-masked stream smaller),
+red &gt; 1; its scale is symmetric about 1, out to the panel's largest |ratio − 1|.</p>`;
 
 function seg(el, labels, key) {
   labels.forEach((lab, i) => {
@@ -124,7 +131,7 @@ function seg(el, labels, key) {
 seg(document.getElementById("opSeg"), ["a + b", "a − b"], "op");
 seg(document.getElementById("posSeg"), M.positions.map((s, i) => `${i}: ${s}`), "t");
 
-const panels = M.models.map((m, mi) => {
+const panels = [...M.models, "ratio"].map((m, mi) => {
   const div = document.createElement("div");
   div.className = "panel";
   div.innerHTML = `<h2></h2><div class="sub"></div>
@@ -143,13 +150,14 @@ const panels = M.models.map((m, mi) => {
     div.querySelector(".xaxis").appendChild(x);
   }
   const cb = div.querySelector(".cbar"), cctx = cb.getContext("2d"), img = cctx.createImageData(1, 256);
-  for (let i = 0; i < 256; i++) { const k = 255 - i; img.data.set([LUT[3*k], LUT[3*k+1], LUT[3*k+2], 255], 4*i); }
+  const lut = m === "ratio" ? DLUT : LUT;
+  for (let i = 0; i < 256; i++) { const k = 255 - i; img.data.set([lut[3*k], lut[3*k+1], lut[3*k+2], 255], 4*i); }
   cctx.putImageData(img, 0, 0);
   document.getElementById("panels").appendChild(div);
   const heat = div.querySelector("canvas.heat");
   heat.addEventListener("pointermove", e => hover(e, heat));
   heat.addEventListener("pointerleave", unhover);
-  return {div, heat, ctx: heat.getContext("2d"), m, mi};
+  return {div, heat, ctx: heat.getContext("2d"), m, mi, g0: m === "ratio" ? 6 : mi * 2};
 });
 
 function load(p, t) {
@@ -187,30 +195,34 @@ async function render() {
   document.getElementById("status").textContent = pointDesc(p);
   current = d;
   for (const pn of panels) {
-    const g = pn.mi * 2 + op, lo = d.lo[g], hi = d.hi[g], off = g * N * N;
+    const g = pn.g0 + op, lo = d.lo[g], hi = d.hi[g], off = g * N * N, ratio = pn.m === "ratio";
+    const h = Math.max(Math.abs(lo - 1), Math.abs(hi - 1)) || 1, lut = ratio ? DLUT : LUT;
     const img = pn.ctx.createImageData(N, N);
     let sum = 0;
     for (let i = 0; i < N * N; i++) {
-      const qv = d.q[off + i], k = qv >> 8;
-      img.data[4*i] = LUT[3*k]; img.data[4*i+1] = LUT[3*k+1]; img.data[4*i+2] = LUT[3*k+2]; img.data[4*i+3] = 255;
-      sum += lo + qv / 65535 * (hi - lo);
+      const qv = d.q[off + i], v = lo + qv / 65535 * (hi - lo);
+      const k = ratio ? Math.min(255, Math.max(0, Math.round(((v - 1) / h + 1) * 127.5))) : qv >> 8;
+      img.data[4*i] = lut[3*k]; img.data[4*i+1] = lut[3*k+1]; img.data[4*i+2] = lut[3*k+2]; img.data[4*i+3] = 255;
+      sum += v;
     }
     pn.ctx.putImageData(img, 0, 0);
     const constant = hi === lo;
-    pn.div.querySelector(".const").textContent = constant ? `constant over the pool: r = ${fmt(lo)}` : "";
+    pn.div.querySelector(".const").textContent = constant ? `constant over the pool: ${ratio ? "ratio" : "s"} = ${ratio ? lo.toFixed(5) : fmt(lo)}` : "";
     pn.div.querySelector(".sub").textContent = constant ? "" :
       `min ${fmt(lo)} · mean ${fmt(sum / (N * N))} · max ${fmt(hi)}`;
     const ticks = pn.div.querySelector(".cbar-ticks");
     ticks.replaceChildren();
     if (!constant) for (const f of [0, 0.25, 0.5, 0.75, 1]) {
-      const s = document.createElement("span"); s.textContent = fmt(lo + f * (hi - lo)); s.style.top = `${(1 - f) * 100}%`;
+      const s = document.createElement("span");
+      s.textContent = ratio ? (1 + (2 * f - 1) * h).toFixed(4) : fmt(lo + f * (hi - lo));
+      s.style.top = `${(1 - f) * 100}%`;
       ticks.appendChild(s);
     }
   }
 }
 
-function value(d, mi, op, a, b) {
-  const g = mi * 2 + op;
+function value(d, g0, op, a, b) {
+  const g = g0 + op;
   return d.lo[g] + d.q[g * N * N + (a - 1) * N + (b - 1)] / 65535 * (d.hi[g] - d.lo[g]);
 }
 
@@ -232,11 +244,11 @@ function hover(e, heat) {
   const tbl = document.createElement("table");
   const orig = value(current, 0, state.op, a, b);
   panels.forEach(pn => {
-    const v = value(current, pn.mi, state.op, a, b), tr = document.createElement("tr");
-    const c1 = document.createElement("td"); c1.className = "v"; c1.textContent = `r = ${fmt(v)}`;
+    const v = value(current, pn.g0, state.op, a, b), tr = document.createElement("tr"), ratio = pn.m === "ratio";
+    const c1 = document.createElement("td"); c1.className = "v"; c1.textContent = ratio ? `${v.toFixed(5)}` : `s = ${fmt(v)}`;
     const c2 = document.createElement("td"); c2.className = "l"; c2.textContent = MODEL_TITLE[pn.m];
     const c3 = document.createElement("td"); c3.className = "l";
-    c3.textContent = pn.mi ? `${((v / orig - 1) * 100).toFixed(2)} % vs original` : "";
+    c3.textContent = pn.mi && !ratio ? `${((v / orig - 1) * 100).toFixed(2)} % vs original` : "";
     tr.append(c1, c2, c3); tbl.appendChild(tr);
   });
   tip.appendChild(tbl);
