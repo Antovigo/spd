@@ -28,11 +28,11 @@
   .point button { border: 1px solid var(--rule); background: var(--panel); border-radius: 6px;
                   padding: 3px 9px; cursor: pointer; font: inherit; }
   #pointLabel { font-variant-numeric: tabular-nums; min-width: 170px; font-weight: 600; }
-  .panels { display: flex; flex-wrap: wrap; gap: 26px; }
-  .panel { background: var(--panel); border: 1px solid var(--rule); border-radius: 8px; padding: 12px 14px 10px; }
+  .panels { display: grid; grid-template-columns: repeat(2, max-content); gap: 16px; }
+  .panel { background: var(--panel); border: 1px solid var(--rule); border-radius: 8px; padding: 10px 10px 8px; }
   .panel h2 { font-size: 14px; margin: 0 0 2px; font-weight: 600; }
   .panel .sub { color: var(--muted); font-size: 12px; margin-bottom: 8px; min-height: 17px; }
-  .plot { display: grid; grid-template-columns: 30px 400px 14px 58px; grid-template-rows: 400px 20px;
+  .plot { display: grid; grid-template-columns: 30px 400px 14px 46px; grid-template-rows: 400px 20px;
           column-gap: 4px; }
   .yaxis, .xaxis, .cbar-ticks { position: relative; color: var(--muted); font-size: 11px;
                                 font-variant-numeric: tabular-nums; }
@@ -118,7 +118,10 @@ model's activations exceeds ${M.source.threshold} are on; all other components a
 of the filter on at every prompt and position; all others and the delta off (KL ${M.kl_mean.alive_only.toFixed(4)} nats).
 The first three panels each have their own linear colour scale, from the panel's minimum (lightest) to its maximum (darkest).
 The fourth panel is the per-prompt ratio s<sub>CI-masked</sub> / s<sub>original</sub>: grey = 1, blue &lt; 1 (CI-masked stream smaller),
-red &gt; 1; its scale is symmetric about 1, out to the panel's largest |ratio − 1|.</p>`;
+red &gt; 1; its scale is symmetric about 1, out to the panel's largest |ratio − 1|.</p>
+<p>The CI fn is a bidirectional transformer, so the CI-masked model's masks at a position depend on later tokens too: its stream at
+t = 1 (a) and t = 2 (op) varies with b, and at t = 0 (&lt;BOS&gt;) with the whole prompt. The original and alive-only streams at t
+depend only on tokens 0..t.</p>`;
 
 function seg(el, labels, key) {
   labels.forEach((lab, i) => {
