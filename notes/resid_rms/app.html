@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Residual-stream RMS — addsub -08</title>
+<style>
+  :root {
+    --surface: #fcfcfb; --ink: #1d1d1b; --ink2: #55554f; --muted: #8a8a83; --rule: #e4e3df;
+    --panel: #ffffff; --accent: #2a78d6;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 20px 28px; background: var(--surface); color: var(--ink);
+         font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  h1 { font-size: 19px; margin: 0 0 6px; font-weight: 600; }
+  .defs { color: var(--ink2); max-width: 1180px; margin: 0 0 14px; }
+  .defs p { margin: 4px 0; }
+  code { font-size: 12.5px; }
+  .controls { display: flex; flex-wrap: wrap; gap: 18px; align-items: center; padding: 10px 0 14px;
+              border-bottom: 1px solid var(--rule); margin-bottom: 16px; }
+  .controls label { color: var(--ink2); font-size: 13px; }
+  .seg { display: inline-flex; border: 1px solid var(--rule); border-radius: 6px; overflow: hidden; }
+  .seg button { border: 0; background: var(--panel); color: var(--ink2); padding: 5px 11px;
+                font: inherit; font-size: 13px; cursor: pointer; }
+  .seg button + button { border-left: 1px solid var(--rule); }
+  .seg button[aria-pressed="true"] { background: var(--ink); color: #fff; }
+  .point { display: inline-flex; align-items: center; gap: 8px; }
+  .point input[type=range] { width: 340px; accent-color: var(--accent); }
+  .point button { border: 1px solid var(--rule); background: var(--panel); border-radius: 6px;
+                  padding: 3px 9px; cursor: pointer; font: inherit; }
+  #pointLabel { font-variant-numeric: tabular-nums; min-width: 170px; font-weight: 600; }
+  .panels { display: flex; flex-wrap: wrap; gap: 26px; }
+  .panel { background: var(--panel); border: 1px solid var(--rule); border-radius: 8px; padding: 12px 14px 10px; }
+  .panel h2 { font-size: 14px; margin: 0 0 2px; font-weight: 600; }
+  .panel .sub { color: var(--muted); font-size: 12px; margin-bottom: 8px; min-height: 17px; }
+  .plot { display: grid; grid-template-columns: 30px 400px 14px 58px; grid-template-rows: 400px 20px;
+          column-gap: 4px; }
+  .yaxis, .xaxis, .cbar-ticks { position: relative; color: var(--muted); font-size: 11px;
+                                font-variant-numeric: tabular-nums; }
+  .yaxis span { position: absolute; right: 2px; transform: translateY(-50%); }
+  .xaxis span { position: absolute; top: 3px; transform: translateX(-50%); }
+  .cbar-ticks span { position: absolute; left: 2px; transform: translateY(-50%); }
+  canvas.heat { width: 400px; height: 400px; image-rendering: pixelated; cursor: crosshair; display: block; }
+  canvas.cbar { width: 14px; height: 400px; display: block; border-radius: 3px; }
+  .axisname { color: var(--muted); font-size: 11.5px; margin-top: 2px; padding-left: 34px; }
+  .const { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+           color: var(--ink); font-size: 13px; pointer-events: none; text-align: center; }
+  .heatwrap { position: relative; }
+  .ring { position: absolute; width: 7px; height: 7px; border: 2px solid #fff; outline: 1px solid var(--ink);
+          border-radius: 50%; transform: translate(-50%, -50%); pointer-events: none; display: none; }
+  #tip { position: fixed; pointer-events: none; background: var(--panel); border: 1px solid var(--rule);
+         border-radius: 6px; padding: 7px 10px; font-size: 12.5px; box-shadow: 0 2px 10px rgba(0,0,0,.08);
+         display: none; z-index: 10; font-variant-numeric: tabular-nums; }
+  #tip .v { font-weight: 650; color: var(--ink); }
+  #tip .l { color: var(--ink2); }
+  #tip table { border-collapse: collapse; margin-top: 4px; }
+  #tip td { padding: 1px 6px 1px 0; }
+  #status { color: var(--muted); font-size: 12px; }
+</style>
+</head>
+<body>
+<h1>Residual-stream RMS on the addsub pool — Llama-3.1-8B vs two masked decompositions</h1>
+<div class="defs" id="defs"></div>
+
+<div class="controls" role="toolbar">
+  <span><label>Operation&nbsp;</label><span class="seg" id="opSeg"></span></span>
+  <span><label>Position t&nbsp;</label><span class="seg" id="posSeg"></span></span>
+  <span class="point"><label for="pointRange">Point p</label>
+    <button id="prev" aria-label="previous point">&larr;</button>
+    <input type="range" id="pointRange" min="0" max="64" value="36">
+    <button id="next" aria-label="next point">&rarr;</button>
+    <span id="pointLabel"></span></span>
+  <span id="status"></span>
+</div>
+<div class="panels" id="panels"></div>
+<div id="tip"></div>
+
+<script src="meta.js"></script>
+<script>
+window.RMS_DATA = {};
+const M = window.RMS_META, N = M.n_side;
+const MODEL_TITLE = {original: "Original (Llama-3.1-8B)", ci_masked: "CI-masked decomposition",
+                     alive_only: "Alive-only decomposition"};
+// sequential blue, steps 100..700 (light = panel minimum, dark = panel maximum)
+const RAMP = ["#cde2fb","#b7d3f6","#9ec5f4","#86b6ef","#6da7ec","#5598e7","#3987e5","#2a78d6",
+              "#256abf","#1c5cab","#184f95","#104281","#0d366b"].map(h => [1,3,5].map(i => parseInt(h.slice(i,i+2),16)));
+const LUT = new Uint8Array(256 * 3);
+for (let i = 0; i < 256; i++) {
+  const x = i / 255 * (RAMP.length - 1), j = Math.min(Math.floor(x), RAMP.length - 2), f = x - j;
+  for (let c = 0; c < 3; c++) LUT[3*i+c] = Math.round(RAMP[j][c] * (1-f) + RAMP[j+1][c] * f);
+}
+const state = {op: 0, t: 4, p: 36};
+const cache = {};
+
+function pointDesc(p) {
+  if (p === 0) return "embed — the token embedding (input of block 0's attention norm)";
+  const l = Math.floor((p - 1) / 2);
+  return p % 2 ? `L${l}.attn — after block ${l}'s attention add (input of its MLP norm)`
+               : `L${l}.mlp — after block ${l}'s MLP add (input of ${l < 31 ? `block ${l+1}'s attention norm` : "the final norm"})`;
+}
+
+// definitions (every symbol on the page)
+document.getElementById("defs").innerHTML = `
+<p>Each prompt is <code>a+b=</code> or <code>a-b=</code> with integer operands <b>a</b>, <b>b</b> in 1..400 (320,000 prompts, run
+<code>${M.source.run_dir.split("/").pop()}</code>, step ${M.source.step}, CI filter <code>${M.source.filter}</code>).
+Each heatmap cell is one prompt: row = a (1 at the top), column = b (1 at the left).</p>
+<p><b>r</b> = √(mean over the 4,096 dimensions of x²), where x is the raw residual-stream vector (before any norm, no centring, no ε) at
+stream point <b>p</b> and token position <b>t</b>. Points p = 0..64: p = 0 is the embedding; for block index <b>l</b> = 0..31,
+p = 2l + 1 is after block l's attention add and p = 2l + 2 after its MLP add — point p is the input of the p-th RMSNorm.
+Positions t = 0..4 are the tokens &lt;BOS&gt;, a, op, b, =.</p>
+<p><b>Original</b>: Llama-3.1-8B. <b>CI-masked</b>: on each prompt and position, exactly the components whose filter CI on the original
+model's activations exceeds ${M.source.threshold} are on; all other components and the weight delta are off
+(last-position KL to the original, pool mean: ${M.kl_mean.ci_masked.toFixed(4)} nats). <b>Alive-only</b>: all 15,768 alive components
+of the filter on at every prompt and position; all others and the delta off (KL ${M.kl_mean.alive_only.toFixed(4)} nats).
+Every panel has its own linear colour scale, from its minimum (lightest) to its maximum (darkest).</p>`;
+
+function seg(el, labels, key) {
+  labels.forEach((lab, i) => {
+    const b = document.createElement("button");
+    b.textContent = lab;
+    b.onclick = () => { state[key] = i; render(); };
+    el.appendChild(b);
+  });
+}
+seg(document.getElementById("opSeg"), ["a + b", "a − b"], "op");
+seg(document.getElementById("posSeg"), M.positions.map((s, i) => `${i}: ${s}`), "t");
+
+const panels = M.models.map((m, mi) => {
+  const div = document.createElement("div");
+  div.className = "panel";
+  div.innerHTML = `<h2></h2><div class="sub"></div>
+    <div class="plot">
+      <div class="yaxis"></div>
+      <div class="heatwrap"><canvas class="heat" width="${N}" height="${N}"></canvas><div class="ring"></div><div class="const"></div></div>
+      <canvas class="cbar" width="1" height="256"></canvas>
+      <div class="cbar-ticks"></div>
+      <div></div><div class="xaxis"></div><div></div><div></div>
+    </div><div class="axisname">rows: a &nbsp;·&nbsp; columns: b</div>`;
+  div.querySelector("h2").textContent = MODEL_TITLE[m];
+  for (const v of [1, 100, 200, 300, 400]) {
+    const y = document.createElement("span"); y.textContent = v; y.style.top = `${(v - 0.5) / N * 100}%`;
+    div.querySelector(".yaxis").appendChild(y);
+    const x = document.createElement("span"); x.textContent = v; x.style.left = `${(v - 0.5) / N * 100}%`;
+    div.querySelector(".xaxis").appendChild(x);
+  }
+  const cb = div.querySelector(".cbar"), cctx = cb.getContext("2d"), img = cctx.createImageData(1, 256);
+  for (let i = 0; i < 256; i++) { const k = 255 - i; img.data.set([LUT[3*k], LUT[3*k+1], LUT[3*k+2], 255], 4*i); }
+  cctx.putImageData(img, 0, 0);
+  document.getElementById("panels").appendChild(div);
+  const heat = div.querySelector("canvas.heat");
+  heat.addEventListener("pointermove", e => hover(e, heat));
+  heat.addEventListener("pointerleave", unhover);
+  return {div, heat, ctx: heat.getContext("2d"), m, mi};
+});
+
+function load(p, t) {
+  const key = `p${p}_t${t}`;
+  if (cache[key]) return cache[key];
+  cache[key] = new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = `data/${key}.js`;
+    s.onload = () => {
+      const d = window.RMS_DATA[key]; delete window.RMS_DATA[key];
+      const bin = atob(d.q), bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      resolve({lo: d.lo, hi: d.hi, q: new Uint16Array(bytes.buffer)});
+    };
+    s.onerror = () => reject(new Error(`missing data/${key}.js`));
+    document.head.appendChild(s);
+  });
+  return cache[key];
+}
+
+let current = null;
+function fmt(v) { return Math.abs(v) >= 100 ? v.toFixed(1) : Math.abs(v) >= 1 ? v.toFixed(3) : v.toPrecision(4); }
+
+async function render() {
+  const {op, t, p} = state;
+  document.querySelectorAll("#opSeg button").forEach((b, i) => b.setAttribute("aria-pressed", i === op));
+  document.querySelectorAll("#posSeg button").forEach((b, i) => b.setAttribute("aria-pressed", i === t));
+  document.getElementById("pointRange").value = p;
+  document.getElementById("pointLabel").textContent = `p = ${p}: ${M.points[p]}`;
+  document.getElementById("pointLabel").title = pointDesc(p);
+  document.getElementById("status").textContent = "loading…";
+  let d;
+  try { d = await load(p, t); } catch (e) { document.getElementById("status").textContent = e.message; return; }
+  if (state.op !== op || state.t !== t || state.p !== p) return;
+  document.getElementById("status").textContent = pointDesc(p);
+  current = d;
+  for (const pn of panels) {
+    const g = pn.mi * 2 + op, lo = d.lo[g], hi = d.hi[g], off = g * N * N;
+    const img = pn.ctx.createImageData(N, N);
+    let sum = 0;
+    for (let i = 0; i < N * N; i++) {
+      const qv = d.q[off + i], k = qv >> 8;
+      img.data[4*i] = LUT[3*k]; img.data[4*i+1] = LUT[3*k+1]; img.data[4*i+2] = LUT[3*k+2]; img.data[4*i+3] = 255;
+      sum += lo + qv / 65535 * (hi - lo);
+    }
+    pn.ctx.putImageData(img, 0, 0);
+    const constant = hi === lo;
+    pn.div.querySelector(".const").textContent = constant ? `constant over the pool: r = ${fmt(lo)}` : "";
+    pn.div.querySelector(".sub").textContent = constant ? "" :
+      `min ${fmt(lo)} · mean ${fmt(sum / (N * N))} · max ${fmt(hi)}`;
+    const ticks = pn.div.querySelector(".cbar-ticks");
+    ticks.replaceChildren();
+    if (!constant) for (const f of [0, 0.25, 0.5, 0.75, 1]) {
+      const s = document.createElement("span"); s.textContent = fmt(lo + f * (hi - lo)); s.style.top = `${(1 - f) * 100}%`;
+      ticks.appendChild(s);
+    }
+  }
+}
+
+function value(d, mi, op, a, b) {
+  const g = mi * 2 + op;
+  return d.lo[g] + d.q[g * N * N + (a - 1) * N + (b - 1)] / 65535 * (d.hi[g] - d.lo[g]);
+}
+
+function hover(e, heat) {
+  if (!current) return;
+  const rect = heat.getBoundingClientRect();
+  const b = Math.min(N, Math.max(1, Math.floor((e.clientX - rect.left) / rect.width * N) + 1));
+  const a = Math.min(N, Math.max(1, Math.floor((e.clientY - rect.top) / rect.height * N) + 1));
+  for (const pn of panels) {
+    const ring = pn.div.querySelector(".ring");
+    ring.style.display = "block"; ring.style.left = `${(b - 0.5) / N * 100}%`; ring.style.top = `${(a - 0.5) / N * 100}%`;
+  }
+  const tip = document.getElementById("tip");
+  tip.replaceChildren();
+  const head = document.createElement("div");
+  head.className = "l";
+  head.textContent = `${a} ${state.op ? "−" : "+"} ${b} =   ·   t = ${state.t} (${M.positions[state.t]})   ·   p = ${state.p} (${M.points[state.p]})`;
+  tip.appendChild(head);
+  const tbl = document.createElement("table");
+  const orig = value(current, 0, state.op, a, b);
+  panels.forEach(pn => {
+    const v = value(current, pn.mi, state.op, a, b), tr = document.createElement("tr");
+    const c1 = document.createElement("td"); c1.className = "v"; c1.textContent = `r = ${fmt(v)}`;
+    const c2 = document.createElement("td"); c2.className = "l"; c2.textContent = MODEL_TITLE[pn.m];
+    const c3 = document.createElement("td"); c3.className = "l";
+    c3.textContent = pn.mi ? `${((v / orig - 1) * 100).toFixed(2)} % vs original` : "";
+    tr.append(c1, c2, c3); tbl.appendChild(tr);
+  });
+  tip.appendChild(tbl);
+  tip.style.display = "block";
+  const x = e.clientX + 16, y = e.clientY + 14;
+  tip.style.left = `${Math.min(x, window.innerWidth - tip.offsetWidth - 8)}px`;
+  tip.style.top = `${Math.min(y, window.innerHeight - tip.offsetHeight - 8)}px`;
+}
+function unhover() {
+  document.getElementById("tip").style.display = "none";
+  panels.forEach(pn => pn.div.querySelector(".ring").style.display = "none");
+}
+
+const range = document.getElementById("pointRange");
+range.oninput = () => { state.p = +range.value; render(); };
+document.getElementById("prev").onclick = () => { state.p = Math.max(0, state.p - 1); render(); };
+document.getElementById("next").onclick = () => { state.p = Math.min(64, state.p + 1); render(); };
+document.addEventListener("keydown", e => {
+  if (e.key === "ArrowLeft") { state.p = Math.max(0, state.p - 1); render(); e.preventDefault(); }
+  if (e.key === "ArrowRight") { state.p = Math.min(64, state.p + 1); render(); e.preventDefault(); }
+});
+render();
+</script>
+</body>
+</html>
