@@ -50,12 +50,16 @@ def main() -> None:
     (out / "data").mkdir(parents=True, exist_ok=True)
     shutil.copy(Path(__file__).with_name("app.html"), out / "index.html")
 
+    full_max = np.zeros(n_model)  # per model, over every (p, t, op)
+    ratio_h = 0.0  # max |s_ci_masked / s_original - 1| over every (p, t, op)
     for p in range(n_point):
         block = np.sqrt(np.asarray(rms[:, p], np.float64) ** 2 + eps)  # (3, N, 5) divisors s
         for t in range(n_pos):
             s_grids = block[:, :, t].reshape(n_model * 2, N_SIDE * N_SIDE)  # (model, op) row-major
             grids = np.concatenate([s_grids, s_grids[2:4] / s_grids[0:2]])
             lo, hi = grids.min(1), grids.max(1)
+            full_max = np.maximum(full_max, hi[:6].reshape(n_model, 2).max(1))
+            ratio_h = max(ratio_h, float(np.abs(grids[6:] - 1).max()))
             span = np.where(hi > lo, hi - lo, 1.0)
             q = np.rint((grids - lo[:, None]) / span[:, None] * 65535).astype("<u2")
             payload = {"lo": lo.tolist(), "hi": hi.tolist(),
@@ -72,6 +76,10 @@ def main() -> None:
         "positions": list(POSITIONS),
         "n_side": N_SIDE,
         "eps": eps,
+        "full_max": dict(
+            zip(("original", "ci_masked", "alive_only"), full_max.tolist(), strict=True)
+        ),
+        "ratio_full_h": ratio_h,
         "kl_mean": {"ci_masked": float(kl[0].mean()), "alive_only": float(kl[1].mean())},
         "source": {k: meta[k] for k in ("run_dir", "step", "filter", "threshold", "commit")},
     }

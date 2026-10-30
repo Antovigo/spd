@@ -64,6 +64,7 @@
 <div class="controls" role="toolbar">
   <span><label>Operation&nbsp;</label><span class="seg" id="opSeg"></span></span>
   <span><label>Position t&nbsp;</label><span class="seg" id="posSeg"></span></span>
+  <span><label>Colour scale&nbsp;</label><span class="seg" id="scaleSeg"></span></span>
   <span class="point"><label for="pointRange">Point p</label>
     <button id="prev" aria-label="previous point">&larr;</button>
     <input type="range" id="pointRange" min="0" max="64" value="36">
@@ -96,7 +97,7 @@ for (const [lut, ramp] of [[LUT, RAMP], [DLUT, DIV]]) for (let i = 0; i < 256; i
 }
 const URLQ = new URLSearchParams(location.search), qint = (k, d, hi) => {
   const v = parseInt(URLQ.get(k)); return Number.isInteger(v) && v >= 0 && v <= hi ? v : d; };
-const state = {op: qint("op", 0, 1), t: qint("t", 4, 4), p: qint("p", 36, 64)};
+const state = {op: qint("op", 0, 1), t: qint("t", 4, 4), p: qint("p", 36, 64), scale: qint("scale", 0, 2)};
 const cache = {};
 
 function pointDesc(p) {
@@ -120,9 +121,12 @@ Positions t = 0..4 are the tokens &lt;BOS&gt;, a, op, b, =.</p>
 model's activations exceeds ${M.source.threshold} are on; all other components and the weight delta are off
 (last-position KL to the original, pool mean: ${M.kl_mean.ci_masked.toFixed(4)} nats). <b>Alive-only</b>: all 15,768 alive components
 of the filter on at every prompt and position; all others and the delta off (KL ${M.kl_mean.alive_only.toFixed(4)} nats).
-The first three panels each have their own linear colour scale, from the panel's minimum (lightest) to its maximum (darkest).
+Colour scale of the first three panels (selector): <i>per panel</i> = linear from the panel's minimum (lightest) to its maximum (darkest);
+<i>0 → max of (p, t)</i> = linear from 0 to the panel model's largest s at this point p and position t over both operations;
+<i>0 → max overall</i> = linear from 0 to the panel model's largest s over every p, t and operation.
 The fourth panel is the per-prompt ratio s<sub>CI-masked</sub> / s<sub>original</sub>: grey = 1, blue &lt; 1 (CI-masked stream smaller),
-red &gt; 1; its scale is symmetric about 1, out to the panel's largest |ratio − 1| but at least to 1 ± 0.001.</p>
+red &gt; 1; its scale is symmetric about 1, out to the largest |ratio − 1| of the panel, of (p, t) over both operations, or overall (same selector),
+but at least to 1 ± 0.001.</p>
 <p>The CI fn is a bidirectional transformer, so the CI-masked model's masks at a position depend on later tokens too: its stream at
 t = 1 (a) and t = 2 (op) varies with b, and at t = 0 (&lt;BOS&gt;) with the whole prompt. The original and alive-only streams at t
 depend only on tokens 0..t.</p>`;
@@ -137,6 +141,7 @@ function seg(el, labels, key) {
 }
 seg(document.getElementById("opSeg"), ["a + b", "a − b"], "op");
 seg(document.getElementById("posSeg"), M.positions.map((s, i) => `${i}: ${s}`), "t");
+seg(document.getElementById("scaleSeg"), ["per panel", "0 → max of (p, t)", "0 → max overall"], "scale");
 
 const panels = [...M.models, "ratio"].map((m, mi) => {
   const div = document.createElement("div");
@@ -192,6 +197,7 @@ async function render() {
   const {op, t, p} = state;
   document.querySelectorAll("#opSeg button").forEach((b, i) => b.setAttribute("aria-pressed", i === op));
   document.querySelectorAll("#posSeg button").forEach((b, i) => b.setAttribute("aria-pressed", i === t));
+  document.querySelectorAll("#scaleSeg button").forEach((b, i) => b.setAttribute("aria-pressed", i === state.scale));
   document.getElementById("pointRange").value = p;
   document.getElementById("pointLabel").textContent = `p = ${p}: ${M.points[p]}`;
   document.getElementById("pointLabel").title = pointDesc(p);
@@ -203,25 +209,32 @@ async function render() {
   current = d;
   for (const pn of panels) {
     const g = pn.g0 + op, lo = d.lo[g], hi = d.hi[g], off = g * N * N, ratio = pn.m === "ratio";
-    const h = Math.max(Math.abs(lo - 1), Math.abs(hi - 1), H_MIN), lut = ratio ? DLUT : LUT;
+    const lut = ratio ? DLUT : LUT, both = [pn.g0, pn.g0 + 1];
+    // fixed: top of the 0-based scale (s panels) or half-range of the 1 ± h scale (ratio); null = per panel
+    const fixed = state.scale === 0 ? null
+      : state.scale === 2 ? (ratio ? Math.max(M.ratio_full_h, H_MIN) : M.full_max[pn.m])
+      : ratio ? Math.max(H_MIN, ...both.map(x => Math.max(Math.abs(d.lo[x] - 1), Math.abs(d.hi[x] - 1))))
+      : Math.max(...both.map(x => d.hi[x]));
+    const h = ratio ? (fixed ?? Math.max(Math.abs(lo - 1), Math.abs(hi - 1), H_MIN)) : null;
     const img = pn.ctx.createImageData(N, N);
     let sum = 0;
     for (let i = 0; i < N * N; i++) {
       const qv = d.q[off + i], v = lo + qv / 65535 * (hi - lo);
-      const k = ratio ? Math.min(255, Math.max(0, Math.round(((v - 1) / h + 1) * 127.5))) : qv >> 8;
+      const k = ratio ? Math.min(255, Math.max(0, Math.round(((v - 1) / h + 1) * 127.5)))
+        : fixed !== null ? Math.min(255, Math.max(0, Math.round(v / fixed * 255))) : qv >> 8;
       img.data[4*i] = lut[3*k]; img.data[4*i+1] = lut[3*k+1]; img.data[4*i+2] = lut[3*k+2]; img.data[4*i+3] = 255;
       sum += v;
     }
     pn.ctx.putImageData(img, 0, 0);
-    const constant = hi === lo;
+    const constant = hi === lo && fixed === null && !ratio;
     pn.div.querySelector(".const").textContent = constant ? `constant over the pool: ${ratio ? "ratio" : "s"} = ${ratio ? lo.toFixed(5) : fmt(lo)}` : "";
-    pn.div.querySelector(".sub").textContent = constant ? "" :
+    pn.div.querySelector(".sub").textContent = constant ? "" : hi === lo ? `constant: ${ratio ? lo.toFixed(5) : fmt(lo)}` :
       `min ${fmt(lo)} · mean ${fmt(sum / (N * N))} · max ${fmt(hi)}`;
     const ticks = pn.div.querySelector(".cbar-ticks");
     ticks.replaceChildren();
     if (!constant) for (const f of [0, 0.25, 0.5, 0.75, 1]) {
       const s = document.createElement("span");
-      s.textContent = ratio ? (1 + (2 * f - 1) * h).toFixed(4) : fmt(lo + f * (hi - lo));
+      s.textContent = ratio ? (1 + (2 * f - 1) * h).toFixed(4) : fixed !== null ? fmt(f * fixed) : fmt(lo + f * (hi - lo));
       s.style.top = `${(1 - f) * 100}%`;
       ticks.appendChild(s);
     }

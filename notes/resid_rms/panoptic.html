@@ -16,7 +16,15 @@
   .tabs button { border: 1px solid var(--rule); border-bottom: 0; background: #f3f2ef; color: var(--ink2);
                  padding: 7px 14px; font: inherit; cursor: pointer; border-radius: 6px 6px 0 0; margin-bottom: -1px; }
   .tabs button[aria-selected="true"] { background: var(--panel); color: var(--ink); font-weight: 600; }
-  #status { color: var(--muted); font-size: 12px; padding: 4px 24px; min-height: 22px; }
+  .bar { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; padding: 6px 24px; min-height: 34px; }
+  .bar label { color: var(--ink2); font-size: 13px; }
+  .seg { display: inline-flex; border: 1px solid var(--rule); border-radius: 6px; overflow: hidden; }
+  .seg button { border: 0; background: var(--panel); color: var(--ink2); padding: 4px 10px; font: inherit; font-size: 12.5px; cursor: pointer; }
+  .seg button + button { border-left: 1px solid var(--rule); }
+  .seg button[aria-pressed="true"] { background: var(--ink); color: #fff; }
+  #legend { display: inline-flex; align-items: center; gap: 6px; color: var(--ink2); font-size: 12px; font-variant-numeric: tabular-nums; }
+  #legend canvas { width: 160px; height: 12px; border-radius: 3px; cursor: default; }
+  #status { color: var(--muted); font-size: 12px; }
   .scroller { overflow: auto; height: calc(100vh - var(--top, 240px)); padding: 0 24px 24px; }
   table { border-collapse: separate; border-spacing: 0; }
   th { font-weight: 500; color: var(--ink2); font-size: 12px; background: var(--surface); }
@@ -44,7 +52,8 @@
   <div class="defs" id="defs"></div>
 </header>
 <div class="tabs" role="tablist" id="tabs"></div>
-<div id="status"></div>
+<div class="bar"><label>Colour scale</label><span class="seg" id="scaleSeg"></span>
+  <span id="legend"></span><span id="status"></span></div>
 <div class="scroller" id="scroller"><table id="grid"></table></div>
 <div id="tip"></div>
 <script src="meta.js"></script>
@@ -76,8 +85,11 @@ step ${M.source.step}, filter <code>${M.source.filter}</code>). Each cell is one
 4,096 dimensions of x²), <b>x</b> the raw residual-stream vector, <b>ε</b> = ${M.eps}.</p>
 <p>Rows: stream point <b>p</b> = 0..64 (p = 0 the embedding; for block <b>l</b> = 0..31, p = 2l + 1 after its attention add, p = 2l + 2 after
 its MLP add; point p is the input of the p-th RMSNorm). Columns: token position <b>t</b> (0 &lt;BOS&gt;, 1 a, 2 op, 3 b, 4 =) × operation.
-Every cell has its own linear colour scale, min (light) to max (dark); the ratio tab (s<sub>CI-masked</sub> / s<sub>original</sub>, binned per prompt)
-is blue &lt; 1, grey = 1, red &gt; 1, symmetric about 1 to the cell's largest |ratio − 1|, but at least to 1 ± 0.001 (smaller deviations, e.g. the 4 × 10⁻⁶ rounding at p = 0, stay grey). Hover for values; click a cell to open it at full
+Colour scale (selector above the grid): <i>per cell</i> = linear from the cell's min (light) to its max (dark);
+<i>0 → max of (p, t)</i> = linear from 0 to the largest per-prompt s at that point p and position t over both operations, in the current tab's model;
+<i>0 → max of tab</i> = linear from 0 to the largest per-prompt s over every p, t and operation of the tab's model. The ratio tab (s<sub>CI-masked</sub> / s<sub>original</sub>, binned per prompt)
+is blue &lt; 1, grey = 1, red &gt; 1, symmetric about 1 out to the largest per-prompt |ratio − 1| of the cell, of (p, t), or of the whole tab (same selector), but at least to
+1 ± 0.001 (smaller deviations, e.g. the 4 × 10⁻⁶ rounding at p = 0, stay grey). Hover for values; click a cell to open it at full
 resolution in the single-view applet.</p>`;
 
 const tabsEl = document.getElementById("tabs");
@@ -133,7 +145,25 @@ function load(key) {
   return cache[key];
 }
 
-let cur = null, curKey = null;
+let cur = null, curKey = null, mode = "cell";
+const MODES = [["cell", "per cell"], ["pt", "0 → max of (p, t)"], ["all", "0 → max of tab"]];
+const scaleSeg = document.getElementById("scaleSeg");
+MODES.forEach(([k, label]) => {
+  const b = document.createElement("button"); b.textContent = label; b.dataset.k = k;
+  b.onclick = () => { mode = k; if (curKey) show(curKey); };
+  scaleSeg.appendChild(b);
+});
+// fixed scales: the top of a 0-based scale (s), or the half-range h of the ratio's 1 ± h scale
+function extent(d, cells, ratio) {
+  let x = ratio ? H_MIN : 0;
+  for (const i of cells) x = Math.max(x, ratio ? Math.max(Math.abs(d.fmin[i] - 1), Math.abs(d.fmax[i] - 1)) : d.fmax[i]);
+  return x;
+}
+function fixedScale(d, p, t, ratio) {
+  if (mode === "pt") return extent(d, [cellIndex(p, t, 0), cellIndex(p, t, 1)], ratio);
+  if (mode === "all") return d.allExtent;
+  return null;
+}
 const cellIndex = (p, t, op) => (p * NT + t) * 2 + op;
 async function show(key) {
   curKey = key;
@@ -145,17 +175,25 @@ async function show(key) {
   if (curKey !== key) return;
   cur = d;
   const S = d.side, ratio = key === "ratio", lut = ratio ? DLUT : LUT;
+  if (d.allExtent === undefined) d.allExtent = extent(d, d.fmax.map((_, i) => i), ratio);
+  scaleSeg.querySelectorAll("button").forEach((b, i) => {
+    b.setAttribute("aria-pressed", b.dataset.k === mode);
+    b.textContent = ratio ? ["per cell", "1 ± max of (p, t)", "1 ± max of tab"][i] : MODES[i][1];
+  });
+  legend(ratio, mode === "all" ? d.allExtent : null);
+  const clamp = x => Math.min(255, Math.max(0, Math.round(x)));
   for (const c of canvases) {
-    const i = cellIndex(+c.dataset.p, +c.dataset.t, +c.dataset.op), lo = d.lo[i], hi = d.hi[i];
+    const p = +c.dataset.p, t = +c.dataset.t, i = cellIndex(p, t, +c.dataset.op), lo = d.lo[i], hi = d.hi[i];
     c.width = S; c.height = S;
     const ctx = c.getContext("2d"), img = ctx.createImageData(S, S), off = i * S * S;
-    const h = Math.max(Math.abs(lo - 1), Math.abs(hi - 1), H_MIN);
+    const fixed = fixedScale(d, p, t, ratio);
+    const h = fixed ?? Math.max(Math.abs(d.fmin[i] - 1), Math.abs(d.fmax[i] - 1), H_MIN);
     for (let j = 0; j < S * S; j++) {
-      const qv = d.q[off + j];
+      const qv = d.q[off + j], v = lo + qv / 65535 * (hi - lo);
       let k;
-      if (hi === lo) k = ratio ? Math.min(255, Math.max(0, Math.round(((lo - 1) / h + 1) * 127.5))) : 128;
-      else if (ratio) k = Math.min(255, Math.max(0, Math.round((((lo + qv / 65535 * (hi - lo)) - 1) / h + 1) * 127.5)));
-      else k = qv >> 8;
+      if (ratio) k = clamp(((v - 1) / h + 1) * 127.5);
+      else if (fixed !== null) k = clamp(v / fixed * 255);
+      else k = hi === lo ? 128 : qv >> 8;
       img.data[4*j] = lut[3*k]; img.data[4*j+1] = lut[3*k+1]; img.data[4*j+2] = lut[3*k+2]; img.data[4*j+3] = 255;
     }
     ctx.putImageData(img, 0, 0);
@@ -179,8 +217,10 @@ grid.addEventListener("pointermove", e => {
     ["v", `${ratio ? "ratio" : "s"} = ${fmt(v, ratio)}`],
     ["l", `a ${row * B + 1}..${row * B + B} ${OPS[op]} b ${col * B + 1}..${col * B + B} (mean of the ${B} × ${B} block)`],
     ["l", `p = ${p} (${M.points[p]}) · t = ${t} (${M.positions[t]})`],
-    ["l", hi === lo ? `constant over the pool` : `cell min ${fmt(lo, ratio)} · max ${fmt(hi, ratio)}`],
+    ["l", `cell, per prompt: min ${fmt(cur.fmin[i], ratio)} · max ${fmt(cur.fmax[i], ratio)}`],
   ];
+  const fixed = fixedScale(cur, p, t, ratio);
+  if (fixed !== null) lines.push(["l", ratio ? `colour scale ${fmt(1 - fixed, true)} → ${fmt(1 + fixed, true)}` : `colour scale 0 → ${fmt(fixed, false)}`]);
   for (const [cls, text] of lines) { const div = document.createElement("div"); div.className = cls; div.textContent = text; tip.appendChild(div); }
   tip.style.display = "block";
   tip.style.left = `${Math.min(e.clientX + 16, window.innerWidth - tip.offsetWidth - 8)}px`;
@@ -192,6 +232,18 @@ grid.addEventListener("click", e => {
   if (c instanceof HTMLCanvasElement) window.open(`index.html?p=${c.dataset.p}&t=${c.dataset.t}&op=${c.dataset.op}`, "_blank");
 });
 
+function legend(ratio, ext) {
+  const el = document.getElementById("legend");
+  el.replaceChildren();
+  if (ext === null) return;
+  const c = document.createElement("canvas"); c.width = 256; c.height = 1;
+  const ctx = c.getContext("2d"), img = ctx.createImageData(256, 1), lut = ratio ? DLUT : LUT;
+  for (let k = 0; k < 256; k++) img.data.set([lut[3*k], lut[3*k+1], lut[3*k+2], 255], 4*k);
+  ctx.putImageData(img, 0, 0);
+  const a = document.createElement("span"), b = document.createElement("span");
+  a.textContent = ratio ? fmt(1 - ext, true) : "0"; b.textContent = ratio ? fmt(1 + ext, true) : fmt(ext, false);
+  el.append(a, c, b);
+}
 function fit() { document.documentElement.style.setProperty("--top", `${document.getElementById("scroller").getBoundingClientRect().top}px`); }
 window.addEventListener("resize", fit); fit();
 const start = location.hash.slice(1);

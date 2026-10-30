@@ -5,7 +5,8 @@ the 400 x 400 (a, b) grid binned BIN x BIN (mean) to a thumbnail.
 s = sqrt(r^2 + eps) as in `build_applet.py`; the ratio tab bins s_ci_masked / s_original per prompt.
 Writes OUT/applet/panoptic.html (a copy of `panoptic.html`) and OUT/applet/data/panoptic_<tab>.js:
 for every cell (p, t, op), in that order, the thumbnail quantised to uint16 between its own min and
-max, base64 little-endian, with the cell's lo / hi. Needs `build_applet.py`'s meta.js.
+max, base64 little-endian, with the thumbnail's lo / hi and the full-resolution (per-prompt) fmin / fmax
+that the page's fixed colour scales use. Needs `build_applet.py`'s meta.js.
 
     python build_panoptic.py [--src DIR] [--bin N]
 """
@@ -38,7 +39,8 @@ def main() -> None:
     assert (out / "meta.js").exists(), "run build_applet.py first"
     shutil.copy(Path(__file__).with_name("panoptic.html"), out / "panoptic.html")
 
-    cells = {tab: ([], [], []) for tab in TABS}  # lo, hi, quantised thumbnails
+    # per cell: thumbnail lo, hi, quantised thumbnail, and the full-resolution (per-prompt) min, max
+    cells = {tab: ([], [], [], [], []) for tab in TABS}
     for p in range(n_point):
         s = np.sqrt(np.asarray(rms[:, p], np.float64) ** 2 + eps)  # (3, N, 5)
         s = s.reshape(n_model, 2, N_SIDE, N_SIDE, n_pos)
@@ -55,9 +57,11 @@ def main() -> None:
                     cells[tab][0].append(lo)
                     cells[tab][1].append(hi)
                     cells[tab][2].append(np.rint((g - lo) / span * 65535).astype("<u2"))
+                    cells[tab][3].append(float(v[op, :, :, t].min()))
+                    cells[tab][4].append(float(v[op, :, :, t].max()))
         print(f"point {p} done", flush=True)
-    for tab, (lo, hi, q) in cells.items():
-        payload = {"side": side, "bin": args.bin, "lo": lo, "hi": hi,
+    for tab, (lo, hi, q, fmin, fmax) in cells.items():
+        payload = {"side": side, "bin": args.bin, "lo": lo, "hi": hi, "fmin": fmin, "fmax": fmax,
                    "q": base64.b64encode(np.stack(q).tobytes()).decode()}  # fmt: skip
         (out / "data" / f"panoptic_{tab}.js").write_text(
             f"window.PANOPTIC['{tab}']={json.dumps(payload)};\n"
