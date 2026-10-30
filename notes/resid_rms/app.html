@@ -70,6 +70,7 @@
     <button id="next" aria-label="next point">&rarr;</button>
     <span id="pointLabel"></span></span>
   <span id="status"></span>
+  <a href="panoptic.html" style="margin-left:auto;font-size:13px">panoptic view →</a>
 </div>
 <div class="panels" id="panels"></div>
 <div id="tip"></div>
@@ -86,13 +87,16 @@ const DIV = ["#184f95","#2a78d6","#6da7ec","#b7d3f6","#f0efec","#f6c8c5","#ec8f8
 // sequential blue, steps 100..700 (light = panel minimum, dark = panel maximum)
 const RAMP = ["#cde2fb","#b7d3f6","#9ec5f4","#86b6ef","#6da7ec","#5598e7","#3987e5","#2a78d6",
               "#256abf","#1c5cab","#184f95","#104281","#0d366b"].map(h => [1,3,5].map(i => parseInt(h.slice(i,i+2),16)));
+const H_MIN = 1e-3;  // ratio colour scale reaches at least 1 ± 0.1 %
 const LUT = new Uint8Array(256 * 3);
 const DLUT = new Uint8Array(256 * 3);
 for (const [lut, ramp] of [[LUT, RAMP], [DLUT, DIV]]) for (let i = 0; i < 256; i++) {
   const x = i / 255 * (ramp.length - 1), j = Math.min(Math.floor(x), ramp.length - 2), f = x - j;
   for (let c = 0; c < 3; c++) lut[3*i+c] = Math.round(ramp[j][c] * (1-f) + ramp[j+1][c] * f);
 }
-const state = {op: 0, t: 4, p: 36};
+const URLQ = new URLSearchParams(location.search), qint = (k, d, hi) => {
+  const v = parseInt(URLQ.get(k)); return Number.isInteger(v) && v >= 0 && v <= hi ? v : d; };
+const state = {op: qint("op", 0, 1), t: qint("t", 4, 4), p: qint("p", 36, 64)};
 const cache = {};
 
 function pointDesc(p) {
@@ -118,7 +122,7 @@ model's activations exceeds ${M.source.threshold} are on; all other components a
 of the filter on at every prompt and position; all others and the delta off (KL ${M.kl_mean.alive_only.toFixed(4)} nats).
 The first three panels each have their own linear colour scale, from the panel's minimum (lightest) to its maximum (darkest).
 The fourth panel is the per-prompt ratio s<sub>CI-masked</sub> / s<sub>original</sub>: grey = 1, blue &lt; 1 (CI-masked stream smaller),
-red &gt; 1; its scale is symmetric about 1, out to the panel's largest |ratio − 1|.</p>
+red &gt; 1; its scale is symmetric about 1, out to the panel's largest |ratio − 1| but at least to 1 ± 0.001.</p>
 <p>The CI fn is a bidirectional transformer, so the CI-masked model's masks at a position depend on later tokens too: its stream at
 t = 1 (a) and t = 2 (op) varies with b, and at t = 0 (&lt;BOS&gt;) with the whole prompt. The original and alive-only streams at t
 depend only on tokens 0..t.</p>`;
@@ -199,7 +203,7 @@ async function render() {
   current = d;
   for (const pn of panels) {
     const g = pn.g0 + op, lo = d.lo[g], hi = d.hi[g], off = g * N * N, ratio = pn.m === "ratio";
-    const h = Math.max(Math.abs(lo - 1), Math.abs(hi - 1)) || 1, lut = ratio ? DLUT : LUT;
+    const h = Math.max(Math.abs(lo - 1), Math.abs(hi - 1), H_MIN), lut = ratio ? DLUT : LUT;
     const img = pn.ctx.createImageData(N, N);
     let sum = 0;
     for (let i = 0; i < N * N; i++) {
