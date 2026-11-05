@@ -94,6 +94,17 @@ def test_rotation_by_energy_leaves_the_patch_unchanged() -> None:
     )
 
 
+def test_orthonormal_keeps_each_columns_span_with_the_earlier_ones() -> None:
+    columns = jax.random.normal(jax.random.key(3), (4, D, 8))
+    basis = orthonormal(columns)
+    np.testing.assert_allclose(
+        jnp.swapaxes(basis, 1, 2) @ basis, jnp.broadcast_to(jnp.eye(8), (4, 8, 8)), atol=1e-5
+    )
+    head = orthonormal(columns[:, :, :3])
+    np.testing.assert_allclose(basis[:, :, :3], head, atol=1e-5)
+    np.testing.assert_allclose(orthonormal(basis), basis, atol=1e-5)
+
+
 def test_removal_keeps_the_least_harmful_columns_first_and_q_orthonormal() -> None:
     Q = orthonormal(jax.random.normal(jax.random.key(2), (4, D, 8)))
     scores = jnp.asarray([5.0, 1.0, 3.0, 2.0])  # removing column 1 then 3 hurts least

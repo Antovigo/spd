@@ -59,6 +59,25 @@ class PairStreams:
         )
 
 
+def orthonormal(columns: Array) -> Array:
+    """Orthonormalize `(..., d, C)` columns in order, by Cholesky QR applied twice: each column's span
+    with the earlier ones is kept, so inactive later columns do not affect active ones. XLA's own QR
+    tried to allocate 26 GiB for these shapes, and this needs only `C`×`C` factorizations. It requires
+    well-conditioned columns, which holds because training re-orthonormalizes after every update."""
+
+    def once(w: Array) -> Array:
+        factor = jnp.linalg.cholesky(jnp.swapaxes(w, -1, -2) @ w)
+        return jnp.swapaxes(
+            jax.lax.linalg.triangular_solve(
+                factor, jnp.swapaxes(w, -1, -2), left_side=True, lower=True
+            ),
+            -1,
+            -2,
+        )
+
+    return once(once(columns))
+
+
 class SiteFunctions:
     """The compiled functions of one stream point."""
 
@@ -72,7 +91,7 @@ class SiteFunctions:
         def cross_entropy(
             weights: Llama, columns: Array, mask: Array, base: Array, source: Array, y: Array
         ) -> Array:
-            basis = jax.vmap(lambda w: jnp.linalg.qr(w)[0])(columns)
+            basis = orthonormal(columns)
             logits = logits_from(weights, patch_stream(base, source, basis, mask), t)
             log_probs = jax.nn.log_softmax(logits, -1)
             return -jnp.take_along_axis(log_probs, y[:, None], axis=1).mean()
@@ -90,7 +109,7 @@ class SiteFunctions:
                 weights, columns, mask, base, source, y
             )
             updates, opt_state = self.optimizer.update(gradient, opt_state)
-            return cast(Array, optax.apply_updates(columns, updates)), opt_state, loss
+            return orthonormal(cast(Array, optax.apply_updates(columns, updates))), opt_state, loss
 
         def evaluate_chunk(
             weights: Llama, basis: Array, mask: Array, base: Array, source: Array, y: Array
@@ -172,10 +191,6 @@ def dimension_mask(dims: tuple[int, ...], n_columns: int = MAX_DIMS) -> Array:
     return jnp.stack([(jnp.arange(n_columns) < k).astype(jnp.float32) for k in dims])
 
 
-def orthonormal(columns: Array) -> Array:
-    return jax.vmap(lambda w: jnp.linalg.qr(w)[0])(columns)
-
-
 def train_subspaces(
     functions: SiteFunctions,
     columns: Array,
@@ -204,7 +219,8 @@ def train_subspaces(
             train.source[batch],
             train.expected_token[batch],
         )
-    return orthonormal(columns)
+    assert bool(jnp.isfinite(columns).all()), "training produced non-finite subspaces"
+    return columns
 
 
 @dataclass(frozen=True)

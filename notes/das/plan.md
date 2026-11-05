@@ -377,7 +377,7 @@ no tuple, threshold or hyperparameter is changed after this step.
 
 | Setting | Value |
 |---|---|
-| Parametrisation | One unconstrained `d`×`k_p` matrix per position, with `R_p` its Q factor from QR at each step |
+| Parametrisation | One unconstrained `d`×`k_p` matrix per position, with `R_p` its orthonormalized columns, by Cholesky QR at each step, and the matrix re-orthonormalized after each update |
 | Initialization | Full fits: top `k_p` right singular vectors of `D`, per section 7.0. Fine-tunes: the kept columns of the current `R_p` |
 | Optimizer | Adam, restarted at each fine-tune. The paper's text does not name its optimizer |
 | Starting hyperparameters | Learning rate 1e-4, batch 16, 8 epochs, 3,584 pairs, replaced by the pilot's choice |
