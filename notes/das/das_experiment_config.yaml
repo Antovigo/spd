@@ -1,0 +1,48 @@
+# Settings of the DAS experiment in notes/das/plan.md. Every path the scripts read or write is here.
+paths:
+  tokenized_prompts: ~/out/pod-backup/p-ba8b0c08/prompts/tokenized.npz
+  correctness_references: ~/out/pod-backup/p-ba8b0c08/analysis/pruning/step_40000/addsub-08-prune/references.npz
+  pruning_run_config: ~/out/pod-backup/p-ba8b0c08/analysis/pruning/step_40000/addsub-08-prune/config.yaml
+  llama_weights: ~/.cache/huggingface/hub/models--meta-llama--Llama-3.1-8B/snapshots/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b
+  prompt_pairs: ~/out/pod-backup/p-ba8b0c08/analysis/das/prompt_pairs
+  pilot: ~/pd_scratch/das_pilot
+
+prompt_pairs:
+  seed: 0
+  train_prompt_fraction: 0.6
+  validation_prompt_fraction: 0.2
+  train_pairs: 14336
+  validation_pairs: 4096
+  test_pairs: 4096
+
+# Positions each variable can occupy (plan section 4).
+patched_positions:
+  first_operand: [1, 2, 3, 4]
+  second_operand: [3, 4]
+  result: [3, 4]
+
+training:
+  learning_rate: 0.0001  # replaced by the pilot's choice
+  train_pairs: 3584  # replaced by the pilot's choice
+  batch_size: 16
+  epochs: 8
+
+pruning:
+  position_margin: 0.02
+  prune_score_pairs: 256
+  fresh_fit_ladder: [48, 32, 24, 16, 12, 8, 6, 4, 3, 2, 1, 0]
+
+pilot:
+  learning_rates: [0.0001, 0.001, 0.01]
+  train_pairs: [3584, 14336]
+  finetune_epochs: [1, 4]
+  # Blocks are stream point t = 2 * block + 1: the stream before that block's MLP.
+  sites:
+    - {task: addition, variable: first_operand, block: 0}
+    - {task: addition, variable: result, block: 0}
+    - {task: subtraction, variable: first_operand, block: 0}
+    - {task: subtraction, variable: result, block: 0}
+    - {task: addition, variable: first_operand, block: 18}
+    - {task: addition, variable: result, block: 18}
+    - {task: subtraction, variable: first_operand, block: 18}
+    - {task: subtraction, variable: result, block: 18}

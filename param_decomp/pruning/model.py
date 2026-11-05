@@ -267,16 +267,15 @@ type LayerXs = tuple[Array, Array, Array, dict[str, Array], dict[str, Array], di
 type SiteFn = Callable[[str, Float[Array, "B T d_in"]], Float[Array, "B T d_out"]]
 
 
-def _block(
+def attention_half(
     arch: Arch,
     ln1: Array,
-    ln2: Array,
     inv_freq: Array,
     resid: Float[Array, "B T d"],
     site: SiteFn,
     attention_precision: Precision,
 ) -> Float[Array, "B T d"]:
-    """One Llama block in fp32; `site(kind, x)` computes each linear site."""
+    """The stream after one block's attention, in fp32; `site(kind, x)` computes each linear site."""
     b, t, _ = resid.shape
     h = rms_norm32(resid, ln1, arch.eps)
     q = site("q", h).reshape(b, t, arch.n_head, arch.head_dim).transpose(0, 2, 1, 3)
@@ -294,10 +293,30 @@ def _block(
     weights = jax.nn.softmax(jnp.where(causal, scores, -jnp.inf), axis=-1)
     attended = jnp.einsum("bhqk,bhkd->bhqd", weights, v, precision=hp)
     attended = attended.transpose(0, 2, 1, 3).reshape(b, t, arch.n_head * arch.head_dim)
-    resid = resid + site("o", attended)
+    return resid + site("o", attended)
+
+
+def mlp_half(
+    arch: Arch, ln2: Array, resid: Float[Array, "B T d"], site: SiteFn
+) -> Float[Array, "B T d"]:
+    """The stream after one block's MLP, in fp32."""
     h = rms_norm32(resid, ln2, arch.eps)
     hidden = jax.nn.silu(site("gate", h)) * site("up", h)
     return resid + site("down", hidden)
+
+
+def _block(
+    arch: Arch,
+    ln1: Array,
+    ln2: Array,
+    inv_freq: Array,
+    resid: Float[Array, "B T d"],
+    site: SiteFn,
+    attention_precision: Precision,
+) -> Float[Array, "B T d"]:
+    """One Llama block in fp32; `site(kind, x)` computes each linear site."""
+    resid = attention_half(arch, ln1, inv_freq, resid, site, attention_precision)
+    return mlp_half(arch, ln2, resid, site)
 
 
 def _factored_site(

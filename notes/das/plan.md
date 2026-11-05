@@ -251,6 +251,10 @@ and 10% of that sum.
 The default for section 7.3 is the cheapest `prune_schedule` arm that passes at all eight sites. If none passes, I report
 that and the choice between the fresh-fit search and a changed pruning arm is yours.
 
+The pilot has two stages, so the fit quality results can be read before the search starts. **Choosing the fit settings:**
+the learning rate and pair count with the highest mean validation IIA over the eight sites, using 14,336 pairs only if that
+raises the mean by more than 0.02 over 3,584 pairs. They are then written in the settings file.
+
 The pilot also measures seconds per fit and fine-tune against `t`. Runs go one at a time per GPU unless the projected
 cost requires running several in parallel. That would add code, since pruning paths diverge in array shape.
 
@@ -432,9 +436,11 @@ Placeholders in the names:
 
 | Path | Contents |
 |---|---|
-| `~/pd_scratch/das_pilot/hyperparameter_and_pair_count_sweep.csv` | One row per pilot sweep fit |
-| `~/pd_scratch/das_pilot/pruning_compared_with_fresh_fits.csv` | Per site and arm: `k_p` tuple, sum of `k_p`, IIA gap, seconds and pass rule outcome |
-| `~/pd_scratch/das_pilot/training_time_and_projected_cost.csv` | Seconds per fit and fine-tune by `t`, parallel runs per GPU and projected totals |
+| `~/pd_scratch/das_pilot/{site}/hyperparameter_and_pair_count_sweep.csv` | One row per fit quality fit, with seconds. `{site}` is, for example, `addition_first_operand_block_18_before_mlp` |
+| `~/pd_scratch/das_pilot/{site}/start_64_dims.npz` | The site's 64-dimension fit, shared by the search arms |
+| `~/pd_scratch/das_pilot/{site}/fresh_fits.csv` | One row per fresh-fit step: `k_p` tuple, validation IIA, pass or fail, seconds |
+| `~/pd_scratch/das_pilot/{site}/pruning_halve_then_single_steps_{n}_epochs.csv` | One row per pruning round, as above, for `prune_schedule` at `finetune_epochs` = `{n}` |
+| `~/pd_scratch/das_pilot/{site}/pruning_single_steps_1_epochs.csv` | The same for the single-step arm, on addition sites |
 | `~/pd_scratch/das_job_logs/` | SLURM or pod logs |
 
 `~/pd_scratch/das_pilot/` is removed after the review point. The chosen settings go into the config file, and the
@@ -467,14 +473,12 @@ to a CI shard (`param_decomp/tests/infra/test_ci_shards.py`).
 | `$REPO/param_decomp/das/run_das_search.py` | Screen and pruning. One process drives all GPUs and is the only writer, and it skips sites already finished in `results`, so a preempted job continues |
 | `$REPO/param_decomp/das/evaluate_das_on_test_pairs.py` | Section 7.5, including the no-training diagnostics of section 7.4 |
 | `$REPO/param_decomp/das/make_das_report_figures.py` | Report figures |
-| `$REPO/notes/das/launch/run_das_pilot.sbatch` | Pilot: 1 L40 |
+| `$REPO/notes/das/launch/run_das_pilot.sbatch` | Pilot: one array task per site, 1 L40 each, at most 4 at once |
 | `$REPO/notes/das/launch/run_das_search.sbatch` | Search: 4 L40 |
 | `$REPO/notes/das/launch/evaluate_das_on_test_pairs.sbatch` | Final evaluation: 1 L40 |
 | `$REPO/notes/das/launch/set_up_runpod_pod.sh` | Pod environment, and copying the inputs of section 9.2 and the data of section 9.3 |
 | `$REPO/notes/das/launch/copy_results_from_runpod_pod.sh` | Copy `$RUN/analysis/das/` back from the pod |
-| `$REPO/param_decomp/tests/das/test_patched_llama_forward.py` | Forward and patch tests of section 7.1 |
-| `$REPO/param_decomp/tests/das/test_prune_das_subspaces.py` | Rotation invariance, and the pass rule when IIA improves |
-| `$REPO/param_decomp/tests/das/test_build_prompt_pairs.py` | Pair requirements and split separation |
+| `$REPO/param_decomp/tests/das/test_das.py` | Forward, patch, pruning and pair tests of section 7.1 |
 | `$REPO/notes/das/report.md` | Report |
 | `$REPO/notes/das/report_figures/` | PNGs embedded in the report |
 
