@@ -61,9 +61,9 @@ class PairStreams:
 
 def orthonormal(columns: Array) -> Array:
     """Orthonormalize `(..., d, C)` columns in order, by Cholesky QR applied twice: each column's span
-    with the earlier ones is kept, so inactive later columns do not affect active ones. XLA's own QR
-    tried to allocate 26 GiB for these shapes, and this needs only `C`×`C` factorizations. It requires
-    well-conditioned columns, which holds because training re-orthonormalizes after every update."""
+    with the earlier ones is kept, so inactive later columns do not affect active ones. It needs only
+    `C`×`C` factorizations, and well-conditioned columns, which holds because training
+    re-orthonormalizes after every update."""
 
     def once(w: Array) -> Array:
         factor = jnp.linalg.cholesky(jnp.swapaxes(w, -1, -2) @ w)

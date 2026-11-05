@@ -11,7 +11,6 @@ import json
 from pathlib import Path
 
 import equinox as eqx
-import jax
 import jax.numpy as jnp
 import numpy as np
 from jaxtyping import Array, Float, Int
@@ -20,7 +19,6 @@ from safetensors import safe_open
 from param_decomp.arith_repr.autointerp.llama_weights import llama3_inv_freq
 from param_decomp.pruning.model import (
     Arch,
-    DenseWeights,
     Shared,
     _block,
     _dense_site,
@@ -47,7 +45,8 @@ SITE_NAMES = {
 class Llama(eqx.Module):
     arch: Arch
     shared: Shared
-    dense: DenseWeights
+    blocks: tuple[dict[str, Array], ...]
+    """Each block's site matrices, torch layout `(d_out, d_in)`."""
 
 
 def load_llama(weights_dir: Path) -> Llama:
@@ -76,17 +75,11 @@ def load_llama(weights_dir: Path) -> Llama:
         head=get("lm_head.weight"),
         inv_freq=jnp.asarray(llama3_inv_freq(config)),
     )
-    dense = DenseWeights(
-        W={
-            kind: jnp.stack([get(f"model.layers.{li}.{name}.weight") for li in layers])
-            for kind, name in SITE_NAMES.items()
-        }
+    blocks = tuple(
+        {kind: get(f"model.layers.{li}.{name}.weight") for kind, name in SITE_NAMES.items()}
+        for li in layers
     )
-    return Llama(arch, shared, dense)
-
-
-def _slice_block(model: Llama, block: int) -> dict[str, Array]:
-    return {kind: w[block] for kind, w in model.dense.W.items()}
+    return Llama(arch, shared, blocks)
 
 
 def stream_at(model: Llama, tokens: Int[Array, "B T"], t: int) -> Float[Array, "B T d"]:
@@ -94,34 +87,32 @@ def stream_at(model: Llama, tokens: Int[Array, "B T"], t: int) -> Float[Array, "
     arch, shared = model.arch, model.shared
     resid = embed(shared, tokens)
     for block in range(t // 2):
-        site = _dense_site(_slice_block(model, block), PRECISION)
+        site = _dense_site(model.blocks[block], PRECISION)
         resid = _block(
             arch, shared.ln1[block], shared.ln2[block], shared.inv_freq, resid, site, PRECISION
         )
     if t % 2 == 1:
         block = t // 2
-        site = _dense_site(_slice_block(model, block), PRECISION)
+        site = _dense_site(model.blocks[block], PRECISION)
         resid = attention_half(arch, shared.ln1[block], shared.inv_freq, resid, site, PRECISION)
     return resid
 
 
 def logits_from(model: Llama, resid: Float[Array, "B T d"], t: int) -> Float[Array, "B vocab"]:
-    """Last-position logits from the stream at `t`, differentiable in `resid`."""
+    """Last-position logits from the stream at `t`, differentiable in `resid`. A plain loop over the
+    blocks, because the reverse pass of a `scan` over stacked weights keeps a copy of them (26 GiB)."""
     arch, shared = model.arch, model.shared
     start = (t + 1) // 2
     if t % 2 == 1:
         block = t // 2
         resid = mlp_half(
-            arch, shared.ln2[block], resid, _dense_site(_slice_block(model, block), PRECISION)
+            arch, shared.ln2[block], resid, _dense_site(model.blocks[block], PRECISION)
         )
-
-    def body(x: Array, xs: tuple[Array, Array, dict[str, Array]]) -> tuple[Array, None]:
-        ln1, ln2, W = xs
-        site = _dense_site(W, PRECISION)
-        return _block(arch, ln1, ln2, shared.inv_freq, x, site, PRECISION), None
-
-    W_tail = {kind: w[start:] for kind, w in model.dense.W.items()}
-    resid, _ = jax.lax.scan(body, resid, (shared.ln1[start:], shared.ln2[start:], W_tail))
+    for block in range(start, arch.n_layer):
+        site = _dense_site(model.blocks[block], PRECISION)
+        resid = _block(
+            arch, shared.ln1[block], shared.ln2[block], shared.inv_freq, resid, site, PRECISION
+        )
     return last_logits(arch, shared, resid, PRECISION)
 
 

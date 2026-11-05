@@ -25,7 +25,7 @@ T = 5
 
 
 def tiny_model() -> Llama:
-    keys = iter(jax.random.split(jax.random.key(0), 20))
+    keys = iter(jax.random.split(jax.random.key(0), 40))
 
     def normal(*shape: int) -> jax.Array:
         return 0.2 * jax.random.normal(next(keys), shape, jnp.float32)
@@ -39,18 +39,19 @@ def tiny_model() -> Llama:
         head=normal(VOCAB, D),
         inv_freq=jnp.linspace(1.0, 0.01, 4),
     )
-    dense = DenseWeights(
-        W={
-            "q": normal(N_LAYER, 32, D),
-            "k": normal(N_LAYER, 16, D),
-            "v": normal(N_LAYER, 16, D),
-            "o": normal(N_LAYER, D, 32),
-            "gate": normal(N_LAYER, 64, D),
-            "up": normal(N_LAYER, 64, D),
-            "down": normal(N_LAYER, D, 64),
+    blocks = tuple(
+        {
+            "q": normal(32, D),
+            "k": normal(16, D),
+            "v": normal(16, D),
+            "o": normal(D, 32),
+            "gate": normal(64, D),
+            "up": normal(64, D),
+            "down": normal(D, 64),
         }
+        for _ in range(N_LAYER)
     )
-    return Llama(arch, shared, dense)
+    return Llama(arch, shared, blocks)
 
 
 TOKENS = jnp.asarray(np.random.default_rng(0).integers(0, VOCAB, (6, T)))
@@ -62,7 +63,10 @@ SOURCE_TOKENS = (
 @pytest.mark.parametrize("t", range(2 * N_LAYER))
 def test_running_from_any_stream_point_reproduces_the_full_forward(t: int) -> None:
     model = tiny_model()
-    full = dense_logits(model.arch, model.shared, model.dense, TOKENS, "bf16", "bf16")
+    dense = DenseWeights(
+        W={kind: jnp.stack([b[kind] for b in model.blocks]) for kind in model.blocks[0]}
+    )
+    full = dense_logits(model.arch, model.shared, dense, TOKENS, "bf16", "bf16")
     resumed = logits_from(model, stream_at(model, TOKENS, t), t)
     np.testing.assert_allclose(resumed, full, atol=1e-5)
 
