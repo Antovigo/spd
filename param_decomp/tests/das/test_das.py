@@ -8,6 +8,7 @@ import pytest
 from param_decomp.das.build_prompt_pairs import TRAIN, sample_pairs, split_prompts
 from param_decomp.das.patched_llama_forward import Llama, logits_from, patch_stream, stream_at
 from param_decomp.das.prune_das_subspaces import (
+    lowest_passing_dimension,
     next_target,
     remove_least_harmful,
     rotate_by_energy,
@@ -126,6 +127,19 @@ def test_schedule_halves_then_steps_and_bisects_after_a_failure() -> None:
     assert search_position("halve_then_single_steps", 64, passes_down_to_20) == 20
     assert tried == [32, 16, 24, 20, 18, 19]
     assert search_position("single_steps", 3, lambda target: target >= 2) == 2
+
+
+def test_fresh_search_tries_every_step_and_keeps_the_lowest_pass() -> None:
+    tried: list[int] = []
+
+    def fails_at_48_then_passes_down_to_8(target: int) -> bool:
+        tried.append(target)
+        return 8 <= target < 48
+
+    ladder = (48, 32, 16, 8, 4, 0)
+    assert lowest_passing_dimension(ladder, 64, fails_at_48_then_passes_down_to_8) == 8
+    assert tried == list(ladder)
+    assert lowest_passing_dimension(ladder, 64, lambda target: False) == 64
 
 
 @pytest.mark.parametrize("sign", (1, -1))

@@ -238,7 +238,7 @@ pruning reach what fresh fits reach?
 | Pilot sweep | Values | Training runs |
 |---|---|---|
 | Fit quality, at every `k_p` = 64, batch 16 and 8 epochs | Learning rate {1e-4, 1e-3, 1e-2}, training pairs {3,584, 14,336} | 6 × 8 = 48 full fits |
-| Fresh-fit search, first position order only | Each position steps down 48, 32, 24, 16, 12, 8, 6, 4, 3, 2, 1, then 0, with a full fit at every step | At most 288 full fits |
+| Fresh-fit search, first position order only | Each position fits all of 48, 32, 24, 16, 12, 8, 6, 4, 3, 2, 1 and 0 and keeps the lowest passing, so a pass after a failure is seen | At most 288 full fits |
 | Pruning, `prune_schedule` | `finetune_epochs` {1, 4} | At most 864 fine-tunes |
 | Pruning, single steps from 64, addition sites only | `finetune_epochs` = 1. Tests the shortcuts in the schedule | At most 768 fine-tunes |
 

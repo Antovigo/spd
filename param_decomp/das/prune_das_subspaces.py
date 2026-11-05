@@ -53,6 +53,13 @@ def search_position(schedule: Schedule, start: int, try_target: Callable[[int], 
     return current
 
 
+def lowest_passing_dimension(
+    ladder: tuple[int, ...], start: int, try_target: Callable[[int], bool]
+) -> int:
+    """Try every dimension of `ladder` and return the lowest that passes, or `start` if none does."""
+    return min((target for target in ladder if try_target(target)), default=start)
+
+
 def rotate_by_energy(basis: Array, position: int, k: int, train: PairStreams) -> Array:
     """Rotate a position's active columns so they are ordered by source-minus-base energy. The span,
     and so the patch, does not change."""
@@ -211,10 +218,13 @@ def fresh_fit_search(
     seed: int,
     report: Callable[[SearchRound], None],
 ) -> tuple[int, ...]:
-    """The same search with a full fit from the SVD initialization at every step."""
+    """The same search with a full fit from the SVD initialization at every step. Every step of the
+    ladder is fitted, since a smaller dimension can pass after a larger one fails, and the position
+    keeps its lowest passing dimension."""
     dims = start_dims
     for position in positions:
-        for target in ladder:
+
+        def try_target(target: int, position: int = position, dims: tuple[int, ...] = dims) -> bool:
             candidate_dims = tuple(target if p == position else dims[p] for p in range(N_PATCHED))
             basis, seconds, steps = timed_full_fit(
                 functions, initial_basis, candidate_dims, train, batch_size, epochs, seed
@@ -233,7 +243,8 @@ def fresh_fit_search(
                     seconds=seconds,
                 )
             )
-            if not passed:
-                break
-            dims = candidate_dims
+            return passed
+
+        lowest = lowest_passing_dimension(ladder, dims[position], try_target)
+        dims = tuple(lowest if p == position else dims[p] for p in range(N_PATCHED))
     return dims

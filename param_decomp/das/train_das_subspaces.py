@@ -2,6 +2,7 @@
 
 import time
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import cast
 
@@ -66,15 +67,18 @@ class SiteFunctions:
         self.integer_tokens = integer_tokens
         self.optimizer = optax.adam(learning_rate)
 
+        # The weights are jit arguments: closing over them would embed 15 GB of constants in every
+        # compiled function.
         def cross_entropy(
-            columns: Array, mask: Array, base: Array, source: Array, y: Array
+            weights: Llama, columns: Array, mask: Array, base: Array, source: Array, y: Array
         ) -> Array:
             basis = jax.vmap(lambda w: jnp.linalg.qr(w)[0])(columns)
-            logits = logits_from(model, patch_stream(base, source, basis, mask), t)
+            logits = logits_from(weights, patch_stream(base, source, basis, mask), t)
             log_probs = jax.nn.log_softmax(logits, -1)
             return -jnp.take_along_axis(log_probs, y[:, None], axis=1).mean()
 
         def train_step(
+            weights: Llama,
             columns: Array,
             opt_state: optax.OptState,
             mask: Array,
@@ -82,16 +86,18 @@ class SiteFunctions:
             source: Array,
             y: Array,
         ) -> tuple[Array, optax.OptState, Array]:
-            loss, gradient = jax.value_and_grad(cross_entropy)(columns, mask, base, source, y)
+            loss, gradient = jax.value_and_grad(cross_entropy, argnums=1)(
+                weights, columns, mask, base, source, y
+            )
             updates, opt_state = self.optimizer.update(gradient, opt_state)
             return cast(Array, optax.apply_updates(columns, updates)), opt_state, loss
 
         def evaluate_chunk(
-            basis: Array, mask: Array, base: Array, source: Array, y: Array
+            weights: Llama, basis: Array, mask: Array, base: Array, source: Array, y: Array
         ) -> tuple[Array, Array, Array]:
             """The top integer and the top token of the full vocabulary per pair, and the summed
             cross-entropy."""
-            logits = logits_from(model, patch_stream(base, source, basis, mask), t)
+            logits = logits_from(weights, patch_stream(base, source, basis, mask), t)
             log_probs = jax.nn.log_softmax(logits, -1)
             cross_entropy_sum = -jnp.take_along_axis(log_probs, y[:, None], axis=1).sum()
             return (
@@ -100,9 +106,11 @@ class SiteFunctions:
                 cross_entropy_sum,
             )
 
-        self.train_step = jax.jit(train_step)
-        self.evaluate_chunk = jax.jit(evaluate_chunk)
-        self.stream_chunk = jax.jit(lambda tokens: stream_at(model, tokens, t))
+        self.train_step = partial(jax.jit(train_step), model)
+        self.evaluate_chunk = partial(jax.jit(evaluate_chunk), model)
+        self.stream_chunk = partial(
+            jax.jit(lambda weights, tokens: stream_at(weights, tokens, t)), model
+        )
 
 
 def load_split(

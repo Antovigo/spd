@@ -84,7 +84,9 @@ def check_correctness(config: DasExperimentConfig, model: Llama, integer_tokens:
     correct = correct_by_tokenized_row(config, tokenizer)
     prompts = np.load(config.paths.tokenized_prompts)
     rng = np.random.default_rng(0)
-    forward = jax.jit(lambda tokens: logits_from(model, stream_at(model, tokens, 1), 1))
+    forward = jax.jit(
+        lambda weights, tokens: logits_from(weights, stream_at(weights, tokens, 1), 1)
+    )
     for op, name in enumerate(("addition", "subtraction")):
         sign = 1 if op == 0 else -1
         rows = rng.choice(
@@ -96,7 +98,7 @@ def check_correctness(config: DasExperimentConfig, model: Llama, integer_tokens:
         hits = []
         for s in range(0, CORRECTNESS_SAMPLE, EVALUATION_CHUNK):
             chunk = jnp.asarray(prompts["tokens"][rows[s : s + EVALUATION_CHUNK]])
-            hits.append(np.asarray(jnp.argmax(forward(chunk)[:, integer_tokens], -1)))
+            hits.append(np.asarray(jnp.argmax(forward(model, chunk)[:, integer_tokens], -1)))
         agreement = float(((np.concatenate(hits) == answers) == correct[rows]).mean())
         print(f"correctness agreement with references, {name}: {agreement:.4f}", flush=True)
         assert agreement >= MIN_CORRECTNESS_AGREEMENT, (name, agreement)
