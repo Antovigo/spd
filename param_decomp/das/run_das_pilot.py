@@ -39,10 +39,12 @@ from param_decomp.das.train_das_subspaces import (
     EVALUATION_CHUNK,
     PairStreams,
     SiteFunctions,
+    columns_of,
+    complete_to_orthogonal,
     dimension_mask,
     evaluate,
     load_split,
-    svd_initialization,
+    principal_components,
     timed_full_fit,
 )
 from param_decomp.pruning.problem import integer_token_ids
@@ -118,7 +120,7 @@ def run_fit_quality(
     settings = config.training
     max_pairs = max(config.pilot.train_pairs)
     loaded: dict[str, PairStreams] = {}
-    initial_basis, differs = None, None
+    components = None
     for learning_rate in config.pilot.learning_rates:
         functions = build(learning_rate)
         if not loaded:
@@ -130,15 +132,16 @@ def run_fit_quality(
                 functions, config.paths.tokenized_prompts, config.paths.prompt_pairs,
                 site.task, site.variable, VALIDATION, config.prompt_pairs.validation_pairs,
             )  # fmt: skip
-            initial_basis, differs = svd_initialization(loaded["train"], settings.svd_pairs)
-        assert initial_basis is not None and differs is not None
-        dims = start_dims(config, site, np.asarray(differs))
+            components = principal_components(loaded["train"], settings.pca_pairs)
+        assert components is not None
+        dims = start_dims(config, site, components.differs)
         mask = dimension_mask(dims)
         for n_train in config.pilot.train_pairs:
             train = loaded["train"].head(n_train)
-            basis, seconds, steps = timed_full_fit(
-                functions, initial_basis, dims, train, settings.batch_size, settings.epochs, 0
+            full_base, seconds, steps = timed_full_fit(
+                functions, components, dims, train, settings.batch_size, settings.epochs, 0
             )
+            basis = columns_of(full_base)
             validation = evaluate(functions, basis, mask, loaded["validation"])
             training = evaluate(functions, basis, mask, train.head(TRAIN_IIA_PAIRS))
             rows.append(
@@ -187,24 +190,22 @@ def run_search(
         site.task, site.variable, VALIDATION, config.prompt_pairs.validation_pairs,
     )  # fmt: skip
     scoring = train.head(config.pruning.prune_score_pairs)
-    initial_basis, differs = svd_initialization(train, settings.svd_pairs)
-    dims = start_dims(config, site, np.asarray(differs))
+    components = principal_components(train, settings.pca_pairs)
+    dims = start_dims(config, site, components.differs)
     start_path = site_dir / "start_64_dims.npz"
     site_dir.mkdir(parents=True, exist_ok=True)
     if start_path.exists():
         saved = np.load(start_path)
-        start_basis, seconds, steps = (
-            jnp.asarray(saved["basis"]),
-            float(saved["seconds"]),
-            int(saved["steps"]),
-        )
+        start_base = complete_to_orthogonal(saved["basis"], dims, np.random.default_rng(0))
+        seconds, steps = float(saved["seconds"]), int(saved["steps"])
     else:
-        start_basis, seconds, steps = timed_full_fit(
-            functions, initial_basis, dims, train, settings.batch_size, settings.epochs, 0
+        start_base, seconds, steps = timed_full_fit(
+            functions, components, dims, train, settings.batch_size, settings.epochs, 0
         )
         temporary = site_dir / "start_64_dims.partial.npz"
-        np.savez(temporary, basis=np.asarray(start_basis), seconds=seconds, steps=steps)
+        np.savez(temporary, basis=np.asarray(columns_of(start_base)), seconds=seconds, steps=steps)
         temporary.replace(start_path)
+    start_basis = columns_of(start_base)
     reference = evaluate(functions, start_basis, dimension_mask(dims), validation)
     print(f"reference validation IIA {reference.iia:.4f}, fit seconds {seconds:.0f}", flush=True)
     if reference.iia < config.pruning.min_iia_for_position_search:
@@ -252,7 +253,7 @@ def run_search(
         run_arm(
             "fresh_fits",
             lambda report: fresh_fit_search(
-                functions, initial_basis, dims, order, config.pruning.fresh_fit_ladder, train,
+                functions, components, dims, order, config.pruning.fresh_fit_ladder, train,
                 validation, settings.batch_size, settings.epochs, margin, reference.iia, 0, report,
             ),
         )  # fmt: skip
@@ -262,7 +263,7 @@ def run_search(
     ) -> Callable[[Callable[[SearchRound], None]], tuple[int, ...]]:
         def search(report: Callable[[SearchRound], None]) -> tuple[int, ...]:
             return prune_search(
-                functions, start_basis, dims, order, train, validation, scoring, schedule,
+                functions, start_base, dims, order, train, validation, scoring, schedule,
                 finetune_epochs * train.n // settings.batch_size, settings.batch_size,
                 margin, reference.iia, 0, report,
             )[1]  # fmt: skip

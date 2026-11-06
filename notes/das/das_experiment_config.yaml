@@ -22,9 +22,9 @@ patched_positions:
   result: [3, 4]
 
 training:
-  learning_rate: 0.0001  # chosen by the pilot: highest mean validation IIA of {1e-4, 1e-3, 1e-2}
-  train_pairs: 14336  # chosen by the pilot: mean validation IIA 0.7204 against 0.6833 at 3584 pairs
-  svd_pairs: 3584
+  learning_rate: 0.0001  # theirs; to be re-checked by rerunning the fit quality sweep
+  train_pairs: 3584  # to be re-chosen by rerunning the fit quality sweep
+  pca_pairs: 3584
   batch_size: 16
   epochs: 8
 

@@ -39,11 +39,11 @@ plan means "stored and used".
 | `k_p` | Subspace dimension at position `p` | integer, 0..64 |
 | `R_p` | Subspace basis at position `p`, a `d`×`k_p` matrix with orthonormal columns | real matrix |
 | `h_p`, `h'_p` | Base and source stream vectors at position `p` and the current `t` | real vectors of length `d` |
-| `D` | Source-minus-base matrix at one `(t, p)`, with one row `h'_p - h_p` per training pair | real matrix, pairs × `d` |
+| `D` | Source-minus-base matrix at one `(t, p)`, with one row `h'_p - h_p` per training pair, used only to rotate `R_p` while pruning | real matrix, pairs × `d` |
 | `S_p` | Right singular vectors of `D R_p`, ordered by decreasing singular value, used to rotate `R_p` | `k_p`×`k_p` orthogonal matrix |
 | `q` | Model output renormalised over the tokens of the integers 0..999 | probability vector of length 1000 |
 | IIA | Interchange intervention accuracy: the fraction of evaluated pairs whose patched top integer token, the argmax of `q`, is the expected answer. Validation pairs are used during the search and test pairs in the final evaluation (section 7.5) | fraction, 0..1 |
-| Full fit | Training from the SVD initialization for the full budget: 28,672 pair passes at the starting 3,584 pairs and 8 epochs | training run |
+| Full fit | Training from the initialization in section 8 for the full budget: 28,672 pair passes at the starting 3,584 pairs and 8 epochs | training run |
 | Fine-tune | Training an existing set of `R_p` for a short budget: 3,584 pair passes at the starting value of one epoch | training run |
 
 `t = 37` is the paper's "pre-MLP" point at layer 18. `t = 38` is its "post-MLP" point at layer 18. The output of block
@@ -102,8 +102,8 @@ https://github.com/goodfire-ai/arithmetic-wild):
 | Addition at layer 18, operands 1..100 | IIA 61.7% for the first operand and 63.8% for the second (`k` = 16 and 15, pre-MLP), 96.6% for the sum (`k` = 16, post-MLP) |
 
 Differences here: operands go to 400, subtraction is added, all positions are patched together, `k` starts at 64 and
-descends, per-position dimensions are found by pruning (section 7.3), a validation split makes the search decisions, and
-the initialization differs (section 8).
+descends, per-position dimensions are found by pruning (section 7.3), and a validation split makes the search decisions.
+The paper states 3,584 and 512 pairs, but their saved results and code use 3,276 and 820 (section 7.6).
 
 ## 4. Interchange interventions
 
@@ -213,9 +213,8 @@ answer is at least 1, in the same order. `build_prompt_pairs.py` rebuilds the re
 pruning run's `config.yaml`, maps through its `pool_rows`, and asserts that the tokens equal `tokenized.npz` on every row.
 Saved pairs index the rows of `tokenized.npz`.
 
-Before a site's first fit, compute its SVD initialization in memory: for each `p` in {1, 2, 3, 4}, take the SVD of `D` over
-the first 3,584 training pairs, without centring, and keep the top 64 right singular vectors. Pairs are shared across
-variables, so the initialization depends only on the task and `t`.
+Before a site's first fit, compute in memory its principal components, per position `p` in {1, 2, 3, 4}, from the base stream
+of the first 3,584 training pairs (section 8).
 
 ### 7.1 Tests and pilot
 
@@ -258,18 +257,10 @@ The pilot has two stages, so the fit quality results can be read before the sear
 the learning rate and pair count with the highest mean validation IIA over the eight sites, using 14,336 pairs only if that
 raises the mean by more than 0.02 over 3,584 pairs. They are then written in the settings file.
 
-**Fit quality result.** Mean validation IIA over the eight sites, at batch 16 and 8 epochs:
-
-| Learning rate | 3,584 pairs | 14,336 pairs |
-|---|---|---|
-| 1e-4 | 0.683 | 0.720 |
-| 1e-3 | 0.602 | 0.624 |
-| 1e-2 | 0.218 | 0.201 |
-
-By the rule above, the settings are learning rate 1e-4 and 14,336 pairs. 1e-4 is the lowest learning rate tested, so a lower
-one might do better. With these settings, `r` at block 0 has validation IIA of at most 0.3%, below
-`min_iia_for_position_search`, so the two `r` sites at block 0 skip the search and six sites run it. The upper bounds in the
-table above were for eight sites at 3,584 pairs. A one-epoch fine-tune now has 896 steps, and a full fit 7,168.
+**Earlier fit quality result, now superseded.** The sweep and search above ran with our earlier initialization (top singular
+vectors of source minus base) and parametrization (Cholesky QR after each update), which section 7.6 shows cost IIA. They must
+be rerun with section 8's settings. The superseded runs chose learning rate 1e-4 and 14,336 pairs, and `r` at block 0 stayed
+near chance, below `min_iia_for_position_search`.
 
 The pilot also measures seconds per fit and fine-tune against `t`. Runs go one at a time per GPU unless the projected
 cost requires running several in parallel. That would add code, since pruning paths diverge in array shape.
@@ -297,7 +288,7 @@ That is 384 fits. Each site's validation IIA decides whether it enters section 7
 This approach is untested, and the pilot compares it with fresh fits (section 7.1).
 
 It runs at each site whose validation IIA at `k` = 64 is at least `min_iia_for_position_search`. The starting point and
-reference is the site's screen fit from section 7.2: whole-layer, every `k_p` = 64, from the SVD initialization. No other
+reference is the site's screen fit from section 7.2: whole-layer, every `k_p` = 64, from the initialization in section 8. No other
 fit in this search uses that initialization. Test pairs are not used. Validation IIA is recorded at every round, which
 gives the curve of IIA against dimensions.
 
@@ -389,12 +380,33 @@ Pruning rounds are not stored, so they report validation IIA only.
 The test gap can exceed `position_margin`, because the tuple was selected on validation. It is reported as measured, and
 no tuple, threshold or hyperparameter is changed after this step.
 
+### 7.6 Replication of Feucht et al., and why our first fits lagged
+
+Their code, with our hook before the MLP (`notes/das/replicate_feucht/`), replicates their test IIA at the last token of layer 18,
+on addition with operands up to 100: first operand 61.6% (theirs 61.7%), second operand 66.2% (63.8%), result 88.7% (87.6%), and
+result after the MLP 95.4% (96.6%). Reimplemented in our JAX forward, one setting at a time, over 3 seeds, on their 820 test pairs:
+
+| Setup | First operand | Second operand | Result |
+|---|---|---|---|
+| Theirs, in our JAX code | 62.5% | 63.8% | 88.4% |
+| Only our pairs | 61.4% | 62.8% | 90.2% |
+| Only our parametrization, learning rate 1e-4 | 56.7% | 57.7% | 81.0% |
+| Only our parametrization, learning rate 2e-4 | 61.8% | 65.3% | 90.6% |
+| Only our initialization | 57.6% | 60.9% | 81.4% |
+| All ours, learning rate 1e-4 | 50.6% | 57.7% | 79.2% |
+| All ours, learning rate 2e-4 | 56.3% | 61.9% | 81.6% |
+
+`torch`'s Householder map moves a column about twice as far per step as updating the column directly, so our earlier parametrization
+at 1e-4 ran at half their rate. Our earlier initialization cost a further 3-7 points at their budget. Our pairs make no real
+difference. So this plan uses their initialization and parametrization with our pairs (section 8).
+
 ## 8. Fit specification
 
 | Setting | Value |
 |---|---|
-| Parametrisation | One unconstrained `d`×`k_p` matrix per position, with `R_p` its orthonormalized columns, by Cholesky QR at each step, and the matrix re-orthonormalized after each update |
-| Initialization | Full fits: top `k_p` right singular vectors of `D`, per section 7.0. Fine-tunes: the kept columns of the current `R_p` |
+| Parametrisation | Feucht et al.'s: `torch`'s Householder map. Each position has a `d`×`d` orthogonal base whose first columns are `R_p`, completed by QR of small noise, and reflectors starting at zero. Adam updates the reflectors |
+| Initialization | Feucht et al.'s, for full fits: random within the principal components explaining 90% of the variance of the base stream at that `(t, p)`, over the first 3,584 training pairs. If `k_p` exceeds their number, all of them plus random orthogonal columns. Fine-tunes continue from the kept columns of the current `R_p` |
+| Pairs | Ours (section 5) |
 | Optimizer | Adam, restarted at each fine-tune. The paper's text does not name its optimizer |
 | Starting hyperparameters | Learning rate 1e-4, batch 16, 8 epochs, 3,584 pairs, replaced by the pilot's choice |
 | Fine-tune budget | `finetune_epochs` = 1, on the same training pairs and at the same learning rate as full fits |
@@ -466,7 +478,7 @@ comparison that justified them goes into the report. The logs are removed when t
 
 | Item | Why it is safe to drop | Consequence |
 |---|---|---|
-| SVD initialization | Recomputed from `prompt_pairs` | Each site runs one forward pass over 3,584 pairs before its first fit |
+| Principal components | Recomputed from `prompt_pairs` | Each site runs one forward pass over 3,584 pairs before its first fit |
 | Answers on all prompts | `references.npz` already has correctness | One test checks the forward pass against it on a sample (section 7.1) |
 | Subspaces of intermediate pruning rounds | Not re-used. Only their results are needed | They report validation IIA, not test IIA |
 | Pruning checkpoints | Only the final tuple is used | An interrupted search restarts that site from its 64-dimension subspaces |
@@ -483,7 +495,7 @@ to a CI shard (`param_decomp/tests/infra/test_ci_shards.py`).
 | `$REPO/param_decomp/das/load_das_experiment_config.py` | Load and validate the settings |
 | `$REPO/param_decomp/das/build_prompt_pairs.py` | Section 5. Light enough for the dev node |
 | `$REPO/param_decomp/das/patched_llama_forward.py` | Original-model forward resumable at any `t`, with the patch, reusing `DenseWeights` and the block code of `param_decomp/pruning/model.py`. `run_blocks` starts only at block boundaries, so this adds the odd `t`; written so the integer-only model can use it later |
-| `$REPO/param_decomp/das/train_das_subspaces.py` | One full fit or fine-tune: SVD initialization, loss, QR and metrics |
+| `$REPO/param_decomp/das/train_das_subspaces.py` | One full fit or fine-tune: initialization, Householder parametrization, loss and metrics |
 | `$REPO/param_decomp/das/prune_das_subspaces.py` | One pruning search: rotate, score, remove, fine-tune, check, schedule, bisection and position orders |
 | `$REPO/param_decomp/das/run_das_pilot.py` | Section 7.1 pilot |
 | `$REPO/param_decomp/das/run_das_search.py` | Screen and pruning. One process drives all GPUs and is the only writer, and it skips sites already finished in `results`, so a preempted job continues |

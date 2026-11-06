@@ -35,7 +35,7 @@ class PromptPairSettings(_Frozen):
 class TrainingSettings(_Frozen):
     learning_rate: float
     train_pairs: int
-    svd_pairs: int
+    pca_pairs: int
     batch_size: int
     epochs: int
 

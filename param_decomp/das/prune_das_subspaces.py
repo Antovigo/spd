@@ -13,7 +13,9 @@ from param_decomp.das.patched_llama_forward import N_PATCHED
 from param_decomp.das.train_das_subspaces import (
     EVALUATION_CHUNK,
     PairStreams,
+    PrincipalComponents,
     SiteFunctions,
+    columns_of,
     dimension_mask,
     evaluate,
     timed_full_fit,
@@ -147,7 +149,7 @@ class SearchRound:
 
 def prune_search(
     functions: SiteFunctions,
-    start_basis: Array,
+    start_base: Array,
     start_dims: tuple[int, ...],
     positions: tuple[int, ...],
     train: PairStreams,
@@ -162,22 +164,23 @@ def prune_search(
     report: Callable[[SearchRound], None],
 ) -> tuple[Array, tuple[int, ...]]:
     """Prune `positions` in order, each from where the previous one ended; fine-tune all active
-    columns after every removal, and restore the last passing state when a round fails."""
-    basis, dims = start_basis, start_dims
+    columns after every removal, and restore the last passing state when a round fails. `start_base`
+    and the returned base are `(4, d, d)`."""
+    full_base, dims = start_base, start_dims
     round_index = 0
 
     def prune_position(position: int) -> None:
         def try_target(target: int) -> bool:
-            nonlocal basis, dims, round_index
+            nonlocal full_base, dims, round_index
             round_index += 1
             started = time.monotonic()
             k = dims[position]
-            rotated = rotate_by_energy(basis, position, k, train)
+            rotated = rotate_by_energy(full_base, position, k, train)
             # Dropping the whole position has nothing to rank.
             scores = (
                 jnp.zeros(k)
                 if target == 0
-                else score_removals(functions, rotated, dims, position, scoring)
+                else score_removals(functions, columns_of(rotated), dims, position, scoring)
             )
             candidate = remove_least_harmful(rotated, position, k, target, scores)
             candidate_dims = tuple(target if p == position else dims[p] for p in range(N_PATCHED))
@@ -185,7 +188,7 @@ def prune_search(
             candidate = train_subspaces(
                 functions, candidate, mask, train, batch_size, finetune_steps, seed + round_index
             )
-            metrics = evaluate(functions, candidate, mask, validation)
+            metrics = evaluate(functions, columns_of(candidate), mask, validation)
             passed = round_passes(metrics.iia, reference_iia, position_margin)
             report(
                 SearchRound(
@@ -200,19 +203,19 @@ def prune_search(
                 )
             )
             if passed:
-                basis, dims = candidate, candidate_dims
+                full_base, dims = candidate, candidate_dims
             return passed
 
         search_position(schedule, dims[position], try_target)
 
     for position in positions:
         prune_position(position)
-    return basis, dims
+    return full_base, dims
 
 
 def fresh_fit_search(
     functions: SiteFunctions,
-    initial_basis: Array,
+    components: PrincipalComponents,
     start_dims: tuple[int, ...],
     positions: tuple[int, ...],
     ladder: tuple[int, ...],
@@ -225,7 +228,7 @@ def fresh_fit_search(
     seed: int,
     report: Callable[[SearchRound], None],
 ) -> tuple[int, ...]:
-    """The same search with a full fit from the SVD initialization at every step. Every step of the
+    """The same search with a full fit from their initialization at every step. Every step of the
     ladder is fitted, since a smaller dimension can pass after a larger one fails, and the position
     keeps its lowest passing dimension."""
     dims = start_dims
@@ -233,10 +236,12 @@ def fresh_fit_search(
 
         def try_target(target: int, position: int = position, dims: tuple[int, ...] = dims) -> bool:
             candidate_dims = tuple(target if p == position else dims[p] for p in range(N_PATCHED))
-            basis, seconds, steps = timed_full_fit(
-                functions, initial_basis, candidate_dims, train, batch_size, epochs, seed
+            full_base, seconds, steps = timed_full_fit(
+                functions, components, candidate_dims, train, batch_size, epochs, seed
             )
-            metrics = evaluate(functions, basis, dimension_mask(candidate_dims), validation)
+            metrics = evaluate(
+                functions, columns_of(full_base), dimension_mask(candidate_dims), validation
+            )
             passed = round_passes(metrics.iia, reference_iia, position_margin)
             report(
                 SearchRound(

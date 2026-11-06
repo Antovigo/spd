@@ -34,7 +34,6 @@ from transformers import AutoTokenizer
 
 from param_decomp.das.build_prompt_pairs import N_OPERAND, TRAIN, VALIDATION
 from param_decomp.das.patched_llama_forward import Llama, load_llama, logits_from, stream_at
-from param_decomp.das.train_das_subspaces import orthonormal
 from param_decomp.pruning.problem import integer_token_ids
 
 STREAM_POINT = 37
@@ -65,6 +64,19 @@ ARMS = {
     "all_ours": Arm("reorthonormalize", "source_minus_base", "ours"),
     "all_ours_learning_rate_2e-4": Arm("reorthonormalize", "source_minus_base", "ours", 2e-4),
 }
+
+
+def orthonormal(columns: Array) -> Array:
+    """Our earlier parametrization, kept here for this comparison: Cholesky QR, applied twice."""
+
+    def once(w: Array) -> Array:
+        factor = jnp.linalg.cholesky(jnp.swapaxes(w, -1, -2) @ w)
+        solved = jax.lax.linalg.triangular_solve(
+            factor, jnp.swapaxes(w, -1, -2), left_side=True, lower=True
+        )
+        return jnp.swapaxes(solved, -1, -2)
+
+    return once(once(columns))
 
 
 @dataclass(frozen=True)

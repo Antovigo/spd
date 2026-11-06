@@ -15,7 +15,20 @@ from param_decomp.das.prune_das_subspaces import (
     round_passes,
     search_position,
 )
-from param_decomp.das.train_das_subspaces import PairStreams, dimension_mask, orthonormal
+from param_decomp.das.train_das_subspaces import (
+    PairStreams,
+    PrincipalComponents,
+    SiteFunctions,
+    advanced_base,
+    columns_of,
+    complete_to_orthogonal,
+    dimension_mask,
+    evaluate,
+    householder_columns,
+    principal_components,
+    random_pca_basis,
+    train_subspaces,
+)
 from param_decomp.pruning.model import Arch, DenseWeights, Shared, dense_logits
 
 D = 32
@@ -60,6 +73,10 @@ SOURCE_TOKENS = (
 )
 
 
+def random_orthonormal(seed: int) -> jax.Array:
+    return jnp.linalg.qr(jax.random.normal(jax.random.key(seed), (4, D, 8)))[0]
+
+
 @pytest.mark.parametrize("t", range(2 * N_LAYER))
 def test_running_from_any_stream_point_reproduces_the_full_forward(t: int) -> None:
     model = tiny_model()
@@ -88,7 +105,7 @@ def test_rotation_by_energy_leaves_the_patch_unchanged() -> None:
     model = tiny_model()
     t = 3
     base, source = stream_at(model, TOKENS, t), stream_at(model, SOURCE_TOKENS, t)
-    Q = orthonormal(jax.random.normal(jax.random.key(1), (4, D, 8)))
+    Q = random_orthonormal(1)
     dims = (5, 8, 3, 0)
     mask = dimension_mask(dims, 8)
     pairs = PairStreams(base, source, jnp.zeros(6, jnp.int32), jnp.zeros(6, jnp.int32))
@@ -98,19 +115,106 @@ def test_rotation_by_energy_leaves_the_patch_unchanged() -> None:
     )
 
 
-def test_orthonormal_keeps_each_columns_span_with_the_earlier_ones() -> None:
-    columns = jax.random.normal(jax.random.key(3), (4, D, 8))
-    basis = orthonormal(columns)
+def test_householder_columns_start_at_the_base_and_later_reflectors_leave_earlier_columns() -> None:
+    rng = np.random.default_rng(0)
+    basis = np.asarray(random_orthonormal(3))
+    full_base = complete_to_orthogonal(basis, (8, 8, 8, 8), rng)
+    assert full_base.shape == (4, D, D)
+    np.testing.assert_allclose(columns_of(full_base, 8), basis, atol=1e-5)
+    base = full_base[0]
+    np.testing.assert_allclose(base.T @ base, jnp.eye(D), atol=1e-5)
+    np.testing.assert_allclose(householder_columns(base, jnp.zeros((D, 8))), basis[0], atol=1e-5)
+    reflectors = 1e-2 * jax.random.normal(jax.random.key(4), (D, 8))
+    columns = householder_columns(base, reflectors)
+    np.testing.assert_allclose(columns.T @ columns, jnp.eye(8), atol=1e-5)
+    changed_later = reflectors.at[:, 3:].set(0.5)
     np.testing.assert_allclose(
-        jnp.swapaxes(basis, 1, 2) @ basis, jnp.broadcast_to(jnp.eye(8), (4, 8, 8)), atol=1e-5
+        householder_columns(base, changed_later)[:, :3], columns[:, :3], atol=1e-5
     )
-    head = orthonormal(columns[:, :, :3])
-    np.testing.assert_allclose(basis[:, :, :3], head, atol=1e-5)
-    np.testing.assert_allclose(orthonormal(basis), basis, atol=1e-5)
+
+
+def test_a_reflector_step_moves_the_columns_twice_as_far() -> None:
+    base = complete_to_orthogonal(
+        np.asarray(random_orthonormal(5)), (8, 8, 8, 8), np.random.default_rng(1)
+    )[0]
+    reflectors = jnp.tril(1e-4 * jax.random.normal(jax.random.key(6), (D, 8)), -1)
+    moved = float(jnp.linalg.norm(householder_columns(base, reflectors) - base[:, :8]))
+    assert moved == pytest.approx(2 * float(jnp.linalg.norm(reflectors)), rel=0.1)
+
+
+def test_advanced_base_continues_from_the_trained_columns_and_stays_orthogonal() -> None:
+    base = complete_to_orthogonal(
+        np.asarray(random_orthonormal(7)), (8, 8, 8, 8), np.random.default_rng(2)
+    )[0]
+    reflectors = 0.05 * jax.random.normal(jax.random.key(8), (D, 8))
+    advanced = advanced_base(base, reflectors)
+    np.testing.assert_allclose(advanced[:, :8], householder_columns(base, reflectors), atol=1e-4)
+    np.testing.assert_allclose(advanced.T @ advanced, jnp.eye(D), atol=1e-4)
+
+
+def test_random_pca_basis_stays_within_the_components_and_pads_when_too_few() -> None:
+    rng = np.random.default_rng(3)
+    top = np.linalg.qr(rng.standard_normal((D, 5), np.float32))[0]
+    empty = np.zeros((D, 0), np.float32)
+    components = PrincipalComponents((top, top, empty, top), np.ones(4, bool))
+    basis = random_pca_basis(components, (3, 7, 2, 0), 8, rng)
+    assert random_pca_basis(
+        PrincipalComponents((empty,) * 4, np.zeros(4, bool)), (0, 0, 0, 0), 8, rng
+    ).shape == (4, D, 8)
+    for position in range(4):
+        np.testing.assert_allclose(basis[position].T @ basis[position], np.eye(8), atol=1e-4)
+    inside = top.T @ basis[0, :, :3]
+    np.testing.assert_allclose(inside.T @ inside, np.eye(3), atol=1e-4)
+    np.testing.assert_allclose(basis[1, :, :5], top, atol=1e-5)
+    np.testing.assert_allclose(top.T @ basis[1, :, 5:7], np.zeros((5, 2)), atol=1e-5)
+
+
+def test_principal_components_explain_the_base_stream_and_flag_unchanged_positions() -> None:
+    rng = np.random.default_rng(4)
+    direction = np.linalg.qr(rng.standard_normal((D, 2), np.float32))[0]
+    base = np.zeros((64, T, D), np.float32)
+    base[:, 1] = rng.standard_normal((64, 2), np.float32) @ direction.T
+    source = base.copy()
+    source[:, 1] += 1.0
+    pairs = PairStreams(
+        jnp.asarray(base), jnp.asarray(source), jnp.zeros(64, jnp.int32), jnp.zeros(64, jnp.int32)
+    )
+    components = principal_components(pairs, 64)
+    assert components.differs.tolist() == [True, False, False, False]
+    assert 1 <= components.top[0].shape[1] <= 2
+    assert components.top[1].shape[1] == 0
+    spanned = direction @ (direction.T @ components.top[0])
+    np.testing.assert_allclose(spanned, components.top[0], atol=1e-4)
+
+
+def test_training_keeps_the_subspace_orthonormal_changes_only_active_columns_and_lowers_the_loss() -> (
+    None
+):
+    model = tiny_model()
+    t = 3
+    integers = jnp.arange(VOCAB)
+    functions = SiteFunctions(model, t, integers, 1e-2)
+    rng = np.random.default_rng(5)
+    batch_tokens = jnp.asarray(rng.integers(0, VOCAB, (256, T)))
+    source_tokens = jnp.asarray(rng.integers(0, VOCAB, (256, T))).at[:, 0].set(batch_tokens[:, 0])
+    source = stream_at(model, source_tokens, t)
+    answers = jnp.argmax(logits_from(model, source, t), -1)
+    pairs = PairStreams(stream_at(model, batch_tokens, t), source, answers, answers)
+    dims = (0, 0, 0, 4)
+    mask = dimension_mask(dims, 8)
+    start = np.asarray(random_orthonormal(9))
+    full_base = complete_to_orthogonal(start, dims, rng)
+    before = evaluate(functions, columns_of(full_base, 8), mask, pairs)
+    trained = train_subspaces(functions, full_base, mask, pairs, 16, 60, 0)
+    after = evaluate(functions, columns_of(trained, 8), mask, pairs)
+    assert after.cross_entropy < before.cross_entropy
+    np.testing.assert_allclose(trained[3].T @ trained[3], jnp.eye(D), atol=1e-3)
+    np.testing.assert_allclose(trained[3, :, :4].T @ trained[3, :, :4], jnp.eye(4), atol=1e-3)
+    np.testing.assert_allclose(trained[0], jnp.eye(D), atol=1e-5)
 
 
 def test_removal_keeps_the_least_harmful_columns_first_and_q_orthonormal() -> None:
-    Q = orthonormal(jax.random.normal(jax.random.key(2), (4, D, 8)))
+    Q = random_orthonormal(2)
     scores = jnp.asarray([5.0, 1.0, 3.0, 2.0])  # removing column 1 then 3 hurts least
     pruned = remove_least_harmful(Q, 2, 4, 2, scores)
     np.testing.assert_allclose(pruned[2, :, 0], Q[2, :, 0])

@@ -29,10 +29,11 @@ from param_decomp.das.load_das_experiment_config import Variable, load_das_exper
 from param_decomp.das.patched_llama_forward import load_llama
 from param_decomp.das.train_das_subspaces import (
     SiteFunctions,
+    columns_of,
     dimension_mask,
     evaluate,
     load_split,
-    svd_initialization,
+    principal_components,
     timed_full_fit,
 )
 from param_decomp.pruning.problem import integer_token_ids
@@ -101,12 +102,13 @@ def main() -> None:
                 functions, config.paths.tokenized_prompts, pairs_dir, "addition", variable,
                 VALIDATION, validation_pairs,
             )  # fmt: skip
-            initial_basis, _ = svd_initialization(train, settings.svd_pairs)
+            components = principal_components(train, settings.pca_pairs)
             for n_train in TRAIN_PAIRS:
                 subset = train.head(n_train)
-                basis, seconds, steps = timed_full_fit(
-                    functions, initial_basis, DIMS, subset, settings.batch_size, settings.epochs, 0
+                full_base, seconds, steps = timed_full_fit(
+                    functions, components, DIMS, subset, settings.batch_size, settings.epochs, 0
                 )
+                basis = columns_of(full_base)
                 held_out = evaluate(functions, basis, mask, validation)
                 rows.append(
                     {
