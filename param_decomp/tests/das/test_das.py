@@ -1,5 +1,7 @@
 """The DAS forward, patch, pruning search and pair sampling on a tiny random Llama."""
 
+from pathlib import Path
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -15,7 +17,9 @@ from param_decomp.das.prune_das_subspaces import (
     round_passes,
     search_position,
 )
+from param_decomp.das.run_das_pilot import require_matching_settings
 from param_decomp.das.train_das_subspaces import (
+    EVALUATION_CHUNK,
     PairStreams,
     PrincipalComponents,
     SiteFunctions,
@@ -220,6 +224,36 @@ def test_removal_keeps_the_least_harmful_columns_first_and_q_orthonormal() -> No
     np.testing.assert_allclose(pruned[2, :, 0], Q[2, :, 0])
     np.testing.assert_allclose(pruned[2, :, 1], Q[2, :, 2])
     np.testing.assert_allclose(pruned[2].T @ pruned[2], jnp.eye(8), atol=1e-5)
+
+
+def test_evaluation_counts_only_the_real_pairs_of_a_short_last_chunk() -> None:
+    model = tiny_model()
+    t = 3
+    functions = SiteFunctions(model, t, jnp.arange(VOCAB), 1e-3)
+    rng = np.random.default_rng(6)
+    n = EVALUATION_CHUNK + 5
+    tokens = jnp.asarray(rng.integers(0, VOCAB, (n, T)))
+    stream = stream_at(model, tokens, t)
+    top = jnp.argmax(logits_from(model, stream, t), -1)
+    # The source is the base, so the patch changes nothing, and only the last pair's answer is right.
+    wrong = (top + 1) % VOCAB
+    answers = wrong.at[-1].set(top[-1])
+    pairs = PairStreams(stream, stream, answers, answers)
+    metrics = evaluate(functions, random_orthonormal(10), dimension_mask((8, 8, 8, 8), 8), pairs)
+    assert metrics.iia == pytest.approx(1 / n)
+    assert metrics.full_vocabulary_iia == pytest.approx(1 / n)
+
+
+def test_results_from_other_settings_are_refused(tmp_path: Path) -> None:
+    path = tmp_path / "settings.json"
+    stale = tmp_path / "start_64_dims.npz"
+    stale.touch()
+    with pytest.raises(AssertionError, match="unknown settings"):
+        require_matching_settings(path, {"learning_rate": 1e-4}, [stale])
+    require_matching_settings(path, {"learning_rate": 1e-4}, [])
+    require_matching_settings(path, {"learning_rate": 1e-4}, [stale])
+    with pytest.raises(AssertionError, match="other settings"):
+        require_matching_settings(path, {"learning_rate": 2e-4}, [stale])
 
 
 def test_a_round_that_improves_on_the_reference_passes() -> None:

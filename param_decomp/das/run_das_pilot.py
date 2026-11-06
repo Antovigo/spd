@@ -37,6 +37,7 @@ from param_decomp.das.prune_das_subspaces import (
 )
 from param_decomp.das.train_das_subspaces import (
     EVALUATION_CHUNK,
+    METHOD,
     PairStreams,
     SiteFunctions,
     columns_of,
@@ -64,6 +65,19 @@ def write_rows(path: Path, rows: list[dict[str, object]]) -> None:
         writer.writeheader()
         writer.writerows(rows)
     temporary.replace(path)
+
+
+def require_matching_settings(
+    path: Path, settings: dict[str, object], earlier_results: list[Path]
+) -> None:
+    """Fail if this folder's results came from other settings, so stale fits are never reused."""
+    if path.exists():
+        saved = json.loads(path.read_text())
+        assert saved == settings, f"{path} holds other settings: {saved} against {settings}"
+        return
+    assert not earlier_results, f"results with unknown settings: {earlier_results}"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(settings, indent=1, sort_keys=True))
 
 
 def start_dims(
@@ -113,6 +127,19 @@ def run_fit_quality(
     build: Callable[[float], SiteFunctions],
 ) -> None:
     path = site_dir / "hyperparameter_and_pair_count_sweep.csv"
+    require_matching_settings(
+        site_dir / "fit_quality_settings.json",
+        {
+            "method": METHOD,
+            "learning_rates": list(config.pilot.learning_rates),
+            "train_pairs": list(config.pilot.train_pairs),
+            "pca_pairs": config.training.pca_pairs,
+            "batch_size": config.training.batch_size,
+            "epochs": config.training.epochs,
+            "prompt_pairs": config.prompt_pairs.model_dump(),
+        },
+        [path] if path.exists() else [],
+    )
     if path.exists():
         print(f"{path} exists; nothing to do", flush=True)
         return
@@ -180,6 +207,22 @@ def run_search(
     only_drop_then_bisect: bool,
 ) -> None:
     settings = config.training
+    earlier_results = [
+        path
+        for path in [*site_dir.glob("*.csv"), site_dir / "start_64_dims.npz"]
+        if path.exists() and path.name != "hyperparameter_and_pair_count_sweep.csv"
+    ]
+    require_matching_settings(
+        site_dir / "search_settings.json",
+        {
+            "method": METHOD,
+            "training": settings.model_dump(),
+            "pruning": config.pruning.model_dump(),
+            "finetune_epochs": list(config.pilot.finetune_epochs),
+            "prompt_pairs": config.prompt_pairs.model_dump(),
+        },
+        earlier_results,
+    )
     functions = build(settings.learning_rate)
     train = load_split(
         functions, config.paths.tokenized_prompts, config.paths.prompt_pairs,
