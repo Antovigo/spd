@@ -130,7 +130,7 @@ def run_fit_quality(
                 functions, config.paths.tokenized_prompts, config.paths.prompt_pairs,
                 site.task, site.variable, VALIDATION, config.prompt_pairs.validation_pairs,
             )  # fmt: skip
-            initial_basis, differs = svd_initialization(loaded["train"], settings.train_pairs)
+            initial_basis, differs = svd_initialization(loaded["train"], settings.svd_pairs)
         assert initial_basis is not None and differs is not None
         dims = start_dims(config, site, np.asarray(differs))
         mask = dimension_mask(dims)
@@ -186,7 +186,7 @@ def run_search(
         site.task, site.variable, VALIDATION, config.prompt_pairs.validation_pairs,
     )  # fmt: skip
     scoring = train.head(config.pruning.prune_score_pairs)
-    initial_basis, differs = svd_initialization(train, settings.train_pairs)
+    initial_basis, differs = svd_initialization(train, settings.svd_pairs)
     dims = start_dims(config, site, np.asarray(differs))
     start_path = site_dir / "start_64_dims.npz"
     site_dir.mkdir(parents=True, exist_ok=True)
@@ -206,6 +206,9 @@ def run_search(
         temporary.replace(start_path)
     reference = evaluate(functions, start_basis, dimension_mask(dims), validation)
     print(f"reference validation IIA {reference.iia:.4f}, fit seconds {seconds:.0f}", flush=True)
+    if reference.iia < config.pruning.min_iia_for_position_search:
+        print(f"reference IIA below the search threshold; skipping {site.name}", flush=True)
+        return
     active = tuple(p for p in range(4) if dims[p] > 0)
     order = rank_positions(functions, start_basis, dims, active, scoring)
     print(f"position order {[p + 1 for p in order]}", flush=True)

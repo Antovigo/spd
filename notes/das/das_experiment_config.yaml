@@ -22,13 +22,15 @@ patched_positions:
   result: [3, 4]
 
 training:
-  learning_rate: 0.0001  # replaced by the pilot's choice
-  train_pairs: 3584  # replaced by the pilot's choice
+  learning_rate: 0.0001  # chosen by the pilot: highest mean validation IIA of {1e-4, 1e-3, 1e-2}
+  train_pairs: 14336  # chosen by the pilot: mean validation IIA 0.7204 against 0.6833 at 3584 pairs
+  svd_pairs: 3584
   batch_size: 16
   epochs: 8
 
 pruning:
   position_margin: 0.02
+  min_iia_for_position_search: 0.40
   prune_score_pairs: 256
   fresh_fit_ladder: [48, 32, 24, 16, 12, 8, 6, 4, 3, 2, 1, 0]
 

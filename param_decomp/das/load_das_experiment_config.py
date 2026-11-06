@@ -35,12 +35,14 @@ class PromptPairSettings(_Frozen):
 class TrainingSettings(_Frozen):
     learning_rate: float
     train_pairs: int
+    svd_pairs: int
     batch_size: int
     epochs: int
 
 
 class PruningSettings(_Frozen):
     position_margin: float
+    min_iia_for_position_search: float
     prune_score_pairs: int
     fresh_fit_ladder: tuple[int, ...]
 

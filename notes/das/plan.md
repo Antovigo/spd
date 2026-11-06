@@ -255,6 +255,19 @@ The pilot has two stages, so the fit quality results can be read before the sear
 the learning rate and pair count with the highest mean validation IIA over the eight sites, using 14,336 pairs only if that
 raises the mean by more than 0.02 over 3,584 pairs. They are then written in the settings file.
 
+**Fit quality result.** Mean validation IIA over the eight sites, at batch 16 and 8 epochs:
+
+| Learning rate | 3,584 pairs | 14,336 pairs |
+|---|---|---|
+| 1e-4 | 0.683 | 0.720 |
+| 1e-3 | 0.602 | 0.624 |
+| 1e-2 | 0.218 | 0.201 |
+
+By the rule above, the settings are learning rate 1e-4 and 14,336 pairs. 1e-4 is the lowest learning rate tested, so a lower
+one might do better. With these settings, `r` at block 0 has validation IIA of at most 0.3%, below
+`min_iia_for_position_search`, so the two `r` sites at block 0 skip the search and six sites run it. The upper bounds in the
+table above were for eight sites at 3,584 pairs. A one-epoch fine-tune now has 896 steps, and a full fit 7,168.
+
 The pilot also measures seconds per fit and fine-tune against `t`. Runs go one at a time per GPU unless the projected
 cost requires running several in parallel. That would add code, since pruning paths diverge in array shape.
 
