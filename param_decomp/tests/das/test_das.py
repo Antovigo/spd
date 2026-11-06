@@ -250,10 +250,11 @@ def test_results_from_other_settings_are_refused(tmp_path: Path) -> None:
     stale.touch()
     with pytest.raises(AssertionError, match="unknown settings"):
         require_matching_settings(path, {"learning_rate": 1e-4}, [stale])
-    require_matching_settings(path, {"learning_rate": 1e-4}, [])
-    require_matching_settings(path, {"learning_rate": 1e-4}, [stale])
+    settings: dict[str, object] = {"learning_rate": 1e-4, "ladder": (48, 32)}
+    require_matching_settings(path, settings, [])
+    require_matching_settings(path, settings, [stale])
     with pytest.raises(AssertionError, match="other settings"):
-        require_matching_settings(path, {"learning_rate": 2e-4}, [stale])
+        require_matching_settings(path, {"learning_rate": 2e-4, "ladder": (48, 32)}, [stale])
 
 
 def test_a_round_that_improves_on_the_reference_passes() -> None:

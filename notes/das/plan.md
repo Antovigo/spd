@@ -59,8 +59,8 @@ Each value is a key in `$REPO/notes/das/das_experiment_config.yaml` (section 9).
 2. **`min_iia_for_position_search` = 0.40 at `k_p` = 64.** Two risks, both checked in the pilot:
    - The paper's best operand IIA for addition with operands up to 100 was 61.7% and 63.8%, so with operands up to 400
      few operand sites may pass.
-   - The initialization holds both operands, since the source differs in both. So IIA for `a` or `b` might rise as `k`
-     falls, which would make `k_p` = 64 a poor screen and a poor reference. The pilot's fresh ladder measures this.
+   - IIA for `a` or `b` might rise as `k` falls, which would make `k_p` = 64 a poor screen and a poor reference. The pilot's
+     fresh ladder measures this.
 3. **One pair set per task, shared by the three variables.** All four prompts must be correct, which keeps 33.8% of
    correct subtraction pairs (section 5).
 4. **Objective:** cross-entropy against the expected answer, as in the paper (section 6).
@@ -70,20 +70,6 @@ Each value is a key in `$REPO/notes/das/das_experiment_config.yaml` (section 9).
 7. **Pruning budgets:** `finetune_epochs` = 1, chosen by the pilot from {1, 4}, and `prune_score_pairs` = 256.
 8. **Pilot pass rule for pruning** (section 7.1). If no arm passes, the fresh-fit search stays available.
 9. **Split:** 60% train, 20% validation and 20% test (section 5).
-
-### Removed in this revision
-
-Each item was checked against the question above. Any of them can be restored.
-
-| Removed | Why | What is lost |
-|---|---|---|
-| Uniform descent with one shared `k`, the lowest `k` beating chance, and `k_95` | It was the largest cost (4,224 full fits), and pruning already gives dimensions per position and an IIA curve | Your descent to chance, and a curve from fresh fits at every site. The pilot still has the fresh curve at 8 sites |
-| Chance as a decision | With the 0.40 threshold it decided nothing | Nothing: random-subspace IIA is still reported per site |
-| Rerun seeds | Seeds only change batches, and the paper does not use them as a control | The spread of `k_p` across seeds |
-| Subspace overlap | The double patch tests the same concern causally | The paper's overlap measure |
-| Test pair top-up by digit count | Added code and a file column for small bins | Small bins have wide intervals, for example about 53 test pairs with a one-digit `a` on addition. Pair counts are reported |
-| Batch, epoch and 57,344-pair sweeps, and `finetune_epochs` = 0.25 | The fit quality question is the learning rate and whether 3,584 pairs overfit | The paper's batch and epochs are used without re-checking them |
-| Cross-entropy and integer mass in the result tables | No part of the question uses them | They stay available during the pilot |
 
 ## 3. What the paper does
 
@@ -256,11 +242,6 @@ that and the choice between the fresh-fit search and a changed pruning arm is yo
 The pilot has two stages, so the fit quality results can be read before the search starts. **Choosing the fit settings:**
 the learning rate and pair count with the highest mean validation IIA over the eight sites, using 14,336 pairs only if that
 raises the mean by more than 0.02 over 3,584 pairs. They are then written in the settings file.
-
-**Earlier fit quality result, now superseded.** The sweep and search above ran with our earlier initialization (top singular
-vectors of source minus base) and parametrization (Cholesky QR after each update), which section 7.6 shows cost IIA. They must
-be rerun with section 8's settings. The superseded runs chose learning rate 1e-4 and 14,336 pairs, and `r` at block 0 stayed
-near chance, below `min_iia_for_position_search`.
 
 The pilot also measures seconds per fit and fine-tune against `t`. Runs go one at a time per GPU unless the projected
 cost requires running several in parallel. That would add code, since pruning paths diverge in array shape.

@@ -71,6 +71,8 @@ def require_matching_settings(
     path: Path, settings: dict[str, object], earlier_results: list[Path]
 ) -> None:
     """Fail if this folder's results came from other settings, so stale fits are never reused."""
+    # Through JSON first, since a saved tuple comes back as a list.
+    settings = json.loads(json.dumps(settings))
     if path.exists():
         saved = json.loads(path.read_text())
         assert saved == settings, f"{path} holds other settings: {saved} against {settings}"
