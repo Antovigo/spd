@@ -133,6 +133,9 @@ def test_schedule_halves_then_steps_and_bisects_after_a_failure() -> None:
     assert next_target("halve_then_single_steps", 17, 16) is None
     assert next_target("halve_then_single_steps", 0, None) is None
 
+    assert next_target("drop_then_bisect", 64, None) == 0
+    assert next_target("drop_then_bisect", 64, 0) == 32
+
     tried: list[int] = []
 
     def passes_down_to_20(target: int) -> bool:
@@ -142,6 +145,8 @@ def test_schedule_halves_then_steps_and_bisects_after_a_failure() -> None:
     assert search_position("halve_then_single_steps", 64, passes_down_to_20) == 20
     assert tried == [32, 16, 24, 20, 18, 19]
     assert search_position("single_steps", 3, lambda target: target >= 2) == 2
+    assert search_position("drop_then_bisect", 64, lambda target: target == 0) == 0
+    assert search_position("drop_then_bisect", 64, lambda target: target >= 20) == 20
 
 
 def test_fresh_search_tries_every_step_and_keeps_the_lowest_pass() -> None:

@@ -47,7 +47,7 @@ from param_decomp.das.train_das_subspaces import (
 )
 from param_decomp.pruning.problem import integer_token_ids
 
-type Stage = Literal["fit_quality", "search", "summary"]
+type Stage = Literal["fit_quality", "search", "drop_then_bisect", "summary"]
 CORRECTNESS_SAMPLE = 1024
 MIN_CORRECTNESS_AGREEMENT = 0.99
 TRAIN_IIA_PAIRS = 3584
@@ -174,6 +174,7 @@ def run_search(
     site: PilotSite,
     site_dir: Path,
     build: Callable[[float], SiteFunctions],
+    only_drop_then_bisect: bool,
 ) -> None:
     settings = config.training
     functions = build(settings.learning_rate)
@@ -247,13 +248,14 @@ def run_search(
         write_rows(path, rows)
         print(f"{name}: final dimensions {final}", flush=True)
 
-    run_arm(
-        "fresh_fits",
-        lambda report: fresh_fit_search(
-            functions, initial_basis, dims, order, config.pruning.fresh_fit_ladder, train, validation,
-            settings.batch_size, settings.epochs, margin, reference.iia, 0, report,
-        ),
-    )  # fmt: skip
+    if not only_drop_then_bisect:
+        run_arm(
+            "fresh_fits",
+            lambda report: fresh_fit_search(
+                functions, initial_basis, dims, order, config.pruning.fresh_fit_ladder, train,
+                validation, settings.batch_size, settings.epochs, margin, reference.iia, 0, report,
+            ),
+        )  # fmt: skip
 
     def prune_arm(
         schedule: Schedule, finetune_epochs: int
@@ -267,6 +269,9 @@ def run_search(
 
         return search
 
+    if only_drop_then_bisect:
+        run_arm("pruning_drop_then_bisect_1_epochs", prune_arm("drop_then_bisect", 1))
+        return
     for epochs in config.pilot.finetune_epochs:
         run_arm(f"pruning_halve_then_single_steps_{epochs}_epochs",
                 prune_arm("halve_then_single_steps", epochs))  # fmt: skip
@@ -306,7 +311,9 @@ def main() -> None:
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=Path, required=True)
-    parser.add_argument("--stage", choices=("fit_quality", "search", "summary"), required=True)
+    parser.add_argument(
+        "--stage", choices=("fit_quality", "search", "drop_then_bisect", "summary"), required=True
+    )
     parser.add_argument("--site", type=int)
     arguments = parser.parse_args()
     config = load_das_experiment_config(arguments.config)
@@ -330,7 +337,9 @@ def main() -> None:
         case "fit_quality":
             run_fit_quality(config, site, site_dir, build)
         case "search":
-            run_search(config, site, site_dir, build)
+            run_search(config, site, site_dir, build, only_drop_then_bisect=False)
+        case "drop_then_bisect":
+            run_search(config, site, site_dir, build, only_drop_then_bisect=True)
     print(f"DAS pilot {stage} finished: {json.dumps(site.name)}", flush=True)
 
 

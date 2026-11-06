@@ -7,9 +7,9 @@
 #SBATCH -t 24:00:00
 #SBATCH --array=0-7%4
 #SBATCH -o /mnt/nw/home/a.vigouroux/pd_scratch/das_job_logs/%x-%A_%a.out
-# One DAS pilot site per array task. STAGE is fit_quality or search.
+# One DAS pilot site per array task. STAGE is fit_quality, search or drop_then_bisect.
 set -euo pipefail
-STAGE="${STAGE:?set STAGE to fit_quality or search}"
+STAGE="${STAGE:?set STAGE}"
 REPO=/mnt/nw/home/a.vigouroux/Code/param-decomp/das
 PY=/mnt/nw/home/a.vigouroux/Code/param-decomp/dual_obj_jax/.venv/bin/python
 FRESH=$(mktemp -d); trap 'rm -rf "$FRESH"' EXIT

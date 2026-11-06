@@ -20,7 +20,7 @@ from param_decomp.das.train_das_subspaces import (
     train_subspaces,
 )
 
-type Schedule = Literal["halve_then_single_steps", "single_steps"]
+type Schedule = Literal["halve_then_single_steps", "single_steps", "drop_then_bisect"]
 
 
 def round_passes(iia: float, reference_iia: float, position_margin: float) -> bool:
@@ -40,6 +40,8 @@ def next_target(schedule: Schedule, current: int, failed: int | None) -> int | N
             return current - 1
         case "halve_then_single_steps":
             return current // 2 if current > 16 else current - 1
+        case "drop_then_bisect":
+            return 0
 
 
 def search_position(schedule: Schedule, start: int, try_target: Callable[[int], bool]) -> int:
@@ -171,7 +173,12 @@ def prune_search(
             started = time.monotonic()
             k = dims[position]
             rotated = rotate_by_energy(basis, position, k, train)
-            scores = score_removals(functions, rotated, dims, position, scoring)
+            # Dropping the whole position has nothing to rank.
+            scores = (
+                jnp.zeros(k)
+                if target == 0
+                else score_removals(functions, rotated, dims, position, scoring)
+            )
             candidate = remove_least_harmful(rotated, position, k, target, scores)
             candidate_dims = tuple(target if p == position else dims[p] for p in range(N_PATCHED))
             mask = dimension_mask(candidate_dims)

@@ -242,6 +242,9 @@ pruning reach what fresh fits reach?
 | Pruning, `prune_schedule` | `finetune_epochs` {1, 4} | At most 864 fine-tunes |
 | Pruning, single steps from 64, addition sites only | `finetune_epochs` = 1. Tests the shortcuts in the schedule | At most 768 fine-tunes |
 
+A further arm, added after the first results, tries `k_p` = 0 first at each position, then bisects between the last pass and
+the failure: at most about 7 fine-tunes per position, at `finetune_epochs` = 1.
+
 The pruning arms use the same position order as the fresh-fit search, so the comparison isolates the method. For each
 arm, the pilot records the `k_p` tuple, the sum of `k_p`, the IIA gap from the reference, and seconds.
 
