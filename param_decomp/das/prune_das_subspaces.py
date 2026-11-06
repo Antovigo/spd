@@ -88,14 +88,14 @@ def score_removals(
     mask = dimension_mask(dims)
     scores = []
     for column in range(dims[position]):
-        *_, cross_entropy_sum = functions.evaluate_chunk(
+        *_, cross_entropy = functions.evaluate_chunk(
             basis,
             mask.at[position, column].set(0.0),
             scoring.base,
             scoring.source,
             scoring.expected_token,
         )
-        scores.append(cross_entropy_sum / scoring.n)
+        scores.append(cross_entropy.mean())
     return jnp.stack(scores)
 
 
@@ -122,14 +122,14 @@ def rank_positions(
     mask = dimension_mask(dims)
     rises = []
     for position in positions:
-        *_, cross_entropy_sum = functions.evaluate_chunk(
+        *_, cross_entropy = functions.evaluate_chunk(
             basis,
             mask.at[position].set(0.0),
             scoring.base,
             scoring.source,
             scoring.expected_token,
         )
-        rises.append(float(cross_entropy_sum))
+        rises.append(float(cross_entropy.mean()))
     return tuple(p for _, p in sorted(zip(rises, positions, strict=True)))
 
 

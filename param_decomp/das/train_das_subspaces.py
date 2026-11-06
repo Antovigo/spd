@@ -33,6 +33,8 @@ MAX_DIMS = 64
 EVALUATION_CHUNK = 256
 MIN_EXPLAINED_VARIANCE = 0.9
 MAX_COMPONENTS = 500
+METHOD = "feucht_random_pca_householder"
+"""Names the initialization and parametrization, so results from any other method are not reused."""
 
 
 def expected_answer(
@@ -136,15 +138,13 @@ class SiteFunctions:
         def evaluate_chunk(
             weights: Llama, basis: Array, mask: Array, base: Array, source: Array, y: Array
         ) -> tuple[Array, Array, Array]:
-            """The top integer and the top token of the full vocabulary per pair, and the summed
-            cross-entropy."""
+            """The top integer, the top token of the full vocabulary and the cross-entropy, per pair."""
             logits = logits_from(weights, patch_stream(base, source, basis, mask), t)
             log_probs = jax.nn.log_softmax(logits, -1)
-            cross_entropy_sum = -jnp.take_along_axis(log_probs, y[:, None], axis=1).sum()
             return (
                 jnp.argmax(logits[:, integer_tokens], -1),
                 jnp.argmax(logits, -1),
-                cross_entropy_sum,
+                -jnp.take_along_axis(log_probs, y[:, None], axis=1)[:, 0],
             )
 
         self.train_step = partial(jax.jit(train_step), model)
@@ -325,13 +325,16 @@ def evaluate(functions: SiteFunctions, basis: Array, mask: Array, pairs: PairStr
     integer_hits = token_hits = 0
     cross_entropy_sum = 0.0
     for s in range(0, pairs.n, EVALUATION_CHUNK):
-        chunk = jnp.arange(s, s + EVALUATION_CHUNK)
-        top_integer, top_token, ce = functions.evaluate_chunk(
+        # A short last chunk is padded to the compiled shape, and only its real pairs are counted.
+        n_real = min(EVALUATION_CHUNK, pairs.n - s)
+        chunk = jnp.minimum(jnp.arange(s, s + EVALUATION_CHUNK), pairs.n - 1)
+        top_integer, top_token, cross_entropy = functions.evaluate_chunk(
             basis, mask, pairs.base[chunk], pairs.source[chunk], pairs.expected_token[chunk]
         )
-        integer_hits += int((top_integer == pairs.expected_integer[chunk]).sum())
-        token_hits += int((top_token == pairs.expected_token[chunk]).sum())
-        cross_entropy_sum += float(ce)
+        real = chunk[:n_real]
+        integer_hits += int((top_integer[:n_real] == pairs.expected_integer[real]).sum())
+        token_hits += int((top_token[:n_real] == pairs.expected_token[real]).sum())
+        cross_entropy_sum += float(cross_entropy[:n_real].sum())
     return Metrics(integer_hits / pairs.n, token_hits / pairs.n, cross_entropy_sum / pairs.n)
 
 
