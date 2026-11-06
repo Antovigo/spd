@@ -9,6 +9,7 @@ SSH="ssh -p $POD_PORT -i $KEY -o StrictHostKeyChecking=accept-new -c aes128-gcm@
 RUN=out/pod-backup/p-ba8b0c08
 PRUNING=$RUN/analysis/pruning/step_40000/addsub-08-prune
 WEIGHTS=.cache/huggingface/hub/models--meta-llama--Llama-3.1-8B/snapshots/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b
+$SSH "root@$POD_HOST" "command -v rsync >/dev/null || (apt-get update -qq && apt-get install -y -qq rsync >/dev/null)"
 cd ~
 rsync -rLtR -e "$SSH" "$RUN/prompts/tokenized.npz" "$PRUNING/references.npz" "$PRUNING/config.yaml" \
   "$RUN/analysis/das/prompt_pairs" "root@$POD_HOST:/root/"
