@@ -13,7 +13,7 @@ $SSH "root@$POD_HOST" "command -v rsync >/dev/null || (apt-get update -qq && apt
 cd ~
 rsync -rLtR -e "$SSH" "$RUN/prompts/tokenized.npz" "$PRUNING/references.npz" "$PRUNING/config.yaml" \
   "$RUN/analysis/das/prompt_pairs" "root@$POD_HOST:/root/"
-find "$WEIGHTS" -type f | grep -E 'json$|safetensors$' \
+find -L "$WEIGHTS" -type f | grep -E 'json$|safetensors$' \
   | xargs -P 4 -I{} rsync -rLtR -e "$SSH" {} "root@$POD_HOST:/root/"
 $SSH "root@$POD_HOST" 'bash -s' <<'REMOTE'
 set -euo pipefail
