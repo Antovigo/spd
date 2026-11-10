@@ -11,6 +11,7 @@ from param_decomp.core.configs import (
     BatchHiddenActsNormalization,
     CaptureReconstruction,
     PerPositionHiddenActsNormalization,
+    PositionMeanHiddenActsNormalization,
 )
 from param_decomp.core.losses import relative_squared_error
 
@@ -43,7 +44,9 @@ def test_per_position_normalization_does_not_let_one_position_silence_the_others
     clean = jnp.ones((b, t, d))
     clean = clean.at[:, 0, :].set(1000.0)  # position 0: 1e6 energy per entry vs 8 elsewhere
     masked = clean.at[:, 1:, :].set(0.0)  # BOS perfect, every other position fully lost
-    batch = float(relative_squared_error(masked, clean))
+    batch = float(
+        relative_squared_error(masked, clean, normalization=BatchHiddenActsNormalization())
+    )
     per_position = float(relative_squared_error(masked, clean, normalization=PER_POSITION))
     assert batch < 1e-4  # 4*4*8 / (4*8e6 + 4*4*8) ~ 4e-6: the point is silent
     # 4 of 5 positions at ratio 8/(8 + 0.01*8) = 1/1.01, BOS at 0; median energy is 8.
@@ -102,7 +105,9 @@ def test_per_position_normalization_is_the_batch_mode_when_energies_are_uniform(
     pins the per-position mean to `1/(B·T)` per token — the KL's and imp-min's normalization."""
     clean = jnp.full((3, 4, 8), 2.0)
     masked = clean * 1.25
-    batch = float(relative_squared_error(masked, clean))
+    batch = float(
+        relative_squared_error(masked, clean, normalization=BatchHiddenActsNormalization())
+    )
     per_position = float(relative_squared_error(masked, clean, normalization=PER_POSITION))
     assert batch == 0.0625
     assert per_position == pytest.approx(0.0625 / 1.01, rel=1e-6)
@@ -110,7 +115,7 @@ def test_per_position_normalization_is_the_batch_mode_when_energies_are_uniform(
 
 def test_capture_normalization_parses_and_refuses_a_zero_floor_or_a_non_rse_distance():
     """Parsed the way YAML arrives: the `kind` discriminator selects the form, the floor
-    defaults to 0.01, the default form is the original `batch`, a zero floor is refused, and
+    defaults to 0.01, the default form is upstream's `position_mean`, a zero floor is refused, and
     only relative squared error takes a normalization."""
     cfg = CaptureReconstruction.model_validate(
         {
@@ -122,7 +127,7 @@ def test_capture_normalization_parses_and_refuses_a_zero_floor_or_a_non_rse_dist
     assert isinstance(cfg.normalization, PerPositionHiddenActsNormalization)
     assert cfg.normalization.floor_fraction == 0.01
     default = CaptureReconstruction(capture="resid.1", distance="relative_squared_error")
-    assert isinstance(default.normalization, BatchHiddenActsNormalization)
+    assert isinstance(default.normalization, PositionMeanHiddenActsNormalization)
     with pytest.raises(ValidationError):
         CaptureReconstruction.model_validate(
             {
@@ -166,3 +171,14 @@ def test_per_position_normalization_runs_with_a_batch_sharded_argument():
         )
     unsharded = float(relative_squared_error(masked, clean, normalization=PER_POSITION))
     assert got == pytest.approx(unsharded, rel=1e-5)
+
+
+def test_position_mean_is_upstreams_per_position_ratio():
+    """`position_mean` (the `CaptureReconstruction` default) is upstream's form: each entry
+    against its own clean energy with only a 1e-8 floor, then the mean over entries."""
+    b, t, d = 4, 5, 8
+    clean = jnp.ones((b, t, d)).at[:, 0, :].set(1000.0)
+    masked = clean.at[:, 1:, :].set(0.0)
+    assert float(relative_squared_error(masked, clean)) == pytest.approx(0.8, rel=1e-6)
+    silent = jnp.zeros((1, 2, 3))
+    assert float(relative_squared_error(silent, silent)) == 0.0

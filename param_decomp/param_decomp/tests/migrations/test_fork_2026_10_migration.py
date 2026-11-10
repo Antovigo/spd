@@ -9,7 +9,7 @@ import yaml
 from param_decomp.experiments.lm.config import LMTargetedExperimentConfig
 from param_decomp.migrations.fork_2026_10 import migrate_raw
 
-_REPO = Path(__file__).resolve().parents[3]
+_REPO = Path(__file__).resolve().parents[4]
 _CURRENT = _REPO / "notes/dual_objective/addsub-all-layers-4xh100-08.yaml"
 
 

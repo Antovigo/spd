@@ -546,6 +546,10 @@ data:
   eval:
     kind: name
     name: fineweb_llama_tok_64_eval
+  # Written 2026-11-10 for the upstream 177d0cce8 schema: what -08's trainer chose at startup
+  # (`migrations.data_layout`: a GLU transformer reads documents; width from meta.json).
+  layout: documents
+  seq_len: 64
 runtime:
   # `~` expands to the pod user's home; the guide symlinks it onto the network volume so
   # the multi-minute compile survives a pod restart.
