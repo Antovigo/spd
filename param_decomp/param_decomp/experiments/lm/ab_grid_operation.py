@@ -107,7 +107,9 @@ def make_ab_grid_operation(
     tokenizer = AutoTokenizer.from_pretrained(
         str(hf_snapshot_dir(target.model_name)), local_files_only=True
     )
-    probe = build_arithmetic_probe(config.operation, config.a_range, config.b_range, tokenizer)
+    probe = build_arithmetic_probe(
+        config.operation, config.a_range, config.b_range, tokenizer, config.prompt_template
+    )
     n_prompts, seq_len = probe.tokens.shape
     positions = resolve_positions(config.positions, seq_len)
     chunk_prompts = config.chunk_prompts or n_prompts

@@ -95,3 +95,15 @@ def test_build_arithmetic_probe_mul_accepts_multi_token_products():
     # 40×50=2000 splits under split_from=1000; mul never reads the answer, so it builds
     probe = build_arithmetic_probe("mul", (40, 41), (50, 51), _StubTokenizer(split_from=1000))
     assert probe.tokens.shape == (4, 5) and probe.answer_position == 4
+
+
+def test_prompt_template_writes_the_grid_prompts():
+    # A training pool's own format: the stub drops the words, so "Answer: 1 + 2 = " encodes
+    # to BOS, 1, +, 2, = — the template places the operands and operator, nothing else.
+    probe = build_arithmetic_probe(
+        "add", (1, 3), (1, 4), _StubTokenizer(), template="Answer: {a} {op} {b} = "
+    )
+    assert probe.tokens[1].tolist() == [BOS, 1001, SYMBOL_IDS["+"], 1002, SYMBOL_IDS["="]]
+    assert probe.answer_position == 4
+    with pytest.raises(AssertionError, match="exactly the fields"):
+        build_arithmetic_prompt_grid("add", (1, 2), (1, 2), _StubTokenizer(), template="{a}+{c}=")

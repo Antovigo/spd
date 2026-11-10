@@ -1,5 +1,6 @@
 """Authored metric schemas whose semantics require an LM target."""
 
+import string
 from collections.abc import Sequence
 from typing import Annotated, ClassVar, Literal, Self
 
@@ -211,6 +212,10 @@ class ABGridDatasetConfig(BaseConfig):
     operation: Literal["add", "sub", "mul"] = "add"
     a_range: tuple[int, int] = (1, 100)
     b_range: tuple[int, int] = (1, 100)
+    prompt_template: str = "{a}{op}{b}="
+    """The grid's prompt, with fields `{a}`, `{op}` and `{b}` — the training pool's format, so
+    the grids read the prompts the decomposition was trained on (default: the bare
+    `{a}{op}{b}=`). The last position must be the one that predicts the answer."""
     positions: list[int] | None = None
     """Prompt positions to record (negatives allowed). `null` records the answer (last)
     position alone. Each extra position multiplies both the gathered columns and the
@@ -224,6 +229,15 @@ class ABGridDatasetConfig(BaseConfig):
     is chunk-count-invariant and their values match the unchunked pass up to float
     reassociation (SPEC D4). Prefer a multiple of the device count so no chunk carries
     sharding pad."""
+
+    @model_validator(mode="after")
+    def validate_prompt_template(self) -> Self:
+        fields = {name for _, name, _, _ in string.Formatter().parse(self.prompt_template) if name}
+        assert fields == {"a", "op", "b"}, (
+            f"prompt_template {self.prompt_template!r} must use exactly the fields {{a}}, "
+            f"{{op}}, {{b}}, got {sorted(fields)}"
+        )
+        return self
 
 
 class TwoStreamCIMeanPerComponentConfig(BaseConfig):

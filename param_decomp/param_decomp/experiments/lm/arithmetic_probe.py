@@ -1,6 +1,7 @@
 """Build the in-memory `a x b` modular-arithmetic prompt grid and eval probe.
 
-The grid is the `[a_range] x [b_range]` set of `"<a><symbol><b>="` prompts, tokenized
+The grid is the `[a_range] x [b_range]` set of prompts `template.format(a=a, op=symbol, b=b)`
+(by default `"<a><symbol><b>="`; `DEFAULT_PROMPT_TEMPLATE`), tokenized
 with the target's tokenizer — one prompt per row, all rows one shared token length,
 row-major `(a, b)`. It is a pure function of the spec + the tokenizer, so every rank
 builds the identical grid at startup with no coordination; unlike the streaming corpus
@@ -25,6 +26,7 @@ digit count, and only single-digit answers clear the probe's answer premise. A r
 that breaks an invariant fails fast rather than silently padding.
 """
 
+import string
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Protocol
@@ -37,6 +39,9 @@ from param_decomp.experiments.lm.arithmetic_eval import ArithmeticGrid
 # match the training pool's: `mul` uses "×" like `prompts/multiplication_1-100.txt` (one
 # Llama-3.1 token). A `None` result fn skips the single-token-answer assert (see the module
 # docstring for why `mul` does).
+DEFAULT_PROMPT_TEMPLATE = "{a}{op}{b}="
+"""The bare equation every grid used before templates existed."""
+
 OPERATIONS: dict[str, tuple[str, Callable[[int, int], int] | None]] = {
     "add": ("+", lambda a, b: a + b),
     "sub": ("-", lambda a, b: a - b),
@@ -70,13 +75,26 @@ class ArithmeticProbe:
     """The `=` token; its logits predict the answer (its first token, for `mul`)."""
 
 
+def validate_prompt_template(template: str) -> str:
+    """A grid prompt template names `{a}`, `{op}` and `{b}` and nothing else, and ends where
+    the answer begins (the grids record, and the probe scores, the LAST position)."""
+    fields = {name for _, name, _, _ in string.Formatter().parse(template) if name is not None}
+    assert fields == {"a", "op", "b"}, (
+        f"prompt template {template!r} must use exactly the fields {{a}}, {{op}}, {{b}}, "
+        f"got {sorted(fields)}"
+    )
+    return template
+
+
 def build_arithmetic_prompt_grid(
     operation: str,
     a_range: tuple[int, int],
     b_range: tuple[int, int],
     tokenizer: PromptEncoder,
+    template: str = DEFAULT_PROMPT_TEMPLATE,
 ) -> ArithmeticPromptGrid:
     assert operation in OPERATIONS, f"operation must be one of {sorted(OPERATIONS)}"
+    validate_prompt_template(template)
     symbol, _ = OPERATIONS[operation]
     a_values = tuple(range(a_range[0], a_range[1] + 1))
     b_values = tuple(range(b_range[0], b_range[1] + 1))
@@ -86,7 +104,7 @@ def build_arithmetic_prompt_grid(
     seq_len: int | None = None
     for a in a_values:
         for b in b_values:
-            prompt = f"{a}{symbol}{b}="
+            prompt = template.format(a=a, op=symbol, b=b)
             ids = [int(t) for t in tokenizer.encode(prompt, add_special_tokens=True)]
             if seq_len is None:
                 seq_len = len(ids)
@@ -107,8 +125,9 @@ def build_arithmetic_probe(
     a_range: tuple[int, int],
     b_range: tuple[int, int],
     tokenizer: PromptEncoder,
+    template: str = DEFAULT_PROMPT_TEMPLATE,
 ) -> ArithmeticProbe:
-    prompts = build_arithmetic_prompt_grid(operation, a_range, b_range, tokenizer)
+    prompts = build_arithmetic_prompt_grid(operation, a_range, b_range, tokenizer, template)
     _, result_fn = OPERATIONS[operation]
     grid = prompts.grid
     for a in grid.a_values:
@@ -118,9 +137,9 @@ def build_arithmetic_probe(
             answer = result_fn(a, b)
             answer_tokens = tokenizer.encode(str(answer), add_special_tokens=False)
             assert len(answer_tokens) == 1, (
-                f"answer {answer} for '{a}{grid.symbol}{b}=' is {len(answer_tokens)} tokens, "
-                f"not 1; the probe premise is a single answer token predicted at the `=` "
-                f"position"
+                f"answer {answer} for {template.format(a=a, op=grid.symbol, b=b)!r} is "
+                f"{len(answer_tokens)} tokens, not 1; the probe premise is a single answer "
+                f"token predicted at the last position"
             )
     return ArithmeticProbe(
         tokens=prompts.tokens,
