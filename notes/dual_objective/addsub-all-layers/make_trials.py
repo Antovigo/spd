@@ -161,7 +161,8 @@ def generate(profile_name: str) -> tuple[Path, list[tuple[str, str, Path, str, i
     profile = PROFILES[profile_name]
     sota = HERE.parent / profile["sota"]
     raw = yaml.safe_load(sota.read_text())
-    world = raw["runtime"]["replicate"] * raw["runtime"]["fsdp"] * raw["runtime"]["tp"]
+    mesh = raw["runtime"]["mesh"]
+    world = mesh["replicate"] * mesh["fsdp"] * mesh["tp"]
     assert world == profile["devices"], (
         f"{sota.name} authors a {world}-GPU mesh but profile {profile_name!r} is "
         f"{profile['devices']} GPUs"

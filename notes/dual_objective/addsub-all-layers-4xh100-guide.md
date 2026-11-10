@@ -149,7 +149,7 @@ Budget, either way:
 | item on the volume | GB |
 |---|---|
 | Llama-3.1-8B safetensors + tokenizer (`original/*` excluded — it is a 16 GB duplicate) | 16 |
-| uv venv (`/workspace/spd/.venv`) | 7 |
+| uv venv (`/workspace/spd/param_decomp/.venv`) | 7 |
 | uv wheel cache (`/workspace/uv-cache`; deletable after install) | 5 |
 | XLA compilation cache (`/workspace/xla-cache`; ~1 GB per distinct compiled step) | 3 |
 | datasets `fineweb_llama_tok_64` + `_eval` (1.7 GB each) | 3.4 |
@@ -196,8 +196,8 @@ git log -1 --oneline                            # note this, it is the code you 
 curl -LsSf https://astral.sh/uv/install.sh | sh && source "$HOME/.local/bin/env"
 source notes/dual_objective/addsub-all-layers/env.sh   # creates the DATA_ROOT tree, sets UV_CACHE_DIR
 uv python install 3.12
-uv sync --frozen --no-dev --extra cuda          # README "Install": driver r525–r579 arm; ~7 GB
-.venv/bin/python -c "import jax; print(jax.__version__, jax.devices())"   # 0.10.1, 4x CudaDevice
+uv sync --project param_decomp --frozen --no-dev --extra cuda   # README "Install": driver r525–r579 arm; ~7 GB
+param_decomp/.venv/bin/python -c "import jax; print(jax.__version__, jax.devices())"   # 0.11.1, 4x CudaDevice
 ```
 
 If `jax.devices()` shows CPU only, the driver is the problem (step 1), not the install.
@@ -355,7 +355,7 @@ volume. The ladder's trials carry no `wandb:` block (metrics.jsonl only); the re
 
 ```
 VOLUME=/workspace
-REPO=$VOLUME/spd                              code @ branch feature/dual_obj_jax, venv at $REPO/.venv
+REPO=$VOLUME/spd                              code @ branch feature/dual_obj_jax, venv at $REPO/param_decomp/.venv
 DATA_ROOT=$VOLUME/data                        the trainer's positional <data_root>
   runs/<run id>/            launch_config.yaml (pinned), metrics.jsonl, ckpts/<step>/, ab_grids/, hlo/, neuron_alignment.json
   runs/by-name/<run_name>   -> ../<run id>    (symlink, made by pd_run.sh)

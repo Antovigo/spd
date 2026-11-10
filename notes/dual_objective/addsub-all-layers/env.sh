@@ -8,7 +8,7 @@
 export VOLUME="${VOLUME:-/workspace}"
 export REPO="${REPO:-$VOLUME/spd}"                 # git clone of Antovigo/spd @ feature/dual_obj_jax
 export DATA_ROOT="${DATA_ROOT:-$VOLUME/data}"      # runs/ datasets/ neuron_ranks/ wandb/ tmp/ logs/ ladder/
-export VENV_PY="${VENV_PY:-$REPO/.venv/bin/python}"
+export VENV_PY="${VENV_PY:-$REPO/param_decomp/.venv/bin/python}"  # the library project (repo split, 177d0cce8)
 
 # The library does not read PARAM_DECOMP_OUT_DIR (data_root is the positional argument);
 # exported for parity with the cluster scripts and for anything you paste from them.

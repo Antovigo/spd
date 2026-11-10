@@ -35,8 +35,8 @@ fi
 # local_device_count = this process's GPUs = replicate * fsdp * tp of the config (single host).
 N_DEV=$("$VENV_PY" - "$CONFIG" <<'PY'
 import sys, yaml
-r = yaml.safe_load(open(sys.argv[1]))["runtime"]
-print(r["replicate"] * r["fsdp"] * r["tp"])
+m = yaml.safe_load(open(sys.argv[1]))["runtime"]["mesh"]
+print(m["replicate"] * m["fsdp"] * m["tp"])
 PY
 )
 N_GPU=$(nvidia-smi -L | wc -l)
