@@ -1,4 +1,4 @@
-# addsub-L18-26-bare (2026-11-11): the bare-format control of addsub-L18-26-answer-words, on 2x L40.
+# addsub-L18-26-bare (2026-11-11): the bare-format control of addsub-L18-26-answer-words, on one H100.
 # The same recipe on -08's prompt pool, to check whether L18-26's early always-on layer-18
 # components (AB grid, last position, mean CI >= 0.9: 28 at step 1000, 11 at 2000, 6 at 3000)
 # also appear on the bare format. Stopped by hand after the step-3000 AB grid.
@@ -8,7 +8,6 @@
 #    integers 1..400, every pair, 320000 prompts of 5 tokens).
 # 2. neuron_ranks: addsub1-400_llama31-8b_unit-energy (-08's, harvested on that pool).
 # 3. ABGridDataset: a, b in [1, 400], the default `{a}{op}{b}=` template.
-# 4. mesh replicate 2 (ddp, 2x L40) instead of 1 (one H100): the same global batches.
 #
 # addsub-L18-26-answer-words (2026-11-11): addsub-L18-25-answer-words with -08's learning rates,
 # CI upper leak 1.0, and L18-24's minimality coefficients (Antoine, 2026-11-11). a and b are
@@ -391,7 +390,7 @@ runtime:
   compilation_cache_dir: ~/.cache/param-decomp/xla
   compiler_options: tuned-v2  # tuned-v1 retired upstream (jaxlib 0.11)
   mesh:
-    replicate: 2
+    replicate: 1
     fsdp: 1
     tp: 1
   sharding: ddp
