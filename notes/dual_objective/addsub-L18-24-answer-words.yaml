@@ -15,7 +15,9 @@
 #    `data.layout: documents`, `seq_len: 64`.
 # 5. One GPU: mesh 1/1/1 (was 2/1/1 ddp on 2x L40), so each step's whole batch sits on one
 #    card: target 128 x 10 tokens, non-target 96 x 64.
-# 6. launch_env: CUDA-graph capture off for every jit (`--xla_gpu_enable_command_buffer=`); on
+# 6. eval.slow_every 4000 -> 2000, so the AB grids (a slow metric) are recorded every 2000 steps;
+#    the other slow metrics run twice as often too.
+# 7. launch_env: CUDA-graph capture off for every jit (`--xla_gpu_enable_command_buffer=`); on
 #    jax 0.11.1 the CI fn's init jit failed to capture on the L40 smoke.
 # Code: feature/dual_obj_jax-upstream-2026-11 (upstream fe8ae9e07 merged).
 #
@@ -281,7 +283,7 @@ eval:
   batch_size: 128
   n_steps: 10
   every: 500
-  slow_every: 4000
+  slow_every: 2000  # 4000 in addsub-L18-24: AB-grid snapshots every 2000 steps (Antoine, 2026-11-11)
   slow_on_first_step: true
   metrics:
     - type: CIMaskedReconLoss
