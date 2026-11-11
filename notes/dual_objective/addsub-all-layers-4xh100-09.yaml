@@ -623,6 +623,12 @@ runtime:
     # fix that stall, so this is prudence, not a diagnosis. ~10 GB outside the pool now,
     # against an activation estimate of 30-60 GB and ~57 GB of remaining headroom.
     xla_python_client_mem_fraction: 0.88
+    # The default termination timeout plus CUDA-graph capture OFF for every jit, not only the
+    # ones compiled under `compiler_options` (tuned-v2 already turns it off there). Added
+    # 2026-11-11: on jax 0.11.1 the CI fn's init jit (`jit_init_placed_ci_fn`, compiled with no
+    # options) died with "Failed to add memset node to a CUDA graph: CUDA_ERROR_INVALID_VALUE"
+    # (L40 smoke, driver 535); the smoke passed with this flag.
+    xla_flags: "--xla_gpu_nccl_termination_timeout_seconds=600 --xla_gpu_enable_command_buffer="
     env:
       # Disable NVLS (NVLink SHARP), whose multicast buffers need CUDA FABRIC memory
       # handles. A Runpod container does not grant them: every launch logs
