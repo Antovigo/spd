@@ -16,7 +16,7 @@ import math
 from collections.abc import Sequence
 from typing import Any, Literal, cast, get_args
 
-DeviceKind = Literal["NVIDIA B200", "NVIDIA H200", "NVIDIA H100 80GB HBM3", "cpu"]
+DeviceKind = Literal["NVIDIA B200", "NVIDIA H200", "NVIDIA H100 80GB HBM3", "NVIDIA L40", "cpu"]
 """The exact `jax.Device.device_kind` strings with a declared bf16 dense peak (or the
 deliberate no-peak `cpu` arm). Adding a kind = adding its literal here AND its row in
 `peak_bf16_dense_flops_per_second`; the match below is exhaustive over the literal."""
@@ -48,6 +48,8 @@ def peak_bf16_dense_flops_per_second(device_kind: DeviceKind) -> float:
             return 989.4e12  # same Hopper SXM compute die as the H100, memory is the delta
         case "NVIDIA H100 80GB HBM3":
             return 989.4e12  # H100 SXM datasheet: 1,979 TFLOPS bf16 with sparsity, dense = half
+        case "NVIDIA L40":
+            return 181.05e12  # L40 datasheet: 362.1 TFLOPS bf16 with sparsity, dense = half
         case "cpu":
             raise ValueError("CPU has no declared BF16 peak; utilization requires a supported GPU")
 
