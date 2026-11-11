@@ -16,7 +16,9 @@
 #    this pool at 6 of 10, and 0.8 / 0.6 = 4/3.
 # 4. Unchanged: L18-24's learning rates (3.2e-4 / 1.6e-4), schedule (20k steps), CI-scaled
 #    weight decay on the target stream's hidden-head CI, all-position reconstruction on both
-#    streams, AB grids every 2000 steps (last position, addition).
+#    streams, AB grids at the last position (addition).
+# 5. eval.slow_every 2000 -> 1000: AB grids every 1000 steps, from step 1000 (the other slow
+#    metrics run every 1000 too).
 #
 # addsub-L18-24-answer-words (2026-11-11): the layer-18 test of addsub-all-layers-4xh100-09, on one
 # H100 SXM. It is addsub-L18-24 (the single-block mirror of the 32-block recipe, header below)
@@ -303,7 +305,7 @@ eval:
   batch_size: 128
   n_steps: 10
   every: 500
-  slow_every: 2000  # 4000 in addsub-L18-24: AB-grid snapshots every 2000 steps (Antoine, 2026-11-11)
+  slow_every: 1000  # 4000 in addsub-L18-24: AB-grid snapshots every 1000 steps, for early results (Antoine, 2026-11-11)
   slow_on_first_step: true
   metrics:
     - type: CIMaskedReconLoss
