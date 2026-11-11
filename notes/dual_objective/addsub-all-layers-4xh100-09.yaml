@@ -26,8 +26,11 @@
 #    Leaves that changed only because the schema did: `data.layout`/`seq_len` (what -08's
 #    trainer chose at startup), the nested `runtime.mesh`, `compiler_options: tuned-v2`, the
 #    CI attention's `implementation`/`mask` spelling, `target.output_edge`; and the two
-#    datasets are row-shuffled copies (`*_row_shuffled`, seed 0), which the trainer now
-#    requires. Evals now read the same fixed batches at every pass (both streams).
+#    datasets are `*_one_doc_per_row`: -08's token-only rows with `document_ids` all zero,
+#    row-shuffled (seed 0). The trainer now reads only document-aware, row-shuffled datasets;
+#    zero document IDs make each 64-token row one document, which is how -08's trainer read
+#    the token-only rows (attention runs across the EOS tokens packed inside a row). Evals
+#    now read the same fixed batches at every pass (both streams).
 #
 # AT RISK: the target stream carries 10 positions per prompt instead of 5 (128 x 10 = 1280
 # tokens per step vs 640; the broad stream is 128 x 64 = 8192), about +7% tokens per step.
@@ -580,10 +583,10 @@ target:
 data:
   train:
     kind: name
-    name: fineweb_llama_tok_64_row_shuffled
+    name: fineweb_llama_tok_64_one_doc_per_row
   eval:
     kind: name
-    name: fineweb_llama_tok_64_eval_row_shuffled
+    name: fineweb_llama_tok_64_eval_one_doc_per_row
   # Written 2026-11-10 for the upstream 177d0cce8 schema: what -08's trainer chose at startup
   # (`migrations.data_layout`: a GLU transformer reads documents; width from meta.json).
   layout: documents
