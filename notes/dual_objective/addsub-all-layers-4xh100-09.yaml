@@ -32,6 +32,8 @@
 #    the token-only rows (attention runs across the EOS tokens packed inside a row). Evals
 #    now read the same fixed batches at every pass (both streams).
 #
+# 4. CI upper leak 0.01 -> 1.0 (`decomposition.ci.upper_leak`, Antoine 2026-11-11).
+#
 # AT RISK: the target stream carries 10 positions per prompt instead of 5 (128 x 10 = 1280
 # tokens per step vs 640; the broad stream is 128 x 64 = 8192), about +7% tokens per step.
 # The memory estimate in the -08 header below was made for 5.
@@ -237,6 +239,10 @@ decomposition:
     # The torch trainer's default init, replicated: every readout head starts W=0,
     # bias 0.5 — all CI logits mid-window, within gradient reach of both losses.
     zero_init_readout: true
+    # 0.01 in -08 (the default). 1.0: the upper squash's slope above 1, so imp-min keeps a
+    # full-strength gradient on saturated (always-on) components. Training-side only; the
+    # slow-eval CI reductions squash with the default (Antoine, 2026-11-11).
+    upper_leak: 1.0
     dual: true
 pd:
   seed: 0
