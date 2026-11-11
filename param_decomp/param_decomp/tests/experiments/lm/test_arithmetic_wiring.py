@@ -105,5 +105,9 @@ def test_prompt_template_writes_the_grid_prompts():
     )
     assert probe.tokens[1].tolist() == [BOS, 1001, SYMBOL_IDS["+"], 1002, SYMBOL_IDS["="]]
     assert probe.answer_position == 4
-    with pytest.raises(AssertionError, match="exactly the fields"):
+    spelled = build_arithmetic_prompt_grid(
+        "add", (1, 1), (2, 2), _StubTokenizer(), template="{a} plus {b} = "
+    )
+    assert spelled.tokens[0].tolist() == [BOS, 1001, 1002, SYMBOL_IDS["="]]
+    with pytest.raises(AssertionError, match="must use the fields"):
         build_arithmetic_prompt_grid("add", (1, 2), (1, 2), _StubTokenizer(), template="{a}+{c}=")

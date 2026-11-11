@@ -213,7 +213,8 @@ class ABGridDatasetConfig(BaseConfig):
     a_range: tuple[int, int] = (1, 100)
     b_range: tuple[int, int] = (1, 100)
     prompt_template: str = "{a}{op}{b}="
-    """The grid's prompt, with fields `{a}`, `{op}` and `{b}` — the training pool's format, so
+    """The grid's prompt, with fields `{a}`, `{b}` and optionally `{op}` (the operation's
+    symbol; a template may spell the operation out instead) — the training pool's format, so
     the grids read the prompts the decomposition was trained on (default: the bare
     `{a}{op}{b}=`). The last position must be the one that predicts the answer."""
     positions: list[int] | None = None
@@ -233,9 +234,9 @@ class ABGridDatasetConfig(BaseConfig):
     @model_validator(mode="after")
     def validate_prompt_template(self) -> Self:
         fields = {name for _, name, _, _ in string.Formatter().parse(self.prompt_template) if name}
-        assert fields == {"a", "op", "b"}, (
-            f"prompt_template {self.prompt_template!r} must use exactly the fields {{a}}, "
-            f"{{op}}, {{b}}, got {sorted(fields)}"
+        assert {"a", "b"} <= fields <= {"a", "op", "b"}, (
+            f"prompt_template {self.prompt_template!r} must use the fields {{a}} and {{b}}, "
+            f"and optionally {{op}}, got {sorted(fields)}"
         )
         return self
 

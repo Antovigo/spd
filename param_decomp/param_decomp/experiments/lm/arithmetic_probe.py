@@ -76,12 +76,14 @@ class ArithmeticProbe:
 
 
 def validate_prompt_template(template: str) -> str:
-    """A grid prompt template names `{a}`, `{op}` and `{b}` and nothing else, and ends where
-    the answer begins (the grids record, and the probe scores, the LAST position)."""
+    """A grid prompt template names `{a}` and `{b}`, optionally `{op}` (the operation's
+    symbol; a template may spell the operation out instead, e.g. `plus`), and nothing else.
+    It ends where the answer begins: the grids record, and the probe scores, the LAST
+    position."""
     fields = {name for _, name, _, _ in string.Formatter().parse(template) if name is not None}
-    assert fields == {"a", "op", "b"}, (
-        f"prompt template {template!r} must use exactly the fields {{a}}, {{op}}, {{b}}, "
-        f"got {sorted(fields)}"
+    assert {"a", "b"} <= fields <= {"a", "op", "b"}, (
+        f"prompt template {template!r} must use the fields {{a}} and {{b}}, and optionally "
+        f"{{op}}, got {sorted(fields)}"
     )
     return template
 
