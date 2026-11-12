@@ -35,7 +35,9 @@ switch off per prompt. Target stream only: no non-target pass, no hidden-activat
   one lazily loaded file per slice (payload format of `experiments/lm/ab_grid_dataset.py`); a
   grid wider than 100 on a side is written SPLIT like the run's own ab_grids (4x4-mean
   thumbnails in the slice file, full grids in `<op>_pos<t>/<site>.js`, loaded on click;
-  `scripts/split_grids.py` converts older whole-grid slices). `alive.html` is the same page
+  `scripts/split_grids.py` converts older whole-grid slices). A NaN inner activation marks a cell
+  outside the pool (grey in every view, CI included); a manifest's `view_labels` renames the
+  views (`integer_only/applet.py`). `alive.html` is the same page
   plus the ALIVE-ONLY model's inner activations (rounded CI, delta off, normalized by ||V_c||)
   as a view and a detail pane, read from `ab_grids/alive/` — written from the filter's
   `dataset/` by `scripts/alive_grids.py` (no forward pass).

@@ -285,8 +285,13 @@ const mergeRgb = ([out, hid]) => [
 
 function tileDrawers(mi, si, pi, oi, data = moduleData(mi)) {
   const at = (ai, bi) => gridIndex(si, pi, oi, ai, bi, data);
-  const ciVal = (ai, bi) => data.ci[at(ai, bi)] / 255;
-  const ciHiddenVal = data.ciHidden ? (ai, bi) => data.ciHidden[at(ai, bi)] / 255 : null;
+  // A NaN inner activation marks a cell outside the pool (e.g. a - b with a < b): grey in
+  // every view, CI included (u8 CI has no NaN of its own).
+  const outside = (ai, bi) => data.inner && Number.isNaN(data.inner[at(ai, bi)]);
+  const ciVal = (ai, bi) => (outside(ai, bi) ? NaN : data.ci[at(ai, bi)] / 255);
+  const ciHiddenVal = data.ciHidden
+    ? (ai, bi) => (outside(ai, bi) ? NaN : data.ciHidden[at(ai, bi)] / 255)
+    : null;
   const innerVal = (ai, bi) => data.inner[at(ai, bi)];
   const mx = data.inner ? innerScale(data, si, pi, oi) : 1;
   const drawers = {
@@ -568,6 +573,14 @@ const VIEW_OPTIONS = {
   inner: "inner act (full model)",
   inner_alive: "inner act (alive-only model)",
 };
+
+// A manifest may rename the views (`view_labels`: {view: label}), e.g. when its `ci` grids
+// are binarized or its `inner` grids come from another model; the detail captions follow.
+if (SLICES && SLICES.view_labels) {
+  Object.assign(VIEW_OPTIONS, SLICES.view_labels);
+  for (const [id, view] of [["dci", "ci"], ["dinner", "inner"]])
+    if (SLICES.view_labels[view]) $(id).closest(".pane").querySelector(".cap").textContent = SLICES.view_labels[view];
+}
 
 const AXIS_NOTE = document.querySelector(".axis-note").textContent;
 function setPayload(key, payload) {

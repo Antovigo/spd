@@ -1,0 +1,8 @@
+# Integer-only global mask of addsub-answers-09 (p-512d73ab), final checkpoint. Every unlisted
+# setting is the IntegerOnlyConfig default: the addsub-08 learned-mask settings (plan:
+# notes/integer_only/plan.md). Run from the repository root (`prompts` is relative to it).
+step: 40000
+prompts: param_decomp/param_decomp/experiments/lm/prompts/answer_words_addition_subtraction_0-399.txt
+templates:
+  add: "Answer: {a} plus {b} is "
+  sub: "Answer: {a} minus {b} is "

@@ -1,0 +1,138 @@
+"""The integer-only `(a, b)`-grid applet, written from the collected dataset (no forward pass).
+
+One slice per (operation, position `t`): every integer-only component ever on at `t` (the
+dataset's columns at `t`), each as two grids over the operation's `(a, b)` cells, `a` the row
+and `b` the column: its binarized original CI (1 where on) and its inner activation in the
+integer-only model divided by `||V_c||`. A cell with no prompt (e.g. `b > a` in a pool whose
+subtractions keep `a >= b`) is NaN in both, grey in the applet. A component's ranking value
+(`mean_ci` in the payload) is its on-fraction over the operation's prompts at `t`.
+
+The page is `ci_filter/grids_app.html` with its data folder as the base URL; slices use the
+payload format of `experiments/lm/ab_grid_dataset.py` (split, with thumbnails, when a side
+exceeds `THUMBNAIL_MAX_SIDE`) and `ci_filter/grid.py`'s file names."""
+
+import json
+from pathlib import Path
+
+import numpy as np
+
+from param_decomp.ci_filter.grid import APPLET, slice_filename, write_slice
+from param_decomp.ci_filter.pool import SYMBOLS
+from param_decomp.experiments.lm.ab_grid_dataset import (
+    ABGridSnapshot,
+    ab_grid_payload,
+    ab_grid_split_payload,
+    thumbnail_factor,
+)
+from param_decomp.experiments.lm.arithmetic_eval import ArithmeticGrid
+from param_decomp.integer_only.config import Operation
+
+VIEW_LABELS = {"ci": "original CI > {threshold}", "inner": "inner act (integer-only model)"}
+
+
+def operation_grid(
+    a: np.ndarray, b: np.ndarray, op: Operation
+) -> tuple[ArithmeticGrid, np.ndarray]:
+    """The bounding `(a, b)` grid of one operation's prompts and each prompt's cell (row-major)."""
+    a_values = tuple(range(int(a.min()), int(a.max()) + 1))
+    b_values = tuple(range(int(b.min()), int(b.max()) + 1))
+    grid = ArithmeticGrid(a_values, b_values, SYMBOLS[op])
+    cell = (a - a_values[0]) * grid.n_b + (b - b_values[0])
+    assert np.unique(cell).size == cell.size, "two prompts share an (a, b) cell"
+    return grid, cell
+
+
+def scatter(values: np.ndarray, cell: np.ndarray, n_cells: int) -> np.ndarray:
+    """`(n_rows, k)` -> `(n_cells, 1, k)` float32, NaN where no prompt sits."""
+    out = np.full((n_cells, 1, values.shape[1]), np.nan, np.float32)
+    out[cell, 0] = values
+    return out
+
+
+def slice_documents(
+    grid: ArithmeticGrid,
+    cell: np.ndarray,
+    position: int,
+    seq_len: int,
+    step: int,
+    site_columns: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]],
+    site_sizes: dict[str, int],
+) -> tuple[dict[str, object], dict[str, dict[str, object]]]:
+    """One slice's index and module documents. `site_columns[site]` = (component ids, the
+    operation's binarized CI `(n_rows, k)` bool, its normalized inner activation `(n_rows, k)`)."""
+    split = thumbnail_factor(grid) > 1
+    n_cells = grid.n_a * grid.n_b
+    index: dict[str, object] | None = None
+    entries: list[dict[str, object]] = []
+    modules: dict[str, dict[str, object]] = {}
+    for site in sorted(site_sizes):
+        ids, on, inner = site_columns.get(
+            site, (np.zeros(0, np.int64), np.zeros((cell.size, 0), bool), np.zeros((cell.size, 0)))
+        )
+        mean = np.zeros((1, site_sizes[site]), np.float32)
+        mean[0, ids] = on.mean(axis=0) if on.shape[0] else 0.0
+        snapshot = ABGridSnapshot(
+            mean_ci={"output": {site: mean}},
+            saved={site: ids},
+            ci_columns={"output": {site: scatter(on.astype(np.float32), cell, n_cells)}},
+            inner_columns={site: scatter(inner, cell, n_cells)},
+        )
+        args = (snapshot, grid, (position,), seq_len, step, 0.0)
+        if split:
+            doc, docs = ab_grid_split_payload(*args)
+            modules.update(docs)
+        else:
+            doc = ab_grid_payload(*args)
+        if index is None:
+            index = {k: v for k, v in doc.items() if k != "modules"}
+        entries.extend(doc["modules"])
+    assert index is not None
+    return index | {"modules": entries}, modules
+
+
+def write_manifest(
+    grid_dir: Path,
+    title: str,
+    ops: tuple[Operation, ...],
+    position_labels: tuple[str, ...],
+    threshold: float,
+) -> None:
+    grid_dir.mkdir(parents=True, exist_ok=True)
+    manifest = {
+        "title": title,
+        "ops": [SYMBOLS[op] for op in ops],
+        "positions": list(range(len(position_labels))),
+        "position_labels": list(position_labels),
+        "files": {
+            f"{SYMBOLS[op]}:{t}": slice_filename(op, t)
+            for op in ops
+            for t in range(len(position_labels))
+        },
+        "view_labels": {k: v.format(threshold=threshold) for k, v in VIEW_LABELS.items()},
+    }
+    (grid_dir / "manifest.js").write_text(f"window.AB_GRID_SLICES = {json.dumps(manifest)};\n")
+
+
+def applet_page(data_dir_name: str) -> str:
+    """`grids_app.html` reading its manifest and slices from `<data_dir_name>/`."""
+    page = APPLET.read_text()
+    anchor = '<meta charset="utf-8">'
+    assert page.count(anchor) == 1
+    return page.replace(anchor, f'{anchor}\n<base href="{data_dir_name}/">')
+
+
+def write_operation_slice(
+    grid_dir: Path,
+    op: Operation,
+    position: int,
+    seq_len: int,
+    step: int,
+    grid: ArithmeticGrid,
+    cell: np.ndarray,
+    site_columns: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]],
+    site_sizes: dict[str, int],
+) -> int:
+    """Write slice `(op, position)`; returns its number of component grids."""
+    index, modules = slice_documents(grid, cell, position, seq_len, step, site_columns, site_sizes)
+    write_slice(grid_dir, op, SYMBOLS[op], position, index, modules)
+    return int(sum(ids.size for ids, _, _ in site_columns.values()))
