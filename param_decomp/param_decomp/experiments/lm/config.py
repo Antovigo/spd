@@ -868,7 +868,7 @@ class LMTargetedExperimentConfig(ExperimentConfigBase):
         trains against nothing while costing its parameters and its share of every step."""
         dual = bool(getattr(self.decomposition.ci, "dual", False))
         hidden = self.pd.hidden is not None
-        assert dual == hidden, (
+        assert dual == hidden or (dual and self.pd.untrained_hidden_head), (
             "decomposition.ci.dual and pd.hidden must be set together: "
             f"ci.dual={dual}, pd.hidden={'set' if hidden else 'unset'}"
         )

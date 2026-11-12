@@ -1847,11 +1847,13 @@ def make_targeted_train_step[
     total_steps: int,
     sequential_passes: bool = False,
     trainable_parts: TrainableParts = TRAIN_BOTH,
+    untrained_hidden_head: bool = False,
 ):
     """Build the tPD `step(model, state, batch, nontarget_batch, key, ci_ceiling=None)`.
 
     `trainable_parts` freezes either half of the decomposition (`apply_gradients`); `ci_ceiling`, a
     frozen CI fn, caps every CI the step reads at its own (`core.ci_fn.ceiling.cap_ci`).
+    `untrained_hidden_head` admits a dual CI fn with no hidden pass (`pd.untrained_hidden_head`).
 
     Up to FOUR passes over one shared substrate — {target, non-target} streams x {output,
     hidden} CI roles — whose gradients SUM into one optimizer step. The TARGET-OUTPUT pass
@@ -1959,10 +1961,13 @@ def make_targeted_train_step[
         objective = training.objective
         passes = _targeted_passes(objective, training)
         target_plan = passes[0]
-        assert is_dual(decomposition.ci_fn) == any(plan.role == "hidden" for plan in passes), (
+        has_hidden_pass = any(plan.role == "hidden" for plan in passes)
+        assert is_dual(decomposition.ci_fn) == has_hidden_pass or (
+            untrained_hidden_head and not has_hidden_pass
+        ), (
             "the CI fn's head count and the objective's pass roles disagree: a hidden pass "
             "needs `decomposition.ci.dual`, and a dual CI fn needs a hidden pass — otherwise "
-            "its second head would train against nothing"
+            "its second head would train against nothing (`pd.untrained_hidden_head`)"
         )
         train_frac = train_frac_at(training.step, total_steps)
         specs = {plan.label: plan.reconstruction_specs(train_frac) for plan in passes}

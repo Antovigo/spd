@@ -1333,6 +1333,7 @@ def run_targeted_decomposition_training[
             total_steps=pd.steps,
             sequential_passes=sequential_passes,
             trainable_parts=pd.trainable,
+            untrained_hidden_head=pd.untrained_hidden_head,
         )
         if pd.ci_ceiling:
             assert run.resume_provenance is not None, (

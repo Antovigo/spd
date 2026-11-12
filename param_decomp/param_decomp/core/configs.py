@@ -1363,6 +1363,14 @@ class TargetedPDConfig(PDConfigBase):
             "CI-scaled weight decay). The default trains both."
         ),
     )
+    untrained_hidden_head: bool = Field(
+        default=False,
+        description=(
+            "Admit a dual CI fn (`decomposition.ci.dual`) without `hidden`: a fine-tune of a "
+            "dual parent that drops the hidden passes. The hidden head then gets no gradient "
+            "and nothing reads its CI. Requires `hidden` unset."
+        ),
+    )
     ci_ceiling: bool = Field(
         default=False,
         description=(
@@ -1374,6 +1382,13 @@ class TargetedPDConfig(PDConfigBase):
             "of it and the parent's."
         ),
     )
+
+    @model_validator(mode="after")
+    def validate_untrained_hidden_head(self) -> Self:
+        assert not (self.untrained_hidden_head and self.hidden is not None), (
+            "untrained_hidden_head admits a dual CI fn WITHOUT a hidden pass; pd.hidden is set"
+        )
+        return self
 
     @model_validator(mode="after")
     def validate_ci_scaled_weight_decay(self) -> Self:
