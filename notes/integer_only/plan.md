@@ -119,7 +119,7 @@ it fails; a finished stage is skipped when run again. The first stage pins the c
 `config.yaml`; later stages refuse other settings (batch sizes excepted).
 
 1. `candidates`: the original model and the run's CI fn over all 240,200 prompts (batches of 256).
-   Writes `pool.npz`, `max_ci.npz` (per site a `(10, C)` array: the max CI over all prompts at each
+   Writes `pool.npz`, `max_ci.npz` (per site a `(10, C)` array, `C` the site's number of components: the max CI over all prompts at each
    position) and `candidates.json` (the components with max CI > 0.1 at some position).
 2. `problem`: `P`, `Q` (`check_set.npy`), the original model's `log q` for every prompt
    (`reference_log_q.npy`, 240,200 x 1000 float32, 0.96 GB; the learners read it instead of running
@@ -130,12 +130,17 @@ it fails; a finished stage is skipped when run again. The first stage pins the c
    accuracy; all prompts, additions, subtractions), writes `sweep/lam_<λ>/final.json` and
    `sweep/summary.tsv`, applies the rule and writes `integer-only.json`.
 5. `collect`: over all 240,200 prompts, for every integer-only component and every position `t`
-   where it is ever ON (its max CI at `t` over the pool, from stage 1, exceeds 0.1): its inner
-   activation in the integer-only model (fp32 forward, stored float16) and its ON bit (the
-   original CI pass recomputed, same batches as stage 1). Writes `datasets/` (format below).
+   where it is ever ON: its inner activation in the integer-only model (fp32 forward, stored
+   float16) and its ON bit. The ON bits come from a second pass of the CI fn (same batches as
+   stage 1); the stored pairs are those ON on some prompt in stage 1 (`max_ci.npz`) or in this
+   pass. Writes `datasets/` (format below); `status/collect.done` counts the pairs ON in only
+   one of the two passes and lists any integer-only component with no stored pair.
 6. `applet`: `ab_grids.html` and `ab_grids/`, from `datasets/` (no forward pass).
 
 ## Layout of `$RUN/integer_only/`
+
+`N` = 240,200 is the number of pool rows (row `i` = line `i` of the prompts file, counting from
+0); `C` is a site's number of components (stored or not); `T` = 10 positions.
 
     README.md               index (rewritten after every stage)
     config.yaml             the pinned settings
@@ -152,7 +157,6 @@ it fails; a finished stage is skipped when run again. The first stage pins the c
     ab_grids.html, ab_grids/  the applet and its data
     logs/                   the pod driver's stage logs
 
-`N` = 240,200 is the number of pool rows; row `i` is line `i` of the prompts file, counting from 0.
 
 `integer-only.json` and `candidates.json` use the schema of p-ba8b0c08 `filtered/integer-only.json`:
 `rule` (text), `source` (the folder the list came from), `threshold` (the CI cut, 0.1),
@@ -161,9 +165,10 @@ it fails; a finished stage is skipped when run again. The first stage pins the c
 
 `datasets/`: `index.npz` holds the pool columns and the column table `col_position`,
 `col_site`, `col_component`, `col_v_norm` (`||V_c||`), one row per stored (position, component)
-pair, sorted by position, then site, then component index. `inner_pos<t>.npy` is `(N, K_t)` float16
-and `ci_on_pos<t>.npy` is `(ceil(N/8), K_t)` uint8, bit-packed along prompts (numpy `packbits`),
-with `K_t` the number of pairs at position `t`, columns in the table's order. Pairs that are never ON
+pair, sorted by position, then site, then component index. With `K_t` the number of stored pairs
+at position `t`, `inner_pos<t>.npy` is `(N, K_t)` float16 and `ci_on_pos<t>.npy` is
+`(ceil(N/8), K_t)` uint8 (`ceil(N/8)` = `N/8` rounded up), bit-packed along prompts (numpy
+`packbits`), columns in the table's order. Pairs that are never ON
 are not stored. -08 stored the same two quantities as `datasets/causal_importances/masks.parquet`
 (one boolean list per (position, site, component) row) and `inner_pos<t>.npy` + `index.npz`
 `pos<t>_cols`.
@@ -176,6 +181,18 @@ The view toggles between the binarized original CI (CI > 0.1) and the inner acti
 integer-only model divided by `||V_c||` (as `alive.html`). Cells with no prompt (`b > a` for
 subtraction) are grey. Grids wider than 100 cells ship as 4 x 4-cell-mean thumbnails, the full
 400 x 400 grid loading on click.
+
+## Reproducibility of the CI
+
+The run's CI fn computes in bf16. On an L40, two processes evaluating it on the same prompts
+with XLA's default GPU kernels gave different max CI values (largest difference 0.068;
+457 of the ~30,000 (position, component) pairs ON in either process were ON in only one, on
+the 18,205-prompt smoke pool). With `XLA_FLAGS=--xla_gpu_deterministic_ops=true` two
+processes agreed exactly (0 pairs, largest difference 0), and the CI pass took 54 s instead of
+61 s. The pod driver sets that flag for every stage; it made a learner step 0.90 s instead of
+0.75 s on the L40. Stage 1 (a max reduction) and stage 5 (a column gather) are different
+compiled programs; with the flag, they agreed on every pair in the smoke, and stage 5 stores the
+union of both passes' pairs should they differ.
 
 ## Running on the pod (4 GPUs)
 

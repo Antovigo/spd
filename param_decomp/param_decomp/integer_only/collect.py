@@ -135,15 +135,15 @@ file `{prompts}`, counting from 0 (the same rows as `../pool.npz`). `t` (integer
 its causal importance (CI) there exceeds {threshold}: the output head's lower-leaky CI of the
 run's own CI function, evaluated on the ORIGINAL model's activations. A component's inner
 activation is `x V_c` (real): the input `x` of its site (a `d_in`-vector) times its input vector
-`V_c` (the column `c` of the site's `V`); when on, the component writes `(x V_c) U_c` into the
+`V_c` (column `c` of the site's `V`, `c` the component's index); when on, the component writes `(x V_c) U_c` into the
 site's output, `U_c` its output vector.
 
 Only the (position, component) pairs where the component is ON on at least one prompt are
 stored: {n_columns} pairs over the {seq_len} positions ({per_position}). Every other pair is
 never ON. The ON bits stored here come from a second evaluation of the CI function over the
-pool; it is not bitwise reproducible on GPU (bf16, kernel choice), so a pair ON at the
-threshold in the first evaluation (`../max_ci.npz`, which chose the candidates) can be OFF on
-every prompt here, and the reverse. Both kinds of pairs are stored: {n_first_only} pairs are ON
+pool (a separately compiled program, in bf16), which can differ at the threshold from the first
+evaluation (`../max_ci.npz`, which chose the candidates): a pair ON there can be OFF on every
+prompt here, and the reverse. Both kinds of pairs are stored: {n_first_only} pairs are ON
 only in the first evaluation (their stored bits are all 0) and {n_second_only} only here.
 
 ## Files
@@ -159,8 +159,9 @@ only in the first evaluation (their stored bits are all 0) and {n_second_only} o
 - `inner_pos<t>.npy` (N, K_t) float16: the inner activation of position `t`'s K_t columns in the
   INTEGER-ONLY model: exactly the components of `../integer-only.json` on at every position of
   every prompt, every other component and the weight delta off, computed in {precision}.
-- `ci_on_pos<t>.npy` (ceil(N/8), K_t) uint8: whether each column is ON (binarized original
-  CI), bit-packed along the prompt axis (numpy `packbits`, big bit order).
+- `ci_on_pos<t>.npy` (ceil(N/8), K_t) uint8, `ceil(N/8)` = N/8 rounded up: whether each column
+  is ON (binarized original CI), bit-packed along the prompt axis (numpy `packbits`, big bit
+  order).
 
 ```python
 import numpy as np
