@@ -1,7 +1,8 @@
 """The integer-only components' activation dataset over the whole pool.
 
 For every integer-only component and every position `t` where it is EVER on (its original CI
-exceeds the threshold at `t` on some pool prompt, `max_ci.npz`), over all `N` prompts: (a) its
+exceeds the threshold at `t` on some pool prompt, in this stage's own CI pass), over all `N`
+prompts: (a) its
 inner activation `x V_c` in the INTEGER-ONLY model (exactly the integer-only components on, the
 weight delta off, `model.factored_inner`), float16; (b) its binarized original CI (CI on the
 original model > threshold), bit-packed. Layout in `DATASET_README`."""
@@ -61,6 +62,13 @@ def ever_on_columns(
         positions.append(np.full(idx.size, t, np.int64))
         comps.append(idx)
     return Columns(position=np.concatenate(positions), component=np.concatenate(comps))
+
+
+def columns_from_bits(bits: np.ndarray) -> Columns:
+    """The (t, j) pairs ON on at least one prompt, from `(ceil(N/8), T, n)` packed ON bits."""
+    ever = bits.any(axis=0)  # (T, n): a packed byte is nonzero iff one of its 8 prompts is ON
+    t, j = np.nonzero(ever)
+    return Columns(position=t.astype(np.int64), component=j.astype(np.int64))
 
 
 def gather_index(slots: Slots) -> dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]]:

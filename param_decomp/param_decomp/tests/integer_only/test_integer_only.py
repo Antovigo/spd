@@ -31,6 +31,7 @@ from param_decomp.experiments.lm.load_run import PlacedTransformer
 from param_decomp.integer_only import model as im
 from param_decomp.integer_only.applet import operation_grid, slice_documents
 from param_decomp.integer_only.collect import (
+    columns_from_bits,
     ever_on_columns,
     make_inner_columns,
     pack_rows,
@@ -330,6 +331,29 @@ def test_collection_columns_are_the_ever_on_pairs(setup: Setup) -> None:
     columns = ever_on_columns(slots, max_ci, threshold, seq_len)
     assert j_off not in columns.component
     assert columns.position[columns.component == j_one].tolist() == [2]
+
+
+def test_collection_columns_from_the_pass_bits() -> None:
+    """Stage 5 stores exactly the (t, j) pairs ON on some prompt of its own CI pass, by position
+    then component, and each stored column's bits are the pass's."""
+    rng = np.random.default_rng(7)
+    n_prompts, seq_len, n = 21, 4, 6
+    on = rng.random((n_prompts, seq_len, n)) < 0.05
+    on[:, 1, :] = False  # a position where nothing is ever on
+    on[:, :, 2] = False  # a component never on anywhere
+    on[5, 3, 2] = True  # ... except once
+    packed = pack_rows(np.concatenate([on, np.zeros((3, seq_len, n), bool)]))  # 24 rows
+    columns = columns_from_bits(packed)
+    want = {(t, j) for t in range(seq_len) for j in range(n) if on[:, t, j].any()}
+    assert set(zip(columns.position.tolist(), columns.component.tolist(), strict=True)) == want
+    assert columns.at(1).size == 0 and columns.at(3).tolist().count(2) == 1
+    assert np.all(np.diff(columns.position) >= 0)
+    for t in range(seq_len):
+        cols = columns.at(t)
+        assert np.all(np.diff(cols) > 0)
+        stored = packed[:, t][:, cols]
+        for k, j in enumerate(cols):
+            np.testing.assert_array_equal(unpack_column(stored[:, k], n_prompts), on[:, t, j])
 
 
 def test_bit_packing_round_trip() -> None:

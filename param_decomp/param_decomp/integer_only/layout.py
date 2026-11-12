@@ -125,8 +125,9 @@ threshold {threshold}. `q` is the last-position next-token distribution renormal
 - `config.yaml`: every setting of this pipeline.
 - `status/`: one `<stage>.done` (JSON facts: counts, checks, seconds) per finished stage, or
   `<stage>.failed` with the error.
-- `pool.npz`: the tokenized prompts (`tokens` (N, T), `op` (N,) index into `ops`, `a`, `b`, `r`
-  (N,) operands and true answer, `position_labels` (T,)).
+- `pool.npz`: the tokenized prompts: `tokens` (N, T); `op` (N,), the operation as an index into
+  `ops`; `a`, `b` (N,), the two integer operands; `r` (N,), the true answer (integer, `a + b` or
+  `a - b`); `position_labels` (T,).
 - `max_ci.npz`: `{{site: (T, C) float32}}`, the maximum CI over all N prompts per position and
   component (`C` = the site's number of components).
 - `candidates.json`: the {n_candidates} components ON at some position of some prompt. Only they

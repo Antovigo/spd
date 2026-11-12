@@ -46,6 +46,7 @@ from param_decomp.integer_only.ci_pass import chunk_ci_columns, chunk_max_ci
 from param_decomp.integer_only.collect import (
     DATASET_README,
     FP16_MAX,
+    columns_from_bits,
     ever_on_columns,
     make_inner_columns,
     pack_rows,
@@ -351,8 +352,8 @@ def stage_pick(
     t0 = time.time()
     scored = score_masks(arch, shared, factors, dense, slots, masks, pool, check, int_ids, config)
     ops = pool.op[check]
-    rows: dict[str, tuple[int, dict[str, object]]] = {
-        TARGET: (int(sum(sizes.values())), summary(scored[TARGET], ops, pool.ops))
+    rows: dict[str, tuple[int | None, dict[str, object]]] = {
+        TARGET: (None, summary(scored[TARGET], ops, pool.ops))
     }
     for name, on in masks.items():
         rows[name] = (int(on.sum()), summary(scored[name], ops, pool.ops))
@@ -407,61 +408,68 @@ def stage_collect(
         arch, shared, _dense = build_target(model)
         factors, slots = build_factors(restored.components, keep, arch.n_layer)
         prepared, v_norms = prepare_components(placed, restored.components)
-    columns = ever_on_columns(slots, max_ci, config.threshold, pool.seq_len)
-    per_t = [columns.at(t) for t in range(pool.seq_len)]
     by_site = slots.components()
     site_cols = {s: jnp.asarray(np.asarray(by_site.get(s, []), np.int32)) for s in sorted(sizes)}
-    on_mask = slots.mask(np.ones(slots.n, bool), arch.n_layer)
-    inner_columns = make_inner_columns(slots)
+    n_packed = -(-pool.n // 8)
+    # Pass 1, the original CI: every integer-only component's ON bit at every position, packed
+    # along prompts, `(ceil(N/8), T, n)` uint8 in host memory.
+    bits = np.zeros((n_packed, pool.seq_len, slots.n), np.uint8)
+    t0 = time.time()
+    batches = index_batches(pool.n, config.ci_batch)
+    with jax.set_mesh(restored.mesh):
+        tokens_all = jax.sharding.reshard(jnp.asarray(pool.tokens), P())
+        for i, (idx, real) in enumerate(batches):
+            ci = np.asarray(
+                chunk_ci_columns(placed, prepared, restored.ci_fn, tokens_all, jnp.asarray(idx), site_cols)
+            )  # fmt: skip
+            on = ci > config.threshold
+            on[real:] = False
+            start = int(idx[0])
+            n_rows = -(-real // 8)
+            bits[start // 8 : start // 8 + n_rows] = pack_rows(on)[:n_rows]
+            if i % 50 == 0 or i == len(batches) - 1:
+                logger.info(f"collect CI: batch {i + 1}/{len(batches)} ({time.time() - t0:.0f}s)")
+    seconds_ci = time.time() - t0
+    columns = columns_from_bits(bits)
+    per_t = [columns.at(t) for t in range(pool.seq_len)]
+    stage1 = ever_on_columns(slots, max_ci, config.threshold, pool.seq_len)
+    here = set(zip(columns.position.tolist(), columns.component.tolist(), strict=True))
+    there = set(zip(stage1.position.tolist(), stage1.component.tolist(), strict=True))
     out = layout.datasets.with_name(layout.datasets.name + ".partial")
     if out.exists():
         shutil.rmtree(out)
     out.mkdir(parents=True)
-    n_packed = -(-pool.n // 8)
+    for t, cols in enumerate(per_t):
+        np.save(out / f"ci_on_pos{t}.npy", np.ascontiguousarray(bits[:, t][:, cols]))
+    n_on = int(np.unpackbits(bits).sum())
+    del bits
+    # Pass 2, the integer-only model: the inner activations of the stored columns.
     inner_mm = [
         np.lib.format.open_memmap(out / f"inner_pos{t}.npy", mode="w+", dtype=np.float16,
                                   shape=(pool.n, c.size))
         for t, c in enumerate(per_t)
     ]  # fmt: skip
-    bits_mm = [
-        np.lib.format.open_memmap(out / f"ci_on_pos{t}.npy", mode="w+", dtype=np.uint8,
-                                  shape=(n_packed, c.size))
-        for t, c in enumerate(per_t)
-    ]  # fmt: skip
-    on_elsewhere = 0
+    on_mask = slots.mask(np.ones(slots.n, bool), arch.n_layer)
+    inner_columns = make_inner_columns(slots)
     inner_absmax = 0.0
-    t0 = time.time()
-    with jax.set_mesh(restored.mesh):
-        tokens_all = jax.sharding.reshard(jnp.asarray(pool.tokens), P())
-        batches = index_batches(pool.n, config.ci_batch)
-        for i, (idx, real) in enumerate(batches):
-            ci = np.asarray(
-                chunk_ci_columns(placed, prepared, restored.ci_fn, tokens_all, jnp.asarray(idx), site_cols)
-            )  # fmt: skip
-            inner = np.asarray(
-                inner_columns(arch, shared, factors, on_mask, jnp.asarray(pool.tokens[idx]),
-                              config.collect_precision)
-            )  # fmt: skip
-            start = int(idx[0])
-            on = ci > config.threshold
-            on[real:] = False
-            for t, cols in enumerate(per_t):
-                elsewhere = np.ones(slots.n, bool)
-                elsewhere[cols] = False
-                on_elsewhere += int(on[:real, t][:, elsewhere].sum())
-                values = inner[:real, t][:, cols]
-                if values.size:
-                    inner_absmax = max(inner_absmax, float(np.abs(values).max()))
-                inner_mm[t][start : start + real] = values.astype(np.float16)
-                packed = pack_rows(on[:, t][:, cols])
-                n_rows = -(-real // 8)
-                bits_mm[t][start // 8 : start // 8 + n_rows] = packed[:n_rows]
-            assert inner_absmax < FP16_MAX, f"inner overflows float16 ({inner_absmax})"
-            if i % 50 == 0 or i == len(batches) - 1:
-                logger.info(f"collect: batch {i + 1}/{len(batches)} ({time.time() - t0:.0f}s)")
-    for mm in (*inner_mm, *bits_mm):
+    t1 = time.time()
+    for i, (idx, real) in enumerate(batches):
+        inner = np.asarray(
+            inner_columns(arch, shared, factors, on_mask, jnp.asarray(pool.tokens[idx]),
+                          config.collect_precision)
+        )  # fmt: skip
+        start = int(idx[0])
+        for t, cols in enumerate(per_t):
+            values = inner[:real, t][:, cols]
+            if values.size:
+                inner_absmax = max(inner_absmax, float(np.abs(values).max()))
+            inner_mm[t][start : start + real] = values.astype(np.float16)
+        assert inner_absmax < FP16_MAX, f"inner overflows float16 ({inner_absmax})"
+        if i % 50 == 0 or i == len(batches) - 1:
+            logger.info(f"collect inner: batch {i + 1}/{len(batches)} ({time.time() - t1:.0f}s)")
+    for mm in inner_mm:
         mm.flush()
-    del inner_mm, bits_mm
+    del inner_mm
     pos, comp = columns.position, columns.component
     v_norm = {s: np.asarray(v) for s, v in v_norms.items()}
     np.savez(
@@ -484,13 +492,18 @@ def stage_collect(
     if layout.datasets.exists():
         shutil.rmtree(layout.datasets)
     out.rename(layout.datasets)
+    never_on = np.setdiff1d(np.arange(slots.n), columns.component)
     return {
         "n_integer_only": slots.n,
         "n_columns": int(pos.size),
         "columns_per_position": [int(c.size) for c in per_t],
-        "on_outside_columns": on_elsewhere,
+        "n_on_events": n_on,
+        "integer_only_never_on": [f"{slots.sites[j]}:{slots.index[j]}" for j in never_on],
+        "pairs_on_here_not_in_max_ci": len(here - there),
+        "pairs_in_max_ci_not_on_here": len(there - here),
         "inner_absmax": inner_absmax,
-        "seconds": round(time.time() - t0, 1),
+        "seconds_ci_pass": round(seconds_ci, 1),
+        "seconds_inner_pass": round(time.time() - t1, 1),
     }
 
 
@@ -585,6 +598,17 @@ def write_readme(layout: Layout, config: IntegerOnlyConfig, run_dir: Path) -> No
     )  # fmt: skip
 
 
+def peak_device_gib() -> list[float | None]:
+    """Per local device, the allocator's peak bytes in use so far (GiB; None where the backend
+    keeps no statistics)."""
+    out: list[float | None] = []
+    for device in jax.local_devices():
+        stats = device.memory_stats()
+        peak = None if stats is None else stats.get("peak_bytes_in_use")
+        out.append(None if peak is None else round(peak / 2**30, 2))
+    return out
+
+
 def run_stage(layout: Layout, marker: str, fn: Callable[[], dict[str, object]]) -> None:
     if layout.done(marker).exists():
         logger.info(f"{marker}: already done ({layout.done(marker)})")
@@ -598,6 +622,7 @@ def run_stage(layout: Layout, marker: str, fn: Callable[[], dict[str, object]]) 
         layout.failed(marker).write_text(traceback.format_exc())
         raise
     facts = facts | {
+        "peak_device_gib": peak_device_gib(),
         "seconds_total": round(time.time() - t0, 1),
         "commit": commit(),
         "finished": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),

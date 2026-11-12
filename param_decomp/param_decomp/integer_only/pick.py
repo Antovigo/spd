@@ -76,12 +76,13 @@ SUMMARY_COLUMNS = ("model", "size", *(f"{q}_{g}" for g in ("all", "add", "sub") 
 
 
 def write_summary(
-    path: Path, rows: Mapping[str, tuple[int, Mapping[str, object]]], chosen: str | None
+    path: Path, rows: Mapping[str, tuple[int | None, Mapping[str, object]]], chosen: str | None
 ) -> None:
-    """One TSV row per model: its size (kept components) and the means of `summary`."""
+    """One TSV row per model: its size (kept components; empty for the target, which has no
+    mask) and the means of `summary`."""
     lines = ["\t".join((*SUMMARY_COLUMNS, "chosen"))]
     for model, (size, summ) in rows.items():
-        values: list[str] = [model, str(size)]
+        values: list[str] = [model, "" if size is None else str(size)]
         for column in SUMMARY_COLUMNS[2:]:
             quantity, group = column.rsplit("_", 1)
             block = summ.get(group)
