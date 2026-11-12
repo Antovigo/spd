@@ -615,22 +615,6 @@ def restore_run(
     )
 
 
-def restore_other_decomposition(
-    restored: RestoredRun, run_dir: Path, step: int
-) -> Decomposition[LMBatchWithDocuments]:
-    """Another run's decomposition (same sites, C and CI arch — e.g. a fine-tune's parent)
-    restored onto `restored`'s placement, without re-placing the target."""
-    with jax.set_mesh(restored.mesh):
-        decomposition, _ = _restore_decomposition(
-            require_unrouted_ci_fn_arch(restored.deliverable.ci_fn),
-            restored.placed,
-            restored.mesh,
-            run_dir,
-            step,
-        )
-    return decomposition
-
-
 def restore_jax_run(
     run_dir: Path, step: int | None = None, *, data_root: Path, sharding: PlacementSpec = "zero1"
 ) -> RestoredRun:

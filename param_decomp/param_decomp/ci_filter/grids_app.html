@@ -285,13 +285,8 @@ const mergeRgb = ([out, hid]) => [
 
 function tileDrawers(mi, si, pi, oi, data = moduleData(mi)) {
   const at = (ai, bi) => gridIndex(si, pi, oi, ai, bi, data);
-  // A NaN inner activation marks a cell outside the pool (e.g. a - b with a < b): grey in
-  // every view, CI included (u8 CI has no NaN of its own).
-  const outside = (ai, bi) => data.inner && Number.isNaN(data.inner[at(ai, bi)]);
-  const ciVal = (ai, bi) => (outside(ai, bi) ? NaN : data.ci[at(ai, bi)] / 255);
-  const ciHiddenVal = data.ciHidden
-    ? (ai, bi) => (outside(ai, bi) ? NaN : data.ciHidden[at(ai, bi)] / 255)
-    : null;
+  const ciVal = (ai, bi) => data.ci[at(ai, bi)] / 255;
+  const ciHiddenVal = data.ciHidden ? (ai, bi) => data.ciHidden[at(ai, bi)] / 255 : null;
   const innerVal = (ai, bi) => data.inner[at(ai, bi)];
   const mx = data.inner ? innerScale(data, si, pi, oi) : 1;
   const drawers = {
@@ -445,7 +440,6 @@ function renderDetail() {
   $("dhidpane").style.display = drawers.ci_hidden ? "block" : "none";
   $("dmergepane").style.display = drawers.ci_merge ? "block" : "none";
   $("dalivepane").style.display = window.ALIVE_MODE ? "block" : "none";
-  if (SLICES.alive_label) $("dalivepane").querySelector(".cap").textContent = `inner act (${SLICES.alive_label})`;
   const panes = [["dci", "ci"], ["dinner", "inner"]];
   if (window.ALIVE_MODE) panes.push(["dinneralive", "inner_alive"]);
   if (drawers.ci_hidden) panes.push(["dcihidden", "ci_hidden"], ["dcimerge", "ci_merge"]);

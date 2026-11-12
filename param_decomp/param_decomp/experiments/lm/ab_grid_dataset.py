@@ -292,9 +292,7 @@ def _b64(arr: np.ndarray) -> str:
 
 
 def encode_ci_u8(ci: np.ndarray) -> np.ndarray:
-    """1/255 steps; a NaN cell (outside the pool) encodes as 0 — the applet greys it off the
-    inner activation's NaN at the same cell."""
-    return np.round(np.clip(np.nan_to_num(ci, nan=0.0), 0.0, 1.0) * 255.0).astype(np.uint8)
+    return np.round(np.clip(ci, 0.0, 1.0) * 255.0).astype(np.uint8)
 
 
 def _comp_major(columns: np.ndarray, grid: ArithmeticGrid) -> np.ndarray:

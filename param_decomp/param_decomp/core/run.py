@@ -49,13 +49,11 @@ from param_decomp.core.built_run import RunInstance
 from param_decomp.core.checkpoint import (
     make_checkpoint_manager,
     make_read_only_checkpoint_manager,
-    restore_ci_fn,
     restore_decomposition,
     restore_destination,
     restore_step,
     save_state,
 )
-from param_decomp.core.ci_fn.interface import CIFn
 from param_decomp.core.components import ComponentStacks
 from param_decomp.core.configs import (
     Cadence,
@@ -876,27 +874,6 @@ def _start_training[Conditioning, Training: TrainingProgress](
             return _ensure_global(initialize(initialize_decomposition()), mesh)
 
 
-def _restore_ci_ceiling[CIFnTree](
-    run: RunInstance, abstract: ShapeTree[CIFnTree], formats: Any, mesh: Mesh, is_main: bool
-) -> CIFnTree:
-    """The fine-tune parent's CI fn (`pd.ci_ceiling`), frozen, at the step's input formats."""
-    parent = run.resume_provenance
-    assert parent is not None
-    destination = restore_destination(abstract, formats, mesh)
-    placed = jax.tree.map(
-        lambda leaf: jax.ShapeDtypeStruct(leaf.shape, leaf.dtype, sharding=leaf.sharding),
-        destination,
-    )
-    with make_read_only_checkpoint_manager(parent.parent_run_dir / "ckpts") as manager:
-        ceiling = restore_ci_fn(manager, parent.parent_step, placed)
-    if is_main:
-        print(
-            f"CI ceiling: {parent.parent_run_dir} step {parent.parent_step}'s CI fn",
-            flush=True,
-        )
-    return jax.device_put(ceiling, jax.tree.map(lambda leaf: leaf.format, destination))
-
-
 @dataclasses.dataclass(frozen=True)
 class _PeriodicSaver:
     """`PeriodicCheckpointing`'s runtime pair: the orbax manager plus its rhythm. Bundled
@@ -1256,7 +1233,6 @@ def run_targeted_decomposition_training[
     nontarget_positions: PositionAxis | None = None,
     ascend_replicate: bool = False,
     sequential_passes: bool = False,
-    target_recon_loss_fn: Callable[[Out, Out], jax.Array] | None = None,
 ) -> None:
     """The targeted-PD (tPD) engine entry — `run_decomposition_training`'s twin
     over the same `_prepare_run` / `_run_loop` core, stepping the two-pass
@@ -1272,10 +1248,6 @@ def run_targeted_decomposition_training[
     Each stream runs at its own natural sequence length. `sequential_passes` scores the
     passes one at a time (same gradient, one pass's residuals live at a time) and
     `ascend_replicate` replicates the detached compute weights for the ascent phase.
-    `target_recon_loss_fn` replaces the target's output comparison on the TARGET stream
-    only. `pd.ci_ceiling` caps every CI at the fine-tune parent's frozen CI fn, restored
-    from `run.resume_provenance` on every entry (fresh or resumed); `pd.trainable` freezes
-    either half of the decomposition.
 
     tPD has no faithfulness role: `TargetedPDConfig` admits no faithfulness loss
     member and carries no warmup fields, so neither exists to refuse here."""
@@ -1323,7 +1295,6 @@ def run_targeted_decomposition_training[
             remat_ci_fn=remat_ci_fn,
             ci_capture_keys=shape.decomposition.ci_fn.capture_keys,
             ascend_replicate=ascend_replicate,
-            target_recon_loss_fn=target_recon_loss_fn,
         )
         step_fn = make_targeted_train_step(
             model_static=model,
@@ -1332,14 +1303,7 @@ def run_targeted_decomposition_training[
             ci_fn_optimizer=prepared.opt_ci,
             total_steps=pd.steps,
             sequential_passes=sequential_passes,
-            trainable_parts=pd.trainable,
-            untrained_hidden_head=pd.untrained_hidden_head,
         )
-        if pd.ci_ceiling:
-            assert run.resume_provenance is not None, (
-                "pd.ci_ceiling caps CI at the fine-tune parent's; it needs resume_provenance"
-            )
-        ceiling_shape = shape.decomposition.ci_fn if pd.ci_ceiling else None
 
         def training_step(
             model: PlacedModel[TargetIn, Out, PreparedT, Conditioning, PreparedMaskingT],
@@ -1347,7 +1311,6 @@ def run_targeted_decomposition_training[
             target_batch: TargetIn,
             nontarget_batch: TargetIn,
             run_key: PRNGKeyArray,
-            ci_ceiling: CIFn[Conditioning] | None,
         ) -> tuple[TargetedPDState[Conditioning], dict[str, jax.Array]]:
             return step_fn(
                 model,
@@ -1355,7 +1318,6 @@ def run_targeted_decomposition_training[
                 target_batch,
                 nontarget_batch,
                 random.fold_in(run_key, state.training.step),
-                ci_ceiling=ci_ceiling,
             )
 
         def run_step(
@@ -1367,7 +1329,6 @@ def run_targeted_decomposition_training[
                 sample_target_batch(step),
                 sample_nontarget_batch(step),
                 prepared.run_key,
-                ci_ceiling,
             )
 
         compiled = (
@@ -1378,16 +1339,8 @@ def run_targeted_decomposition_training[
                 sample_target_batch(prepared.start_step),
                 sample_nontarget_batch(prepared.start_step),
                 prepared.run_key,
-                ceiling_shape,
             )
             .compile()
-        )
-        ci_ceiling = (
-            None
-            if ceiling_shape is None
-            else _restore_ci_ceiling(
-                run, ceiling_shape, compiled.input_formats[0][5], prepared.mesh, is_main
-            )
         )
         state = _start_training(
             prepared.start,

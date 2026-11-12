@@ -1259,18 +1259,6 @@ class PDConfig(PDConfigBase):
         return self
 
 
-class TrainableParts(BaseConfig):
-    """Which halves of a decomposition a (fine-tuning) run updates (`TargetedPDConfig.trainable`)."""
-
-    components: bool = True
-    ci_fn: bool = True
-
-    @model_validator(mode="after")
-    def validate_something_trains(self) -> Self:
-        assert self.components or self.ci_fn, "trainable: freezing both halves trains nothing"
-        return self
-
-
 type WeightDecayStreams = Literal["target", "nontarget", "all"]
 """Which streams' CI the CI-scaled decay reads (`TargetedPDConfig.ci_scaled_weight_decay_stream`)."""
 
@@ -1353,41 +1341,6 @@ class TargetedPDConfig(PDConfigBase):
     @model_validator(mode="after")
     def validate_loss_metrics(self) -> Self:
         _validate_training_losses(self.loss_metrics)
-        return self
-
-    trainable: TrainableParts = Field(
-        default_factory=TrainableParts,
-        description=(
-            "Which halves of the decomposition the optimizer steps: a frozen half keeps its "
-            "parameters and its optimizer state unchanged (and, for the components, takes no "
-            "CI-scaled weight decay). The default trains both."
-        ),
-    )
-    untrained_hidden_head: bool = Field(
-        default=False,
-        description=(
-            "Admit a dual CI fn (`decomposition.ci.dual`) without `hidden`: a fine-tune of a "
-            "dual parent that drops the hidden passes. The hidden head then gets no gradient "
-            "and nothing reads its CI. Requires `hidden` unset."
-        ),
-    )
-    ci_ceiling: bool = Field(
-        default=False,
-        description=(
-            "Cap every CI the step reads (both streams, both heads; preactivations, lower and "
-            "upper) entrywise at the CI of the fine-tune PARENT's frozen CI fn "
-            "(`resume_provenance`), evaluated on the same inputs. Gradients pass at or under "
-            "the cap and, over it, only when they lower the CI (`core.ci_fn.ceiling`). The "
-            "checkpointed CI fn is the uncapped trained one: its effective CI is the minimum "
-            "of it and the parent's."
-        ),
-    )
-
-    @model_validator(mode="after")
-    def validate_untrained_hidden_head(self) -> Self:
-        assert not (self.untrained_hidden_head and self.hidden is not None), (
-            "untrained_hidden_head admits a dual CI fn WITHOUT a hidden pass; pd.hidden is set"
-        )
         return self
 
     @model_validator(mode="after")

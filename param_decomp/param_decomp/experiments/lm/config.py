@@ -115,7 +115,6 @@ from param_decomp.experiments.lm.resolved import (
 )
 from param_decomp.experiments.lm.run_data import LMDataConfig
 from param_decomp.experiments.lm.runtime import RuntimeConfig
-from param_decomp.experiments.lm.target_output import FullOutputKL, TargetOutputConfig
 from param_decomp.experiments.lm.targeted_data import LMPromptPoolConfig
 from param_decomp.infra import pretrain_cache
 from param_decomp.migrations.data_layout import migrate_raw as migrate_data_layout
@@ -850,9 +849,6 @@ class LMTargetedExperimentConfig(ExperimentConfigBase):
     data: LMDataConfig
     prompts: LMPromptPoolConfig
     nontarget: NontargetConfig
-    target_output: TargetOutputConfig = FullOutputKL()
-    """The TARGET stream's output objective (`experiments.lm.target_output`); the default is
-    the target's own full-vocabulary KL at every position."""
 
     @model_validator(mode="after")
     def validate_eval_reads_this_run(self) -> Self:
@@ -868,7 +864,7 @@ class LMTargetedExperimentConfig(ExperimentConfigBase):
         trains against nothing while costing its parameters and its share of every step."""
         dual = bool(getattr(self.decomposition.ci, "dual", False))
         hidden = self.pd.hidden is not None
-        assert dual == hidden or (dual and self.pd.untrained_hidden_head), (
+        assert dual == hidden, (
             "decomposition.ci.dual and pd.hidden must be set together: "
             f"ci.dual={dual}, pd.hidden={'set' if hidden else 'unset'}"
         )
