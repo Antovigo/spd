@@ -31,6 +31,7 @@ from param_decomp.core.configs import (
     PersistentPGDReconLossConfig,
     StochasticReconLossConfig,
     TargetedLossMetricConfig,
+    TrainableParts,
     UnmaskedNoDeltaReconLossConfig,
 )
 from param_decomp.core.init_placed import seeded_ci_fn_initializer
@@ -47,6 +48,7 @@ from param_decomp.core.run_state import _adamw_optimizer
 from param_decomp.core.schedule import ScheduleConfig
 from param_decomp.core.sharding import hsdp_mesh
 from param_decomp.core.train import (
+    TRAIN_BOTH,
     CIScaledWeightDecay,
     Decomposition,
     ForwardSubstrate,
@@ -84,6 +86,8 @@ def _tiny_setup(
     nontarget: NontargetConfig,
     total_steps: int = 20,
     ci_scaled_weight_decay: CIScaledWeightDecay | None = None,
+    trainable_parts: TrainableParts = TRAIN_BOTH,
+    target_recon_loss_fn: Any = None,
 ):
     cfg = TMSConfig(n_features=5, n_hidden=2)
     sites = site_specs(cfg, (SiteC("linear1", 8), SiteC("linear2", 6)))
@@ -127,10 +131,12 @@ def _tiny_setup(
                 remat_recon_forwards=False,
                 remat_ci_fn=False,
                 ci_capture_keys=ci_fn.capture_keys,
+                target_recon_loss_fn=target_recon_loss_fn,
             ),
             components_optimizer=opt_vu,
             ci_fn_optimizer=opt_ci,
             total_steps=total_steps,
+            trainable_parts=trainable_parts,
         )
     )
     return cfg, model, state, step
@@ -1030,3 +1036,85 @@ def test_targeted_engine_end_to_end(
     last = json.loads(lines[-1])
     assert "train/nontarget_data/loss/total" in last
     assert not any("Faithfulness" in k for k in last)
+
+
+def _one_step(cfg: TMSConfig, model: Any, state: Any, step: Any, i: int = 0, **kwargs: Any):
+    return step(
+        model,
+        state,
+        _target_batch(cfg, i),
+        _nontarget_batch(cfg, i),
+        jax.random.PRNGKey(i),
+        **kwargs,
+    )
+
+
+def _same(a: Any, b: Any) -> bool:
+    return all(
+        np.array_equal(np.asarray(x), np.asarray(y))
+        for x, y in zip(jax.tree.leaves(a), jax.tree.leaves(b), strict=True)
+    )
+
+
+@pytest.mark.parametrize("frozen", ["components", "ci_fn"])
+def test_a_frozen_half_keeps_its_parameters_and_optimizer_state(frozen: str):
+    """`trainable_parts` freezes one half: its parameters and its optimizer state are the
+    step's inputs, while the other half still moves."""
+    parts = TrainableParts(components=frozen != "components", ci_fn=frozen != "ci_fn")
+    cfg, model, state, step = _tiny_setup(
+        _loss_metrics(), _stochastic_nontarget(), trainable_parts=parts
+    )
+    new, _ = _one_step(cfg, model, state, step)
+    moving = "ci_fn" if frozen == "components" else "components"
+    for half, opt in ((frozen, True), (moving, False)):
+        same_params = _same(getattr(state.decomposition, half), getattr(new.decomposition, half))
+        same_opt = _same(
+            getattr(state.training, f"{half}_opt_state"), getattr(new.training, f"{half}_opt_state")
+        )
+        assert same_params == opt and same_opt == opt, (half, same_params, same_opt)
+
+
+def test_trainable_parts_refuses_freezing_everything():
+    with pytest.raises(ValueError, match="trains nothing"):
+        TrainableParts(components=False, ci_fn=False)
+
+
+def test_a_ceiling_equal_to_the_ci_fn_changes_nothing():
+    """min(x, x) = x and the capped gradient passes at the cap, so a ceiling that IS the
+    current CI fn reproduces the uncapped step exactly."""
+    cfg, model, state, step = _tiny_setup(_loss_metrics(), _stochastic_nontarget())
+    plain, plain_metrics = _one_step(cfg, model, state, step)
+    capped, capped_metrics = _one_step(
+        cfg, model, state, step, ci_ceiling=state.decomposition.ci_fn
+    )
+    assert _same(plain.decomposition, capped.decomposition)
+    assert float(plain_metrics["total"]) == float(capped_metrics["total"])
+
+
+def test_a_zero_ceiling_turns_every_component_off():
+    """A ceiling whose CI is zero everywhere caps every CI at zero: the target recon sees
+    all-off masks, so its loss differs from the uncapped step's."""
+    cfg, model, state, step = _tiny_setup(_loss_metrics(), _stochastic_nontarget())
+    ci_fn = state.decomposition.ci_fn
+    zero = jax.tree.map(lambda x: jnp.zeros_like(x) if eqx.is_inexact_array(x) else x, ci_fn)
+    _, plain_metrics = _one_step(cfg, model, state, step)
+    _, capped_metrics = _one_step(cfg, model, state, step, ci_ceiling=zero)
+    assert not np.isclose(
+        float(plain_metrics["loss/StochasticReconLoss"]),
+        float(capped_metrics["loss/StochasticReconLoss"]),
+    )
+
+
+def test_the_target_recon_override_scores_the_target_stream_only():
+    """`target_recon_loss_fn` replaces the target stream's comparison; the non-target
+    stream keeps the target's own."""
+
+    def zero_loss(masked: Array, clean: Array) -> Array:
+        return 0.0 * jnp.mean(masked - clean)
+
+    cfg, model, state, step = _tiny_setup(
+        _loss_metrics(), _stochastic_nontarget(), target_recon_loss_fn=zero_loss
+    )
+    _, metrics = _one_step(cfg, model, state, step)
+    assert float(metrics["loss/StochasticReconLoss"]) == 0.0
+    assert float(metrics["nontarget_data/loss/StochasticReconLoss"]) > 0.0

@@ -1,0 +1,164 @@
+# addsub-answers-09-integer-only (2026-11-12): fine-tune of addsub-answers-09 (p-512d73ab, step
+# 40000) whose TARGET-stream output reconstruction scores only the distribution among the integer
+# tokens "0".."999" at the LAST position (renormalized, KL(Llama || masked); `target_output`).
+# Runs on the parent's pod after the parent finishes. Post-processing (alive sets per position,
+# KL evals, CI + integer-only-model grids): param_decomp.ci_filter.scripts.integer_only.
+#
+# THE ENTIRE DELTA FROM addsub-answers-09
+# 1. resume_provenance: V/U + CI fn from p-512d73ab step 40000; optimizers, adversaries, frequency
+#    estimators and the step counter are fresh.
+# 2. target_output: last_position_integer_kl (integers 0..999). Every target-stream output term
+#    (merged PPGD, unmasked) and its adversary ascents use it. The non-target stream keeps the
+#    full-vocabulary KL at every position.
+# 3. pd.ci_ceiling: every CI the step reads (both streams, both heads) is capped entrywise at the
+#    parent's frozen CI fn's CI on the same inputs. The checkpointed CI fn is the UNCAPPED trained
+#    one: the fine-tune's effective CI is min(trained, parent step 40000).
+# 4. Hidden passes dropped (pd.hidden and nontarget.hidden). The parent's CI fn is dual, so
+#    pd.untrained_hidden_head admits its hidden head, which gets no gradient and is never read.
+#    The CI-scaled weight decay is dropped with them (it read the target hidden CI only).
+# 5. Schedules: 2000 steps. Both learning rates warm up linearly to 8e-6 (the parent's final LR,
+#    0.1 x 8e-5) over the first 5% and then stay constant. The minimality coefficients, the
+#    frequency coefficient and gamma are constant at the parent's end-of-training values
+#    (0.25 x max; gamma 0.01). adv_fraction ramps 0 -> 0.9 over the first 10%; the persistent
+#    sources' Adam LR re-warms over the first 5%.
+# 6. pd.trainable: both halves train (either can be frozen).
+# 7. eval: none. The in-loop evals read the UNCAPPED CI fn, so their numbers would describe a CI
+#    the fine-tune never uses; the post-processing script evaluates the capped CI.
+# 8. Checkpoints every 1000 steps (last two kept); train log every 20 steps.
+run_name: addsub-answers-09-integer-only
+decomposition:
+  sites:
+    kind: glu_transformer
+    layers: {kind: all}
+    cs: {q: 144, k: 144, v: 256, o: 512, gate: 912, up: 912, down: 1024}
+    initialization: neuron_aligned_zero_u
+    neuron_ranks: {kind: name, name: addsub0-399-answer-words_llama31-8b_unit-energy}
+  ci:
+    type: chunkwise_transformer
+    blocks_per_chunk: 1
+    input_tap: all_block_taps
+    d_model: 512
+    n_blocks: 4
+    attention: {kind: mha, n_heads: 8, implementation: xla, mask: bidirectional}
+    ffn: {kind: gelu, hidden: 2048}
+    zero_init_readout: true
+    upper_leak: 1.0
+    dual: true
+pd:
+  seed: 0
+  steps: 2000
+  batch_size: 128
+  components_optimizer:
+    lr_schedule:
+      max_val: 8.0e-06
+      points:
+      - {at: 0.0, frac: 0.0}
+      - {at: 0.05, frac: 1.0}
+      - {at: 1.0, frac: 1.0}
+    betas: [0.9, 0.999]
+    weight_decay: 0.0
+    grad_clip_norm: 0.01
+  ci_fn_optimizer:
+    lr_schedule:
+      max_val: 8.0e-06
+      points:
+      - {at: 0.0, frac: 0.0}
+      - {at: 0.05, frac: 1.0}
+      - {at: 1.0, frac: 1.0}
+    betas: [0.9, 0.999]
+    weight_decay: 0.0
+    grad_clip_norm: null
+  loss_metrics:
+  - type: ImportanceMinimalityLoss
+    coeff: 5.0e-05
+    normalize_at_one: true
+    gamma: 0.01
+    frequency: {coeff: 2.5e-05, reference_datapoint_count: auto}
+  - type: MergedStochasticSubsetPPGDReconLoss
+    coeff: 1.5
+    adv_fraction:
+      max_val: 0.9
+      points:
+      - {at: 0.0, frac: 0.0}
+      - {at: 0.1, frac: 1.0}
+      - {at: 1.0, frac: 1.0}
+    n_warmup_steps: 2
+    routing: {type: uniform_k_subset}
+    optimizer:
+      type: adam
+      beta1: 0.5
+      beta2: 0.99
+      eps: 1.0e-08
+      lr_schedule:
+        max_val: 0.01
+        points:
+        - {at: 0.0, frac: 0.0}
+        - {at: 0.05, frac: 1.0}
+        - {at: 1.0, frac: 1.0}
+    source_shape: bsc
+  - {type: UnmaskedReconLoss, coeff: 0.5}
+  untrained_hidden_head: true
+  ci_ceiling: true
+  trainable: {components: true, ci_fn: true}
+prompts: {kind: prompts_file, path: param_decomp/param_decomp/experiments/lm/prompts/answer_words_addition_subtraction_0-399.txt}
+nontarget:
+  batch_size: 128
+  impmin_coeff: 0.0002
+  recon:
+  - type: MergedStochasticSubsetPPGDReconLoss
+    coeff: 1.0
+    adv_fraction:
+      max_val: 0.9
+      points:
+      - {at: 0.0, frac: 0.0}
+      - {at: 0.1, frac: 1.0}
+      - {at: 1.0, frac: 1.0}
+    n_warmup_steps: 1
+    routing: {type: uniform_k_subset}
+    optimizer:
+      type: adam
+      beta1: 0.5
+      beta2: 0.99
+      eps: 1.0e-08
+      lr_schedule:
+        max_val: 0.01
+        points:
+        - {at: 0.0, frac: 0.0}
+        - {at: 0.05, frac: 1.0}
+        - {at: 1.0, frac: 1.0}
+    source_shape: bsc
+eval: null
+cadence:
+  train_log_every: 20
+  checkpointing:
+    kind: periodic
+    save_every: 1000
+    retention: {kind: keep_last, n: 2}
+target:
+  output_edge: {kind: materialized}
+  attention_implementation: xla
+  spec: {kind: hf_weights_in_vendored, model_class: param_decomp.experiments.lm.vendored.llama_3_1.model.VendoredLlama,
+    model_name: meta-llama/Llama-3.1-8B}
+  weights_dtype: bfloat16
+data:
+  train: {kind: name, name: fineweb_llama_tok_64_one_doc_per_row}
+  eval: {kind: name, name: fineweb_llama_tok_64_eval_one_doc_per_row}
+  layout: documents
+  seq_len: 64
+runtime:
+  compilation_cache_dir: ~/.cache/param-decomp/xla
+  compiler_options: tuned-v2
+  mesh: {replicate: 1, fsdp: 4, tp: 1}
+  sharding: zero1
+  remat_recon_forwards: true
+  remat_ci_fn: true
+  sequential_passes: true
+  launch_env:
+    xla_python_client_mem_fraction: 0.88
+    xla_flags: --xla_gpu_nccl_termination_timeout_seconds=600 --xla_gpu_enable_command_buffer=
+    env: {NCCL_NVLS_ENABLE: '0'}
+wandb: {project: param-decomp-llama}
+target_output:
+  kind: last_position_integer_kl
+  integers: [0, 999]
+resume_provenance: {parent_run_dir: /workspace/data/runs/p-512d73ab, parent_step: 40000}
