@@ -1,8 +1,8 @@
 """The integer-only components' activation dataset over the whole pool.
 
 For every integer-only component and every position `t` where it is EVER on (its original CI
-exceeds the threshold at `t` on some pool prompt, in this stage's own CI pass), over all `N`
-prompts: (a) its
+exceeds the threshold at `t` on some pool prompt, in stage 1's pass or in this stage's own),
+over all `N` prompts: (a) its
 inner activation `x V_c` in the INTEGER-ONLY model (exactly the integer-only components on, the
 weight delta off, `model.factored_inner`), float16; (b) its binarized original CI (CI on the
 original model > threshold), bit-packed. Layout in `DATASET_README`."""
@@ -46,27 +46,33 @@ class Columns:
         return self.component[self.position == t]
 
 
-def ever_on_columns(
+def ever_on_max_ci(
     slots: Slots, max_ci: Mapping[str, np.ndarray], threshold: float, seq_len: int
-) -> Columns:
-    """The (t, j) pairs with the original max CI over the pool above `threshold`."""
-    positions, comps = [], []
-    for t in range(seq_len):
-        on = np.asarray(
-            [
-                max_ci[site][t, c] > threshold
-                for site, c in zip(slots.sites, slots.index, strict=True)
-            ]
-        )
-        idx = np.flatnonzero(on)
-        positions.append(np.full(idx.size, t, np.int64))
-        comps.append(idx)
-    return Columns(position=np.concatenate(positions), component=np.concatenate(comps))
+) -> np.ndarray:
+    """`(T, n)` bool: the stored components' max original CI over the pool (`max_ci.npz`, stage
+    1) above `threshold` at position `t`."""
+    return np.stack(
+        [
+            np.asarray(
+                [
+                    max_ci[s][t, c] > threshold
+                    for s, c in zip(slots.sites, slots.index, strict=True)
+                ],
+                bool,
+            )
+            for t in range(seq_len)
+        ]
+    ).reshape(seq_len, slots.n)
 
 
-def columns_from_bits(bits: np.ndarray) -> Columns:
-    """The (t, j) pairs ON on at least one prompt, from `(ceil(N/8), T, n)` packed ON bits."""
-    ever = bits.any(axis=0)  # (T, n): a packed byte is nonzero iff one of its 8 prompts is ON
+def ever_on_bits(bits: np.ndarray) -> np.ndarray:
+    """`(T, n)` bool: ON on at least one prompt, from `(ceil(N/8), T, n)` packed ON bits (a
+    packed byte is nonzero iff one of its 8 prompts is ON)."""
+    return np.asarray(bits.any(axis=0))
+
+
+def columns_of(ever: np.ndarray) -> Columns:
+    """The `(T, n)` mask's true pairs as `Columns` (position, then component, ascending)."""
     t, j = np.nonzero(ever)
     return Columns(position=t.astype(np.int64), component=j.astype(np.int64))
 
@@ -134,7 +140,11 @@ site's output, `U_c` its output vector.
 
 Only the (position, component) pairs where the component is ON on at least one prompt are
 stored: {n_columns} pairs over the {seq_len} positions ({per_position}). Every other pair is
-never ON.
+never ON. The ON bits stored here come from a second evaluation of the CI function over the
+pool; it is not bitwise reproducible on GPU (bf16, kernel choice), so a pair ON at the
+threshold in the first evaluation (`../max_ci.npz`, which chose the candidates) can be OFF on
+every prompt here, and the reverse. Both kinds of pairs are stored: {n_first_only} pairs are ON
+only in the first evaluation (their stored bits are all 0) and {n_second_only} only here.
 
 ## Files
 

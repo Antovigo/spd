@@ -46,8 +46,9 @@ from param_decomp.integer_only.ci_pass import chunk_ci_columns, chunk_max_ci
 from param_decomp.integer_only.collect import (
     DATASET_README,
     FP16_MAX,
-    columns_from_bits,
-    ever_on_columns,
+    columns_of,
+    ever_on_bits,
+    ever_on_max_ci,
     make_inner_columns,
     pack_rows,
 )
@@ -430,11 +431,12 @@ def stage_collect(
             if i % 50 == 0 or i == len(batches) - 1:
                 logger.info(f"collect CI: batch {i + 1}/{len(batches)} ({time.time() - t0:.0f}s)")
     seconds_ci = time.time() - t0
-    columns = columns_from_bits(bits)
+    on_here = ever_on_bits(bits)
+    on_first = ever_on_max_ci(slots, max_ci, config.threshold, pool.seq_len)
+    columns = columns_of(on_here | on_first)
     per_t = [columns.at(t) for t in range(pool.seq_len)]
-    stage1 = ever_on_columns(slots, max_ci, config.threshold, pool.seq_len)
-    here = set(zip(columns.position.tolist(), columns.component.tolist(), strict=True))
-    there = set(zip(stage1.position.tolist(), stage1.component.tolist(), strict=True))
+    n_first_only = int((on_first & ~on_here).sum())
+    n_second_only = int((on_here & ~on_first).sum())
     out = layout.datasets.with_name(layout.datasets.name + ".partial")
     if out.exists():
         shutil.rmtree(out)
@@ -487,6 +489,7 @@ def stage_collect(
             per_position=", ".join(f"t={t}: {c.size}" for t, c in enumerate(per_t)),
             ops=", ".join(f"{k} = {o}" for k, o in enumerate(pool.ops)),
             precision=config.collect_precision, last=pool.seq_len - 1,
+            n_first_only=n_first_only, n_second_only=n_second_only,
         )
     )  # fmt: skip
     if layout.datasets.exists():
@@ -498,9 +501,10 @@ def stage_collect(
         "n_columns": int(pos.size),
         "columns_per_position": [int(c.size) for c in per_t],
         "n_on_events": n_on,
-        "integer_only_never_on": [f"{slots.sites[j]}:{slots.index[j]}" for j in never_on],
-        "pairs_on_here_not_in_max_ci": len(here - there),
-        "pairs_in_max_ci_not_on_here": len(there - here),
+        "integer_only_without_column": [f"{slots.sites[j]}:{slots.index[j]}" for j in never_on],
+        "pairs_on_only_in_stage_1": n_first_only,
+        "pairs_on_only_here": n_second_only,
+        "integer_only_never_on_here": int((~on_here.any(axis=0)).sum()),
         "inner_absmax": inner_absmax,
         "seconds_ci_pass": round(seconds_ci, 1),
         "seconds_inner_pass": round(time.time() - t1, 1),

@@ -31,8 +31,9 @@ from param_decomp.experiments.lm.load_run import PlacedTransformer
 from param_decomp.integer_only import model as im
 from param_decomp.integer_only.applet import operation_grid, slice_documents
 from param_decomp.integer_only.collect import (
-    columns_from_bits,
-    ever_on_columns,
+    columns_of,
+    ever_on_bits,
+    ever_on_max_ci,
     make_inner_columns,
     pack_rows,
     unpack_column,
@@ -311,7 +312,7 @@ def test_collection_columns_are_the_ever_on_pairs(setup: Setup) -> None:
     rng = np.random.default_rng(4)
     seq_len, threshold = 5, 0.1
     max_ci = {site: rng.random((seq_len, C)).astype(np.float32) * 0.2 for site in set(slots.sites)}
-    columns = ever_on_columns(slots, max_ci, threshold, seq_len)
+    columns = columns_of(ever_on_max_ci(slots, max_ci, threshold, seq_len))
     want = {
         (t, j)
         for t in range(seq_len)
@@ -328,7 +329,7 @@ def test_collection_columns_are_the_ever_on_pairs(setup: Setup) -> None:
     for t in range(seq_len):
         max_ci[slots.sites[j_off]][t, slots.index[j_off]] = 0.0
         max_ci[slots.sites[j_one]][t, slots.index[j_one]] = 0.5 if t == 2 else 0.0
-    columns = ever_on_columns(slots, max_ci, threshold, seq_len)
+    columns = columns_of(ever_on_max_ci(slots, max_ci, threshold, seq_len))
     assert j_off not in columns.component
     assert columns.position[columns.component == j_one].tolist() == [2]
 
@@ -343,7 +344,7 @@ def test_collection_columns_from_the_pass_bits() -> None:
     on[:, :, 2] = False  # a component never on anywhere
     on[5, 3, 2] = True  # ... except once
     packed = pack_rows(np.concatenate([on, np.zeros((3, seq_len, n), bool)]))  # 24 rows
-    columns = columns_from_bits(packed)
+    columns = columns_of(ever_on_bits(packed))
     want = {(t, j) for t in range(seq_len) for j in range(n) if on[:, t, j].any()}
     assert set(zip(columns.position.tolist(), columns.component.tolist(), strict=True)) == want
     assert columns.at(1).size == 0 and columns.at(3).tolist().count(2) == 1
@@ -354,6 +355,25 @@ def test_collection_columns_from_the_pass_bits() -> None:
         stored = packed[:, t][:, cols]
         for k, j in enumerate(cols):
             np.testing.assert_array_equal(unpack_column(stored[:, k], n_prompts), on[:, t, j])
+
+
+def test_collection_stores_the_union_of_both_passes(setup: Setup) -> None:
+    """A pair ON only in stage 1's max CI, or only in the collection's own pass, is stored."""
+    *_, slots, _tokens = setup
+    seq_len, threshold = 3, 0.1
+    max_ci = {site: np.zeros((seq_len, C), np.float32) for site in set(slots.sites)}
+    max_ci[slots.sites[0]][1, slots.index[0]] = 0.2  # (t=1, j=0) ON in stage 1 only
+    on = np.zeros((8, seq_len, slots.n), bool)
+    on[3, 2, 5] = True  # (t=2, j=5) ON in the collection only
+    on[0, 1, 0] = True  # (t=1, j=0) ON in both
+    first = ever_on_max_ci(slots, max_ci, threshold, seq_len)
+    here = ever_on_bits(pack_rows(on))
+    columns = columns_of(first | here)
+    pairs = set(zip(columns.position.tolist(), columns.component.tolist(), strict=True))
+    assert pairs == {(1, 0), (2, 5)}
+    on[0, 1, 0] = False
+    columns = columns_of(first | ever_on_bits(pack_rows(on)))
+    assert set(zip(columns.position.tolist(), columns.component.tolist(), strict=True)) == pairs
 
 
 def test_bit_packing_round_trip() -> None:

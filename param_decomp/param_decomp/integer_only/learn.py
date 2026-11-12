@@ -15,6 +15,7 @@ settings fails), `log.jsonl` (the probe every `eval_every` steps) and `state.npz
 Adam moments `m1`, `m2`, and `step`, saved with each probe)."""
 
 import json
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -101,6 +102,13 @@ def probe(
     return float(kl), float(ce)
 
 
+def save_state(d: Path, **arrays: np.ndarray | int) -> None:
+    """Write `state.npz` atomically: an interrupted write leaves the previous state intact."""
+    partial = d / "state.partial.npz"
+    np.savez(partial, **arrays)  # pyright: ignore[reportArgumentType] (numpy savez **kwds stub is strict)
+    os.replace(partial, d / "state.npz")
+
+
 def pinned_settings(config: IntegerOnlyConfig, lam: float, n_candidates: int) -> dict[str, object]:
     pinned: dict[str, object] = {k: getattr(config, k) for k in LEARN_FIELDS}
     return pinned | {"lambda": lam, "n_candidates": n_candidates}
@@ -162,7 +170,7 @@ def learn_mask(config: IntegerOnlyConfig, ctx: Context, lam: float, d: Path) -> 
                        "sec_gradient": round(seconds_grad, 1)}  # fmt: skip
                 log.write(json.dumps(row) + "\n")
                 log.flush()
-                np.savez(d / "state.npz", logit=logit, m1=m1, m2=m2, step=k)
+                save_state(d, logit=logit, m1=m1, m2=m2, step=k)
                 logger.info(f"learn λ={lam:g}: {row}")
     hard = logit > 0
     steps_run = config.steps - step0

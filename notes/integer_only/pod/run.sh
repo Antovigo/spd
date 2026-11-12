@@ -24,6 +24,10 @@ if [ "${1:-}" != --foreground ]; then
   exit 0
 fi
 
+# Bitwise-reproducible GPU kernels: without it the run's bf16 CI fn gives a different max CI on
+# the same prompts in another process (smoke: 457 of ~30,000 (position, component) pairs flip at
+# 0.1); with it, two processes agree exactly (and the CI pass ran 12% faster on an L40).
+export XLA_FLAGS="${XLA_FLAGS:+$XLA_FLAGS }--xla_gpu_deterministic_ops=true"
 cd "$REPO"
 echo "code: $(git rev-parse HEAD)  run: $RUN  config: $CONFIG  start: $(date -u +%FT%TZ)"
 nvidia-smi --query-gpu=index,name,memory.used,memory.total --format=csv

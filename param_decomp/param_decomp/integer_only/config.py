@@ -12,6 +12,8 @@ from typing import Literal, Self
 from param_decomp_formats.config import BaseConfig
 from pydantic import NonNegativeFloat, PositiveFloat, PositiveInt, model_validator
 
+from param_decomp.integer_only.layout import lam_name
+
 type Precision = Literal["fp32", "tf32", "bf16"]
 type Operation = Literal["add", "sub"]
 
@@ -74,7 +76,8 @@ class IntegerOnlyConfig(BaseConfig):
         for op, text in self.templates.items():
             assert text.count("{a}") == 1 and text.count("{b}") == 1, (op, text)
         assert self.batch % self.microbatch == 0, (self.batch, self.microbatch)
-        assert len(set(self.lambdas)) == len(self.lambdas), self.lambdas
+        names = [lam_name(lam) for lam in self.lambdas]
+        assert len(set(names)) == len(names), f"λ values share an output name: {names}"
         assert self.eval_size <= self.check_size, (self.eval_size, self.check_size)
         return self
 
