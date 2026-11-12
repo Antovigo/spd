@@ -74,6 +74,7 @@ from param_decomp.experiments.lm.resolved import (
     TargetConfig,
     require_unrouted_ci_fn_arch,
 )
+from param_decomp.experiments.lm.target_output import target_recon_loss_fn
 from param_decomp.experiments.lm.targeted_data import build_prompt_pool, pool_batch
 from param_decomp.experiments.lm.training import (
     enable_hlo_dump,
@@ -357,6 +358,7 @@ def _train_targeted[
         nontarget_positions=Positioned(n_positions=train_identity.seq_len),
         ascend_replicate=cfg.runtime.ascend_replicate,
         sequential_passes=cfg.runtime.sequential_passes,
+        target_recon_loss_fn=target_recon_loss_fn(cfg.target_output, tokenizer),
         remat_recon_forwards=cfg.runtime.remat_recon_forwards,
         remat_ci_fn=cfg.runtime.remat_ci_fn,
         compiler_options=cfg.runtime.resolved_compiler_options,

@@ -115,6 +115,7 @@ from param_decomp.experiments.lm.resolved import (
 )
 from param_decomp.experiments.lm.run_data import LMDataConfig
 from param_decomp.experiments.lm.runtime import RuntimeConfig
+from param_decomp.experiments.lm.target_output import FullOutputKL, TargetOutputConfig
 from param_decomp.experiments.lm.targeted_data import LMPromptPoolConfig
 from param_decomp.infra import pretrain_cache
 from param_decomp.migrations.data_layout import migrate_raw as migrate_data_layout
@@ -849,6 +850,9 @@ class LMTargetedExperimentConfig(ExperimentConfigBase):
     data: LMDataConfig
     prompts: LMPromptPoolConfig
     nontarget: NontargetConfig
+    target_output: TargetOutputConfig = FullOutputKL()
+    """The TARGET stream's output objective (`experiments.lm.target_output`); the default is
+    the target's own full-vocabulary KL at every position."""
 
     @model_validator(mode="after")
     def validate_eval_reads_this_run(self) -> Self:

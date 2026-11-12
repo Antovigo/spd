@@ -33,6 +33,7 @@ from param_decomp.core.adversary import (
     SourceStacks,
     init_fresh_pgd_sources,
 )
+from param_decomp.core.ci_fn.ceiling import cap_ci
 from param_decomp.core.ci_fn.interface import (
     CI,
     AnyCI,
@@ -61,6 +62,7 @@ from param_decomp.core.configs import (
     BATCH_HIDDEN_ACTS_NORMALIZATION,
     IMP_MIN_METRIC_NAMES,
     HiddenActsNormalization,
+    TrainableParts,
     WeightDecayRoles,
     WeightDecayStreams,
 )
@@ -341,6 +343,10 @@ def coeff_application(term: AnyReconLossTerm) -> CoeffApplication:
 # ───────────────────────────── the step vocabulary ─────────────────────────────
 
 
+TRAIN_BOTH = TrainableParts()
+"""The default `trainable`: both halves of the decomposition update."""
+
+
 @dataclass(frozen=True)
 class StreamInputs[Out, Conditioning]:
     """Clean observations, CI inputs and target conditioning shared by a data stream.
@@ -353,6 +359,9 @@ class StreamInputs[Out, Conditioning]:
     conditioning: Conditioning
     sequence: SequenceLayout | None
     leading: tuple[int, ...]
+    recon_loss_fn: Callable[[Out, Out], Array]
+    """How this stream's masked outputs are scored against its clean ones: the target's own
+    `recon_loss_fn`, or the run's target-stream override (`ForwardSubstrate.target_recon_loss_fn`)."""
 
 
 @dataclass(frozen=True)
@@ -550,6 +559,10 @@ class ForwardSubstrate[
     recon_loss_fn: Callable[[Out, Out], Array]
     pin_output_batch: Callable[[Out, Mesh | None], Out]
     ascend_replicate: bool = False
+    target_recon_loss_fn: Callable[[Out, Out], Array] | None = None
+    """A tPD run's TARGET-stream output comparison in place of `recon_loss_fn` (e.g. a
+    fine-tune scored on a token subset at the last position); None keeps the target's own.
+    The non-target stream always keeps `recon_loss_fn`."""
     """Replicate the detached compute weights before the ascent phase. The ascents are
     detached and read-only, so replicating once beats re-gathering the FSDP shards inside
     every ascent step; costs one full copy of the compute weights for the phase's lifetime."""
@@ -574,6 +587,7 @@ class ForwardSubstrate[
         remat_ci_fn: bool,
         ci_capture_keys: CaptureKeys,
         ascend_replicate: bool = False,
+        target_recon_loss_fn: Callable[[Out, Out], Array] | None = None,
     ) -> "ForwardSubstrate[TargetIn, Out, PreparedT, Conditioning, PreparedMaskingT]":
         return cls(
             remat_recon_forwards=remat_recon_forwards,
@@ -583,6 +597,7 @@ class ForwardSubstrate[
             recon_loss_fn=model_static.recon_loss_fn,
             pin_output_batch=model_static.pin_output_batch,
             ascend_replicate=ascend_replicate,
+            target_recon_loss_fn=target_recon_loss_fn,
         )
 
     def shard_batch_tree[T](self, x: T) -> T:
@@ -627,10 +642,12 @@ class ForwardSubstrate[
         model: PlacedModel[TargetIn, Out, PreparedT, Conditioning, PreparedMaskingT],
         batch: TargetIn,
         reconstruction_keys: CaptureKeys,
+        recon_loss_fn: Callable[[Out, Out], Array] | None = None,
     ) -> StreamInputs[Out, Conditioning]:
         """Shard one stream's batch, run its detached clean forward, and pull the CI captures +
         recon observations. `reconstruction_keys` is the stream's own union — a stream whose
-        grid carries no reconstruction auxiliaries captures none."""
+        grid carries no reconstruction auxiliaries captures none. `recon_loss_fn` scores the
+        stream's outputs (None: the target's own)."""
         batch = self.shard_batch_tree(batch)
         with jax.named_scope("pd_clean_fwd_and_taps"):
             clean_forward_result = jax.tree.map(
@@ -650,6 +667,7 @@ class ForwardSubstrate[
             conditioning=clean_forward_result.conditioning,
             sequence=clean_forward_result.sequence,
             leading=clean_forward_result.leading_shape,
+            recon_loss_fn=self.recon_loss_fn if recon_loss_fn is None else recon_loss_fn,
         )
 
     def component_weights_vjp(
@@ -671,22 +689,22 @@ class ForwardSubstrate[
         compute_ci_fn: CIFn[Conditioning],
         prepared_weights: PreparedT,
         stream: StreamInputs[Out, Conditioning],
+        ceiling: AnyCI | None = None,
     ) -> tuple[AnyCI, Callable[[AnyCI], tuple[CIFn[Conditioning], PreparedT]]]:
         """Evaluate once per stream and pull CI gradients back to its compute weights and
         to the target's prepared components it reads. A dual CI fn returns both heads from
         ONE trunk evaluation behind ONE pullback."""
 
         def forward(ci_fn: CIFn[Conditioning], components: PreparedT) -> AnyCI:
-            return self.shard_ci(
-                evaluate_ci_from_captures(
-                    ci_fn,
-                    stream.ci_captures,
-                    stream.conditioning,
-                    components,
-                    sequence=stream.sequence,
-                    remat=self.remat_ci_fn,
-                )
+            ci = evaluate_ci_from_captures(
+                ci_fn,
+                stream.ci_captures,
+                stream.conditioning,
+                components,
+                sequence=stream.sequence,
+                remat=self.remat_ci_fn,
             )
+            return self.shard_ci(ci if ceiling is None else cap_ci(ci, ceiling))
 
         with jax.named_scope("pd_ci_fn_fwd"):
             return eqx.filter_vjp(forward, compute_ci_fn, prepared_weights)
@@ -731,7 +749,7 @@ class ForwardSubstrate[
             mesh=self.mesh,
         )
         return reconstruction_loss(
-            self.recon_loss_fn,
+            stream.recon_loss_fn,
             masked=masked,
             clean=stream.clean,
             reconstruction=reconstruction,
@@ -1056,6 +1074,7 @@ def apply_gradients[Conditioning](
     train_frac: Float32[Array, ""],
     final_ascend_key: PRNGKeyArray,
     mesh: Mesh | None,
+    trainable: TrainableParts = TRAIN_BOTH,
 ) -> tuple[
     Decomposition[Conditioning],
     ScheduledOptimizerState,
@@ -1066,7 +1085,8 @@ def apply_gradients[Conditioning](
     """Record gradient norms, take each adversary's final ascent, and update model state.
 
     Source gradients are unscaled because each source bundle feeds exactly one term
-    whose coefficient applies only to model-side gradients."""
+    whose coefficient applies only to model-side gradients. A half `trainable` freezes keeps
+    its parameters and its optimizer state."""
     grad_norm_metrics = _grad_norm_metrics(components_grad, ci_fn_grad, mesh)
 
     new_adversaries = {
@@ -1090,6 +1110,10 @@ def apply_gradients[Conditioning](
     )
     new_components = eqx.apply_updates(decomposition.components, components_updates)
     new_ci_fn = eqx.apply_updates(decomposition.ci_fn, ci_fn_updates)
+    if not trainable.components:
+        new_components, new_components_opt_state = decomposition.components, components_opt_state
+    if not trainable.ci_fn:
+        new_ci_fn, new_ci_fn_opt_state = decomposition.ci_fn, ci_fn_opt_state
 
     return (
         Decomposition(components=new_components, ci_fn=new_ci_fn),
@@ -1822,8 +1846,12 @@ def make_targeted_train_step[
     ci_fn_optimizer: ScheduledOptimizer,
     total_steps: int,
     sequential_passes: bool = False,
+    trainable_parts: TrainableParts = TRAIN_BOTH,
 ):
-    """Build the tPD `step(model, state, batch, nontarget_batch, key)`.
+    """Build the tPD `step(model, state, batch, nontarget_batch, key, ci_ceiling=None)`.
+
+    `trainable_parts` freezes either half of the decomposition (`apply_gradients`); `ci_ceiling`, a
+    frozen CI fn, caps every CI the step reads at its own (`core.ci_fn.ceiling.cap_ci`).
 
     Up to FOUR passes over one shared substrate — {target, non-target} streams x {output,
     hidden} CI roles — whose gradients SUM into one optimizer step. The TARGET-OUTPUT pass
@@ -1924,6 +1952,7 @@ def make_targeted_train_step[
         batch: TargetIn,
         nontarget_batch: TargetIn,
         key: PRNGKeyArray,
+        ci_ceiling: CIFn[Conditioning] | None = None,
     ) -> tuple[TargetedPDState[Conditioning], dict[str, Array]]:
         decomposition = state.decomposition
         training = state.training
@@ -1948,7 +1977,9 @@ def make_targeted_train_step[
                 for capture in (plan.grid.capture_keys | frozenset(plan.points))
             )
 
-        stream = substrate.prep_stream(model, batch, stream_capture_keys(True))
+        stream = substrate.prep_stream(
+            model, batch, stream_capture_keys(True), substrate.target_recon_loss_fn
+        )
         nt_stream = substrate.prep_stream(model, nontarget_batch, stream_capture_keys(False))
 
         prepared_weights, recon_vjp = substrate.component_weights_vjp(
@@ -1957,13 +1988,29 @@ def make_targeted_train_step[
         detached_prepared_weights = jax.lax.stop_gradient(prepared_weights)
         ascend_prepared_weights = substrate.replicate_for_ascend(detached_prepared_weights)
         compute_ci_fn, ci_fn_prepare_vjp = substrate.ci_fn_prepare_vjp(decomposition.ci_fn)
+
         # ONE CI forward per stream whatever the head count: the trunk is shared, so both
         # roles come out of a single evaluation behind a single saved pullback.
+        def ceiling_ci(on: StreamInputs[Out, Conditioning]) -> AnyCI | None:
+            """The frozen ceiling fn's CI on one stream's own inputs (no gradient)."""
+            if ci_ceiling is None:
+                return None
+            return jax.lax.stop_gradient(
+                evaluate_ci_from_captures(
+                    ci_ceiling.prepare(),
+                    on.ci_captures,
+                    on.conditioning,
+                    detached_prepared_weights,
+                    sequence=on.sequence,
+                    remat=substrate.remat_ci_fn,
+                )
+            )
+
         ci_any, ci_fn_forward_vjp = substrate.ci_fn_forward_vjp(
-            compute_ci_fn, prepared_weights, stream
+            compute_ci_fn, prepared_weights, stream, ceiling_ci(stream)
         )
         nt_ci_any, nt_ci_fn_forward_vjp = substrate.ci_fn_forward_vjp(
-            compute_ci_fn, prepared_weights, nt_stream
+            compute_ci_fn, prepared_weights, nt_stream, ceiling_ci(nt_stream)
         )
         # The ascent loops and the draw losses read lower CI through one stack per group,
         # so no per-site copy of it is materialized.
@@ -2199,6 +2246,7 @@ def make_targeted_train_step[
             train_frac,
             final_ascend_key=random.fold_in(random.fold_in(key, 0x51C), 0x51D),
             mesh=substrate.mesh,
+            trainable=trainable_parts,
         )
         new_state = TrainState(
             decomposition=updated,
@@ -2221,7 +2269,7 @@ def make_targeted_train_step[
             ),
         )
         wd_metrics: dict[str, Array] = {}
-        if training.ci_scaled_weight_decay is not None:
+        if training.ci_scaled_weight_decay is not None and trainable_parts.components:
             decay = training.ci_scaled_weight_decay
             # A decay that names a stream or a role the run does not carry would silently
             # decay every component at the full rate, so it is a build error, not a runtime

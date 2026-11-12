@@ -212,6 +212,29 @@ def restore_decomposition[DecompositionTree](
     return cast(DecompositionTree, composite["decomposition"])
 
 
+def restore_ci_fn[CIFnTree](
+    mgr: ocp.CheckpointManager, step: int, abstract: ShapeTree[CIFnTree]
+) -> CIFnTree:
+    """Restore ONLY the CI fn of checkpoint `step`'s decomposition, leaving its components
+    unread (a fine-tune's frozen CI ceiling). Every leaf names its sharding. `mgr` must not
+    have restored this checkpoint with another handler, as in `restore_components`."""
+    assert all(leaf.sharding is not None for leaf in jax.tree.leaves(abstract)), (
+        "restore_ci_fn places every leaf by its sharding"
+    )
+    item = {"ci_fn": abstract}
+    restore_args = ocp.checkpoint_utils.construct_restore_args(item, strict=False)
+    with jax.set_mesh(None):
+        composite = mgr.restore(
+            step,
+            args=ocp.args.Composite(
+                decomposition=ocp.args.PyTreeRestore(
+                    item=item, restore_args=restore_args, partial_restore=True
+                )
+            ),
+        )
+    return composite["decomposition"]["ci_fn"]
+
+
 def restore_components(
     mgr: ocp.CheckpointManager, step: int, abstract: ShapeTree[ComponentStacks]
 ) -> ComponentStacks:
