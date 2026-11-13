@@ -24,11 +24,23 @@ import numpy as np
 import yaml
 from jax.sharding import PartitionSpec as P
 
-from param_decomp.ci_filter.checkpoint import restore_ci_fn, save_ci_fn, starting_ci
+from param_decomp.ci_filter.checkpoint import (
+    load_kept,
+    restore_ci_fn,
+    save_ci_fn,
+    save_kept,
+    starting_ci,
+)
 from param_decomp.ci_filter.config import CIFilterConfig
 from param_decomp.ci_filter.pool import load_tokenizer
 from param_decomp.ci_filter.ppgd import init_adversary
-from param_decomp.ci_filter.step import CIConstraints, FilterCIFn, index_batches, prepare_components
+from param_decomp.ci_filter.step import (
+    CIConstraints,
+    FilterCIFn,
+    index_batches,
+    prepare_components,
+    remove_components,
+)
 from param_decomp.core.configs import PlacementSpec, TargetedPDConfig
 from param_decomp.core.log import logger, setup_console_logger
 from param_decomp.experiments.lm.load_run import RestoredRun, restore_jax_run
@@ -117,7 +129,17 @@ def fine_tuned(
     """The fine-tuned CI fn and the ceiling it is read under. Call under the run's mesh."""
     resolved = CIFilterConfig.from_file(layout.filter_config)
     _, constraints = starting_ci(resolved, run_dir, restored.step, restored.ci_fn)
+    if resolved.prune:
+        constraints = CIConstraints(ceilings=constraints.ceilings, kept=load_kept(layout.kept))
     return restore_ci_fn(layout.ci_fn, restored.ci_fn), constraints
+
+
+def starting_keep(io: Layout, threshold: float) -> dict[str, np.ndarray]:
+    """`{site: (C,) bool}`: the components whose ORIGINAL CI (stage 1 of the integer-only
+    pipeline, `max_ci.npz`, max over every pool prompt) exceeds `threshold` at some position, i.e.
+    the global mask's candidates; the prune removes the rest."""
+    with np.load(io.max_ci) as z:
+        return {site: np.asarray((z[site] > threshold).any(axis=0)) for site in z.files}
 
 
 def alive_document(
@@ -168,7 +190,20 @@ def stage_train(
     with jax.set_mesh(mesh):
         ci_fn, constraints = starting_ci(resolved, run_dir, restored.step, restored.ci_fn)
         assert constraints.kept is None and len(constraints.ceilings) == 1, constraints
-        prepared, _ = prepare_components(placed, restored.components)
+        components = restored.components
+        if resolved.prune:
+            keep = starting_keep(io, config.threshold)
+            save_kept(layout.kept, keep)
+            kept = {
+                site: jax.sharding.reshard(jnp.asarray(k, jnp.float32), P())
+                for site, k in keep.items()
+            }
+            constraints = CIConstraints(ceilings=constraints.ceilings, kept=kept)
+            components = remove_components(components, kept)
+            n_kept = sum(int(k.sum()) for k in keep.values())
+            n_all = sum(k.size for k in keep.values())
+            logger.info(f"prune: removed the dead components, {n_kept} of {n_all} kept")
+        prepared, _ = prepare_components(placed, components)
         problem = Problem(
             tokens_all=jax.sharding.reshard(jnp.asarray(pool.tokens), P()),
             answer_ids=jax.sharding.reshard(jnp.asarray(int_ids), P()),

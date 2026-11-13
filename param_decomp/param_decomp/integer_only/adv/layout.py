@@ -10,6 +10,7 @@ it reads the integer-only pipeline's pool, check set and score settings from
     training/metrics.jsonl  train: one row per logged step
     training/state_<k>/     train, while running: the resumable state after step k
     ci_fn/                  train: the fine-tuned CI fn (orbax, leaves of the run's CI fn)
+    kept.npz                train, with `prune`: `{site: (C,) bool}` the components kept (the rest removed)
     max_ci.npz              alive: `{site: (T, C)}` max fine-tuned CI over the pool
     integer-only-adv.json   alive: the integer-only-adv components
     final.json              score: the integer-only-adv model on `Q`
@@ -80,6 +81,10 @@ class AdvLayout:
     @property
     def ci_fn(self) -> Path:
         return self.root / "ci_fn"
+
+    @property
+    def kept(self) -> Path:
+        return self.root / "kept.npz"
 
     @property
     def max_ci(self) -> Path:
