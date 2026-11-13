@@ -6,3 +6,7 @@ prompts: param_decomp/param_decomp/experiments/lm/prompts/answer_words_addition_
 templates:
   add: "Answer: {a} plus {b} is "
   sub: "Answer: {a} minus {b} is "
+# The pick bar: lowered from -08's 0.16479748860001564 (the default) to 0.1 (Antoine, 2026-11-13,
+# after the sweep's probes put lam 1e-4 at 0.163 mid-training).
+reference_kl_int: 0.1
+reference_source: "Antoine, 2026-11-13: fixed bar 0.1 (default was -08's 0.16479748860001564)"
