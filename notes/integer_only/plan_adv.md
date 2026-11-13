@@ -124,9 +124,10 @@ and the components' optimizer (the components are frozen); the CI fn's learning-
 (replaced below).
 
 Schedule: 2500 steps, batch 4096, CI learning rate 8e-5 constant (no decay), Adam `β` as the
-run's, `ε` 1e-8 (the run's AdamW `ε`). Mesh: fsdp over every visible device (4 H100 on the pod).
-The batch is split into microbatches of `microbatch` prompts (hardware-only; the per-row source
-gradients and the CI-fn gradient are summed).
+run's, `ε` 1e-8 (the run's AdamW `ε`). Mesh: every visible device (4 H100 on the pod), each
+microbatch split over them, the weights whole on each (`placement: ddp`, below). The batch is
+split into microbatches of `microbatch` prompts (hardware-only; the per-row source gradients and
+the CI-fn gradient are summed).
 
 ## The adversary's initial state
 
@@ -214,9 +215,19 @@ the original model's row (scored here) and the adv row.
 ## Running on the pod (4 GPUs)
 
 `notes/integer_only/pod/run.sh` runs the integer-only stages, then calls `run_adv.sh`, which runs
-`train`, `alive` and `collect` on all GPUs, `score` on GPU 0 and `applet` on the CPU, each with
+`train` on all GPUs, `alive`, `score` and `collect` on GPU 0, and `applet` on the CPU, each with
 its log in `$RUN/integer_only_adv/logs/<stage>.log`, with `--xla_gpu_deterministic_ops=true` and
 `--xla_gpu_enable_command_buffer=` (no CUDA command buffers, as in the run's own launch
 environment; without it the first L40 smoke's training step failed with "Failed to add memset
-node to a CUDA graph") added to `XLA_FLAGS`. It stops at the first failure. `run.sh`'s log ends with one `=== all stages done` line only
-after both pipelines finish; `run_adv.sh` prints `=== adv stages done`.
+node to a CUDA graph") added to `XLA_FLAGS`. It stops at the first failure. `run.sh`'s log ends
+with one `=== all stages done` line only after both pipelines finish; `run_adv.sh` prints
+`=== adv stages done`.
+
+`train` places the restored run with `placement: ddp` (the target, the components and the CI fn
+whole on every device, the batch split over the devices). Under `zero1` (`restore_jax_run`'s
+default, every weight sharded and gathered in each forward) a 2-L40 step took 22 s at both
+microbatch 32 and 128, against 3.7 s under `ddp` at microbatch 128: the gathers dominated.
+`score` and `collect` build the single-device factored model and assert one visible device (on
+2 L40s that build under a 2-device mesh ran for over 20 minutes without finishing); `alive`
+runs on the same GPU so its CI pass and `collect`'s are one device's programs, as integer-only
+stages 1 and 5.

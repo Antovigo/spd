@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Run ON the pod: the integer-only-adv stages (notes/integer_only/plan_adv.md), every GPU stage
-# on all visible GPUs. `run.sh` calls this after the global-mask stages; it can also run alone
+# Run ON the pod: the integer-only-adv stages (notes/integer_only/plan_adv.md): `train` on all
+# visible GPUs, `alive`, `score` and `collect` on GPU 0 (the factored model is single-device, and
+# one device for both CI passes keeps them one program family, as integer-only stages 1 and 5),
+# `applet` on the CPU. `run.sh` calls this after the global-mask stages; it can also run alone
 # (in the foreground, from any directory) once the integer-only stages `candidates` and
 # `problem` are done:
 #     source /workspace/spd/notes/dual_objective/addsub-all-layers/env.sh
@@ -37,8 +39,8 @@ adv_stage() {  # adv_stage <name> <CUDA_VISIBLE_DEVICES>: one stage, its own log
 }
 
 adv_stage train "$ALL_GPUS"
-adv_stage alive "$ALL_GPUS"
+adv_stage alive 0
 adv_stage score 0
-adv_stage collect "$ALL_GPUS"
+adv_stage collect 0
 JAX_PLATFORMS=cpu adv_stage applet ""
 echo "=== adv stages done $(date -u +%FT%TZ): $RUN/integer_only_adv/README.md"

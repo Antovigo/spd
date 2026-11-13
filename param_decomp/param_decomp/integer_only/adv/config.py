@@ -33,6 +33,11 @@ class IntegerOnlyAdvConfig(BaseConfig):
     """`run`: the persistent adversary starts from the run's target-stream adversary at `step`
     (sources and Adam moments); `fresh`: `U[0,1]` sources and zero moments."""
     remat: bool = True
+    placement: Literal["ddp", "zero1"] = "ddp"
+    """How the `train` stage places the restored run on its mesh (hardware-only): `ddp` keeps
+    the target, the components and the CI fn whole on every device (no weight gathers in the
+    loop; the batch is split over the devices), `zero1` shards them (`restore_jax_run`'s
+    default; every forward gathers the weights)."""
     save_every: PositiveInt = 250
     """Training steps between resumable state saves."""
     log_every: PositiveInt = 10
@@ -45,5 +50,5 @@ class IntegerOnlyAdvConfig(BaseConfig):
         return self
 
 
-MUTABLE = {"microbatch", "accumulate_on_host", "save_every", "log_every", "ci_batch"}
+MUTABLE = {"microbatch", "accumulate_on_host", "save_every", "log_every", "ci_batch", "placement"}
 """Fields a later stage or a resume may change: hardware-only settings."""

@@ -29,7 +29,7 @@ from param_decomp.ci_filter.config import CIFilterConfig
 from param_decomp.ci_filter.pool import load_tokenizer
 from param_decomp.ci_filter.ppgd import init_adversary
 from param_decomp.ci_filter.step import CIConstraints, FilterCIFn, index_batches, prepare_components
-from param_decomp.core.configs import TargetedPDConfig
+from param_decomp.core.configs import PlacementSpec, TargetedPDConfig
 from param_decomp.core.log import logger, setup_console_logger
 from param_decomp.experiments.lm.load_run import RestoredRun, restore_jax_run
 from param_decomp.experiments.lm.resolved import TargetConfig
@@ -89,11 +89,20 @@ def pin_config(layout: AdvLayout, config: IntegerOnlyAdvConfig) -> None:
     layout.config.write_text(yaml.safe_dump(config.model_dump(mode="json"), sort_keys=False))
 
 
-def restore(run_dir: Path, config: IntegerOnlyAdvConfig, data_root: Path) -> RestoredRun:
-    restored = restore_jax_run(run_dir, config.step, data_root=data_root)
+def restore(
+    run_dir: Path, config: IntegerOnlyAdvConfig, data_root: Path, sharding: PlacementSpec = "zero1"
+) -> RestoredRun:
+    restored = restore_jax_run(run_dir, config.step, data_root=data_root, sharding=sharding)
     assert restored.step == config.step, (restored.step, config.step)
     assert isinstance(restored.placed.model, TransformerDecomposedModel)
     return restored
+
+
+def assert_one_device(stage: str) -> None:
+    """`score` and `collect` build the single-device factored model (`integer_only.model`) from
+    the restored run, as integer-only stages 4 and 5 do on one GPU; on a 2-L40 smoke the same
+    build under a 2-device mesh ran for over 20 minutes without finishing."""
+    assert jax.device_count() == 1, f"{stage}: run with one visible device, not {jax.devices()}"
 
 
 def inputs(io: Layout) -> tuple[IntegerOnlyConfig, PromptPool, np.ndarray]:
@@ -138,7 +147,7 @@ def stage_train(
     layout.coefficients.write_text(json.dumps(coefficients.as_json(), indent=1) + "\n")
     resolved.to_file(layout.filter_config)
     logger.info(f"final-step coefficients: {coefficients.as_json()}")
-    restored = restore(run_dir, config, data_root)
+    restored = restore(run_dir, config, data_root, config.placement)
     target = restored.deliverable.target
     assert isinstance(target, TargetConfig)
     int_ids = integer_token_ids(load_tokenizer(target.model_name))
@@ -236,6 +245,7 @@ def stage_alive(
 def stage_score(
     config: IntegerOnlyAdvConfig, layout: AdvLayout, io: Layout, run_dir: Path, data_root: Path
 ) -> dict[str, object]:
+    assert_one_device("score")
     io_config, pool, check = inputs(io)
     restored = restore(run_dir, config, data_root)
     target = restored.deliverable.target
@@ -248,6 +258,7 @@ def stage_score(
         arch, shared, dense = build_target(model)
         factors, slots = build_factors(restored.components, keep, arch.n_layer)
     del restored
+    logger.info(f"score: {slots.n} components stored, scoring {check.size} prompts of Q")
     t0 = time.time()
     scored = score_masks(
         arch, shared, factors, dense, slots, {ADV_MODEL: np.ones(slots.n, bool)}, pool, check,
@@ -280,6 +291,7 @@ def stage_score(
 def stage_collect(
     config: IntegerOnlyAdvConfig, layout: AdvLayout, io: Layout, run_dir: Path, data_root: Path
 ) -> dict[str, object]:
+    assert_one_device("collect")
     io_config, pool, _ = inputs(io)
     restored = restore(run_dir, config, data_root)
     model = restored.placed.model
