@@ -1,9 +1,13 @@
 # Integer-only-adv CI filter of addsub-answers-09 (p-512d73ab), final checkpoint (plan:
 # notes/integer_only/plan_adv.md). Every loss coefficient and the adversary's optimizer are the
 # run's at its final step, resolved in code (`integer_only/adv/coefficients.py`); every unlisted
-# setting is the IntegerOnlyAdvConfig default: 2500 steps, batch 4096, CI learning rate 8e-5
-# constant, threshold 0.1, the adversary restored from the run's checkpoint, `ddp` placement.
+# setting is the IntegerOnlyAdvConfig default (CI learning rate 8e-5 constant, threshold 0.1, the
+# adversary restored from the run's checkpoint, `ddp` placement), except the schedule: batch 2048 x
+# 2000 steps
+# (Antoine, 2026-11-13: the default 4096 x 2500 was estimated at 4-5 h on 4x H100).
 step: 40000
+batch: 2048
+steps: 2000
 # Hardware-only: 256 prompts per H100 on 4 GPUs. The L40 smoke measured a train-stage peak of
 # 37.2 + 0.0656 x (prompts per device) GiB under ddp (39.3 GiB at 32, 41.4 at 64): about 54 GiB
 # here, of the ~75 GiB XLA_PYTHON_CLIENT_MEM_FRACTION=0.95 leaves on an 80 GB H100.
