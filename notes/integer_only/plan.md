@@ -103,7 +103,8 @@ probe every 100 steps on 4,096 prompts of `Q`, bf16 matmuls, seed 0.
 λ sweep: `λ` in {5e-5, 1e-4, 2e-4, 5e-4}, one mask each, one process (one GPU) per `λ`.
 
 Rule: the chosen `λ` is the HIGHEST `λ` whose mask has mean `KL_int` over all of `Q` strictly
-below 0.16479748860001564. That bar is the -08 integer-only mask's mean `KL_int` to Llama on
+below the bar `reference_kl_int`. For addsub-answers-09 the bar is 0.1 (Antoine, 2026-11-13,
+set in `addsub-answers-09.yaml` before the pick ran). The default bar is 0.16479748860001564. That bar is the -08 integer-only mask's mean `KL_int` to Llama on
 -08's check set: p-ba8b0c08
 `analysis/pruning/step_40000/addsub-08-prune/learn/kl_table.json`, entry
 `kl_sampled/lam_5e-05`, field `kl_int_llama` (that mask has 6,519 components). If no `λ`
