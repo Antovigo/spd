@@ -7,6 +7,7 @@ checkpoint, a resumed fine-tune, the alive list and the collection's stored pair
 import json
 from dataclasses import replace
 from pathlib import Path
+from typing import Literal
 
 import equinox as eqx
 import jax
@@ -14,10 +15,11 @@ import jax.numpy as jnp
 import numpy as np
 import orbax.checkpoint as ocp
 import pytest
+from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 
 from param_decomp.ci_filter.checkpoint import starting_ci
-from param_decomp.ci_filter.config import CIFilterConfig, LastPositionIntegerKL
+from param_decomp.ci_filter.config import CIFilterConfig, LastPositionIntegerKL, MergedPPGDRecon
 from param_decomp.ci_filter.objective import objective_rows
 from param_decomp.ci_filter.ppgd import (
     Adversary,
@@ -37,7 +39,7 @@ from param_decomp.ci_filter.step import (
 )
 from param_decomp.core.ci_fn.interface import is_dual
 from param_decomp.core.components import ComponentStacks, SiteC
-from param_decomp.core.configs import TargetedPDConfig
+from param_decomp.core.configs import HsdpMeshShape, TargetedPDConfig
 from param_decomp.core.init_placed import (
     init_model_component_stacks_placed,
     random_component_initializer,
@@ -45,7 +47,12 @@ from param_decomp.core.init_placed import (
 from param_decomp.core.masking import source_masking
 from param_decomp.core.placement import from_config
 from param_decomp.core.schedule import ScheduleConfig
-from param_decomp.core.sharding import place_target, single_device_mesh
+from param_decomp.core.sharding import (
+    hsdp_mesh,
+    mesh_over_devices,
+    place_target,
+    single_device_mesh,
+)
 from param_decomp.experiments.lm.load_run import PlacedTransformer
 from param_decomp.integer_only import model as im
 from param_decomp.integer_only.adv.adversary import restore_run_adversary, stored_tree
@@ -82,8 +89,7 @@ N_INT = 20
 type Toy = tuple[PlacedTransformer, ComponentStacks, FilterCIFn, PromptPool]
 
 
-@pytest.fixture(scope="module")
-def toy() -> Toy:
+def _build_toy(mesh: Mesh, sharding: Literal["ddp", "zero1"]) -> Toy:
     cfg = tiny_glu_cfg()
     sites = glu_site_specs(
         cfg,
@@ -91,9 +97,8 @@ def toy() -> Toy:
             SiteC(site_name(layer, kind), C) for layer in range(cfg.n_layer) for kind in KIND_ORDER
         ),
     )
-    mesh = single_device_mesh()
     model = tiny_glu_decomposed_lm(cfg, sites, jax.random.PRNGKey(0))
-    rules = from_config("ddp", mesh, sites)
+    rules = from_config(sharding, mesh, sites)
     placed: PlacedTransformer = place_target(model, rules)
     arch = replace(tiny_glu_chunkwise_ci_fn_arch(model, n_blocks=1), dual=True)
     with jax.set_mesh(mesh):
@@ -114,8 +119,13 @@ def toy() -> Toy:
     return placed, components, ci_fn, pool
 
 
-def _problem(pool: PromptPool, train_rows: np.ndarray) -> Problem:
-    with jax.set_mesh(single_device_mesh()):
+@pytest.fixture(scope="module")
+def toy() -> Toy:
+    return _build_toy(single_device_mesh(), "ddp")
+
+
+def _problem(pool: PromptPool, train_rows: np.ndarray, mesh: Mesh | None = None) -> Problem:
+    with jax.set_mesh(single_device_mesh() if mesh is None else mesh):
         return Problem(
             tokens_all=jax.sharding.reshard(jnp.asarray(pool.tokens), P()),
             answer_ids=jax.sharding.reshard(jnp.arange(10, 10 + N_INT, dtype=jnp.int32), P()),
@@ -331,6 +341,58 @@ def test_adversary_rows_serve_every_rth_batch_element(toy: Toy, tmp_path: Path) 
         )
     )
     assert moved
+
+
+@pytest.mark.multidevice
+@pytest.mark.parametrize("rows", [3, 2])
+def test_adversary_rows_on_a_ddp_mesh(rows: int, tmp_path: Path) -> None:
+    """On an all-devices ddp mesh (the train stage's placement) each microbatch's source rows
+    are split over the batch axes, the bundle stays replicated, and the step reproduces the
+    one-device adversary. With 2 rows every device's share of a microbatch covers whole
+    multiples of the bundle (folded per device); with 3 it does not (folded replicated)."""
+    n = jax.device_count()
+    assert n >= 2
+    batch, micro = 4 * n, 2 * n
+    fc = _filter_config(steps=2, batch=batch, micro=micro, tmp=tmp_path)
+    # adv_fraction ~0 and Adam eps 1e-4, as the ci_filter split test: the deterministic warmups
+    # alone move the sources, and float-noise gradients do not become full-lr steps.
+    recon = fc.recon
+    assert isinstance(recon, MergedPPGDRecon)
+    fc = fc.model_copy(
+        update={
+            "recon": recon.model_copy(
+                update={
+                    "adv_fraction": ScheduleConfig.constant(1e-12),
+                    "optimizer": recon.optimizer.model_copy(update={"eps": 1e-4}),
+                }
+            )
+        }
+    )
+    results = {}
+    one = mesh_over_devices(HsdpMeshShape(replicate=1, fsdp=1, tp=1), np.array(jax.devices()[:1]))
+    for name, mesh in (("one", one), ("all", hsdp_mesh(1, n, 1))):
+        placed, components, ci_fn, pool = _build_toy(mesh, "ddp")
+        problem = _problem(pool, np.arange(N_PROMPTS), mesh)
+        with jax.set_mesh(mesh):
+            prepared, _ = prepare_components(placed, components)
+            start = init_adversary(placed, rows, T, jax.random.PRNGKey(5))
+            grads, _, _, adversary = PPGDStep.build(fc)(
+                placed, prepared, ci_fn, UNCONSTRAINED, problem.tokens_all,
+                np.arange(batch, dtype=np.int32), problem.answer_ids, problem.targets,
+                jnp.float32(1.0), start, jax.random.PRNGKey(6), micro, False,
+            )  # fmt: skip
+            for leaf in jax.tree.leaves(adversary.sources):
+                assert leaf.shape[1] == rows
+                assert all(axis is None for axis in jax.typeof(leaf).sharding.spec)
+        results[name] = (
+            [np.asarray(x) for x in jax.tree.leaves(adversary.sources)],
+            [np.asarray(x) for x in jax.tree.leaves(grads)],
+        )
+    # The warmups are deterministic; the main term's fresh noise and routes are drawn per
+    # layout, so only the CI-fn gradient's finiteness is compared.
+    for a, b in zip(results["one"][0], results["all"][0], strict=True):
+        np.testing.assert_allclose(a, b, rtol=1e-2, atol=1e-3)  # bf16 noise through Adam
+    assert all(np.isfinite(g).all() for g in results["all"][1])
 
 
 # ------------------------------------ constraints ------------------------------------

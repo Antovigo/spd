@@ -54,6 +54,7 @@ from param_decomp.core.masking import (
     source_masking,
 )
 from param_decomp.core.model import MaterializedMasking, SourceMasking
+from param_decomp.core.placement import batch_axes
 from param_decomp.core.recon import UniformKRouting
 from param_decomp.core.runtime_schedule import scheduled_value_at
 from param_decomp.experiments.lm.load_run import PlacedTransformer
@@ -100,13 +101,27 @@ def row_ids(start: int, size: int, rows: int) -> np.ndarray:
 
 
 def _rows(sources: SourceStacks, ids: np.ndarray) -> SourceStacks:
-    """The bundle's rows `ids`, in order (a slice when they are consecutive)."""
+    """The bundle's rows `ids`, in order (a slice when they are consecutive), split over the
+    mesh's batch axes like the microbatch they serve: each device keeps its own elements' rows
+    (a local slice of the replicated bundle), so no device holds the whole microbatch's
+    sources or their gradient."""
     lo = int(ids[0])
     if np.array_equal(ids, np.arange(lo, lo + ids.size)):
-        return jax.tree.map(
+        out = jax.tree.map(
             lambda x: jax.lax.slice_in_dim(x, lo, lo + ids.size, axis=ROW_AXIS), sources
         )
-    return jax.tree.map(lambda x: jnp.take(x, jnp.asarray(ids), axis=ROW_AXIS), sources)
+    else:
+        out = jax.tree.map(lambda x: jnp.take(x, jnp.asarray(ids), axis=ROW_AXIS), sources)
+    mesh = jax.sharding.get_abstract_mesh()
+    if mesh.empty:
+        return out
+
+    def split(x: Array) -> Array:
+        spec: list[str | tuple[str, ...] | None] = [None] * x.ndim
+        spec[ROW_AXIS] = batch_axes(mesh)
+        return jax.sharding.reshard(x, P(*spec))
+
+    return jax.tree.map(split, out)
 
 
 def _concat_rows(parts: list[SourceStacks]) -> SourceStacks:
@@ -119,16 +134,33 @@ def _concat_rows(parts: list[SourceStacks]) -> SourceStacks:
 def _add_folded(total: SourceStacks, part: SourceStacks, offset: int, rows: int) -> SourceStacks:
     """`total` plus `part`'s rows folded onto the bundle: `part`'s row `i` (`0 <= i < M`) adds
     to bundle row `(offset + i) mod rows`. A zero pad and a reshaped sum, no scatter (XLA's
-    deterministic scatter serializes); `part` replicated first."""
+    deterministic scatter serializes). When `part`'s row axis is split over the mesh into
+    whole multiples of `rows` (`offset` 0), each device folds its own rows and the sum is
+    all-reduced; otherwise `part` is replicated first."""
 
     def add(t: Array, g: Array) -> Array:
-        if not jax.sharding.get_abstract_mesh().empty:
-            g = jax.sharding.reshard(g, P())
+        g = g.astype(t.dtype)
         m = g.shape[ROW_AXIS]
         n = -(-(offset + m) // rows)
+        mesh = jax.sharding.get_abstract_mesh()
+        if not mesh.empty:
+            spec = tuple(jax.typeof(g).sharding.spec) + (None,) * (
+                g.ndim - len(jax.typeof(g).sharding.spec)
+            )
+            row_axes = spec[ROW_AXIS]
+            names = (row_axes,) if isinstance(row_axes, str) else tuple(row_axes or ())
+            shards = int(np.prod([mesh.shape[a] for a in names])) if names else 1
+            if offset == 0 and m % rows == 0 and n % shards == 0:
+                folded = jnp.reshape(
+                    g,
+                    (*g.shape[:ROW_AXIS], n, rows, *g.shape[ROW_AXIS + 1 :]),
+                    out_sharding=P(*spec[:ROW_AXIS], row_axes, None, *spec[ROW_AXIS + 1 :]),
+                )
+                return t + jax.sharding.reshard(folded.sum(axis=ROW_AXIS), P())
+            g = jax.sharding.reshard(g, P())
         pad = [(0, 0)] * g.ndim
         pad[ROW_AXIS] = (offset, n * rows - offset - m)
-        g = jnp.pad(g.astype(t.dtype), pad)
+        g = jnp.pad(g, pad)
         folded = g.reshape(*g.shape[:ROW_AXIS], n, rows, *g.shape[ROW_AXIS + 1 :])
         return t + folded.sum(axis=ROW_AXIS)
 
@@ -138,16 +170,19 @@ def _add_folded(total: SourceStacks, part: SourceStacks, offset: int, rows: int)
 def sum_rows(parts: list[SourceStacks], ids: list[np.ndarray], like: SourceStacks) -> SourceStacks:
     """The per-row sum of slice gradients `parts` (slice `k` holding rows `ids[k]`, each
     `row_ids` of a consecutive run of batch elements), shaped like the bundle `like`; the plain
-    concatenation when the slices tile `0..R-1` in order."""
+    concatenation when the slices tile `0..R-1` in order; replicated like the bundle."""
     rows = n_rows(like)
     if np.array_equal(np.concatenate(ids), np.arange(rows)):
-        return _concat_rows(parts)
-    total = jax.tree.map(jnp.zeros_like, like)
-    for part, part_ids in zip(parts, ids, strict=True):
-        offset = int(part_ids[0])
-        assert np.array_equal(part_ids, row_ids(offset, part_ids.size, rows)), part_ids
-        total = _add_folded(total, part, offset, rows)
-    return total
+        total = _concat_rows(parts)
+    else:
+        total = jax.tree.map(jnp.zeros_like, like)
+        for part, part_ids in zip(parts, ids, strict=True):
+            offset = int(part_ids[0])
+            assert np.array_equal(part_ids, row_ids(offset, part_ids.size, rows)), part_ids
+            total = _add_folded(total, part, offset, rows)
+    if jax.sharding.get_abstract_mesh().empty:
+        return total
+    return jax.tree.map(lambda x: jax.sharding.reshard(x, P()), total)  # the bundle's layout
 
 
 def _masking(masking: SourceMasking, weight_delta: Literal["on", "off"]) -> MaterializedMasking:
