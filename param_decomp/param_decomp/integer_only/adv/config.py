@@ -30,6 +30,10 @@ class IntegerOnlyAdvConfig(BaseConfig):
     """Hold the running gradient sum in host memory (`CIFilterConfig.accumulate_on_host`)."""
     lr: PositiveFloat = 8e-5
     """The CI fn's learning rate, constant over every step."""
+    prune: bool = False
+    """Remove, before the first step, every component whose STARTING CI (the run's) never exceeds
+    `threshold` at any position of any pool prompt (`CIFilterConfig.prune`: its `U`/`V` zeroed and
+    its CI 0, so no mask source can switch it on). False keeps every component."""
     adversary_init: Literal["run", "fresh"] = "run"
     """`run`: the persistent adversary starts from the run's target-stream adversary at `step`
     (sources and Adam moments); `fresh`: `U[0,1]` sources and zero moments."""

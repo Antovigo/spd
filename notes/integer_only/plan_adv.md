@@ -89,8 +89,14 @@ positions. `c_r`, `c_a`, `c_f` (reals) are the coefficients.
 
 Ceiling ON: every CI the filter reads (training masks, imp-min, alive list, collection) is the
 entrywise minimum of the trained fn's and the run's own CI (`ci_filter.step.CIConstraints`,
-the run's CI fn frozen in bf16). Over the cap only a gradient that lowers the CI passes. Prune
-OFF: no component is removed at the start (`CIFilterConfig.prune: false`).
+the run's CI fn frozen in bf16). Over the cap only a gradient that lowers the CI passes. Prune: set by
+`IntegerOnlyAdvConfig.prune` (default off: no component removed at the start). For
+addsub-answers-09 it is ON at threshold 0.1 (Antoine, 2026-11-13): every component whose
+starting CI never exceeds 0.1 at any position of any pool prompt has its `U`/`V` zeroed and CI 0
+before the first step, so only the 8,591 candidates of the global mask remain. The first attempt,
+with the prune off, was stopped at step ~300: the integer KL under the adversary's masks had
+climbed from 0.04 to 25 nats while the mean number of components on per token barely moved
+(551 to 532).
 
 ## Coefficients: the run's values at its final step
 

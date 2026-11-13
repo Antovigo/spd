@@ -155,7 +155,8 @@ def filter_config(
     value, `KL_int` at the last position (the restricted KL over the answer ids the caller
     passes: the 1000 integer tokens), the merged term with the weight delta adversarially
     ablated as in the run's target stream, the ceiling on
-    and the prune off. Its `pool` is unused (the pool is the prompts file's)."""
+    and the prune
+    as `config.prune` says (at `config.threshold`). Its `pool` is unused (the pool is the prompts file's)."""
     c = coefficients
     return CIFilterConfig(
         run=RunDirRef(dir=run_dir),
@@ -195,7 +196,7 @@ def filter_config(
         lr_schedule=ScheduleConfig.constant(config.lr),
         betas=c.ci_betas,
         grad_clip_norm=c.ci_grad_clip_norm,
-        prune=False,
+        prune=config.prune,
         alive_threshold=config.threshold,
         eval_every=None,
         log_every=config.log_every,

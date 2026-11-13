@@ -12,3 +12,8 @@ steps: 2000
 # 37.2 + 0.0656 x (prompts per device) GiB under ddp (39.3 GiB at 32, 41.4 at 64): about 54 GiB
 # here, of the ~75 GiB XLA_PYTHON_CLIENT_MEM_FRACTION=0.95 leaves on an 80 GB H100.
 microbatch: 1024
+# The dead components are removed (prune: true, at threshold 0.1, i.e. only the 8,591 candidates
+# of the global mask stay): Antoine, 2026-11-13, after the first attempt (prune off) let the
+# adversary drive the attacked KL_int from 0.04 to 25 nats in 300 steps (dead components have
+# CI 0, so their mask is the adversary's source and it can switch them on).
+prune: true

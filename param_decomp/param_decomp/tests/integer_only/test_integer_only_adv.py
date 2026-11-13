@@ -246,6 +246,8 @@ def test_final_step_coefficients(tmp_path: Path) -> None:
     fc.to_file(tmp_path / "fc.yaml")
     assert CIFilterConfig.from_file(tmp_path / "fc.yaml") == fc
     assert CIFilterConfig.model_fields["prune"].default is True
+    pruned = IntegerOnlyAdvConfig(step=7, steps=5, batch=8, microbatch=4, prune=True)
+    assert filter_config(c, pruned, tmp_path).prune is True
 
 
 # ------------------------------------ the PPGD term ------------------------------------
