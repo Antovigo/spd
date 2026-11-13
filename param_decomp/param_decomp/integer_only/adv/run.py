@@ -53,7 +53,6 @@ from param_decomp.integer_only.adv.coefficients import TARGET_TERM, filter_confi
 from param_decomp.integer_only.adv.config import MUTABLE, IntegerOnlyAdvConfig
 from param_decomp.integer_only.adv.layout import (
     ADV_MODEL,
-    DATASET_README,
     README,
     STAGES,
     VIEW_LABELS,
@@ -61,7 +60,7 @@ from param_decomp.integer_only.adv.layout import (
 )
 from param_decomp.integer_only.adv.train import Problem, fresh_state, train
 from param_decomp.integer_only.ci_pass import chunk_max_ci
-from param_decomp.integer_only.collect import collect_dataset
+from param_decomp.integer_only.collect import collect_dataset, dataset_readmes
 from param_decomp.integer_only.config import IntegerOnlyConfig
 from param_decomp.integer_only.layout import Layout
 from param_decomp.integer_only.model import build_factors, build_target, slots_of
@@ -360,15 +359,25 @@ def stage_collect(
         factors, slots = build_factors(restored.components, keep, arch.n_layer)
         prepared, v_norms = prepare_components(placed, restored.components)
 
-    def readme(n_columns: int, per_position: str, n_first_only: int, n_second_only: int) -> str:
-        return DATASET_README.format(
-            run_dir=run_dir, step=config.step, commit=commit(), n_components=slots.n,
-            n_prompts=pool.n, prompts=io_config.prompts, seq_len=pool.seq_len,
-            labels=labels_text(pool), threshold=config.threshold, n_columns=n_columns,
+    def readme(
+        n_columns: int, per_position: str, n_first_only: int, n_second_only: int
+    ) -> dict[str, str]:
+        return dataset_readmes(dict(
+            title="Integer-only-adv", model_name="INTEGER-ONLY-ADV model", run_dir=run_dir,
+            step=config.step, commit=commit(), component_list="integer-only-adv.json",
+            n_components=slots.n, n_prompts=pool.n, pool_file="../integer_only/pool.npz",
+            prompts=io_config.prompts, seq_len=pool.seq_len, labels=labels_text(pool),
+            ci_name="integer-only-adv CI", threshold=config.threshold,
+            ci_definition="the output head's lower-leaky CI of the FINE-TUNED CI function\n"
+            "(`ci_fn/` in the pipeline folder), capped entrywise by the run's own, evaluated on\n"
+            "the ORIGINAL model's activations.",
+            model_description="exactly the components of the component list on at every position\n"
+            "  of every prompt, every other component and the weight delta off.",
+            first_eval="which chose the components", n_columns=n_columns,
             per_position=per_position, ops=", ".join(f"{k} = {o}" for k, o in enumerate(pool.ops)),
             precision=io_config.collect_precision, last=pool.seq_len - 1,
             n_first_only=n_first_only, n_second_only=n_second_only,
-        )  # fmt: skip
+        ))  # fmt: skip
 
     facts = collect_dataset(
         placed, prepared, v_norms, ci_fn, constraints, restored.mesh, arch, shared, factors,

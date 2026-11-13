@@ -11,7 +11,8 @@
     sweep/lam_<λ>/          stage 3: learn_config.json, log.jsonl, state.npz; stage 4: final.json
     sweep/summary.tsv       stage 4: every mask (and the target, the candidates) scored on `Q`
     integer-only.json       stage 4: the chosen mask
-    datasets/               stage 5: inner activations and binarized CI (its own README.md)
+    datasets/               stage 5: index.npz, causal_importances/ (binarized CI) and
+                            inner_activations/, each with its README.md
     ab_grids.html           stage 6: the applet; its data in `ab_grids/`
     logs/                   the launcher's stage logs
 
@@ -22,6 +23,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+CI_DIR = "causal_importances"
+"""The binarized-CI dataset's folder inside a collection (`datasets/`): `ci_on_pos<t>.npy`
+and its README."""
+INNER_DIR = "inner_activations"
+"""The inner-activation dataset's folder inside a collection (`datasets/`): `inner_pos<t>.npy`
+and its README."""
 STAGES = ("candidates", "problem", "learn", "pick", "collect", "applet")
 
 
@@ -156,7 +163,8 @@ threshold {threshold}. `q` is the last-position next-token distribution renormal
   on `Q` is below {reference_kl_int} ({reference_source}). {chosen}
 - `datasets/`: per integer-only component and per position where it is ever ON, its inner
   activation in the integer-only model and its binarized original CI over all N prompts; see
-  `datasets/README.md`.
+  `datasets/README.md`, which indexes `causal_importances/` and `inner_activations/` (one
+  README each).
 - `ab_grids.html` (data in `ab_grids/`): the (a, b)-grid applet of every integer-only component,
   per operation and position, toggling between the binarized original CI and the integer-only
   model's inner activation.

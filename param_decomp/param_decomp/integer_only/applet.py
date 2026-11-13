@@ -30,6 +30,7 @@ from param_decomp.experiments.lm.ab_grid_dataset import (
 )
 from param_decomp.experiments.lm.arithmetic_eval import ArithmeticGrid
 from param_decomp.integer_only.config import Operation
+from param_decomp.integer_only.layout import CI_DIR, INNER_DIR
 from param_decomp.integer_only.pool import PromptPool
 
 VIEW_LABELS = {"ci": "original CI > {threshold}", "inner": "inner act (integer-only model)"}
@@ -170,9 +171,9 @@ def write_applet(
     counts: dict[str, int] = {}
     for t in range(len(labels)):
         cols = np.flatnonzero(index["col_position"] == t)
-        inner_all = np.load(d / f"inner_pos{t}.npy").astype(np.float32)
+        inner_all = np.load(d / INNER_DIR / f"inner_pos{t}.npy").astype(np.float32)
         inner_all /= np.maximum(index["col_v_norm"][cols], 1e-12)[None, :]
-        packed = np.load(d / f"ci_on_pos{t}.npy")
+        packed = np.load(d / CI_DIR / f"ci_on_pos{t}.npy")
         on_all = np.unpackbits(packed, axis=0, count=n).astype(bool)
         sites = index["col_site"][cols]
         for k, op in enumerate(ops):

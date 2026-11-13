@@ -496,3 +496,30 @@ def test_applet_slice_greys_cells_outside_the_pool() -> None:
         full = np.zeros((side, side), bool)
         full[a, b] = on[:, 0]
         np.testing.assert_array_equal(ci[0] == 255, full)
+
+
+def test_dataset_readmes_fill_every_field() -> None:
+    """The three collection READMEs format from the field set the pipelines pass (no missing
+    or stray placeholder), each pointing at its own files."""
+    from param_decomp.integer_only.collect import dataset_readmes
+
+    fields = dict(
+        title="Integer-only", model_name="INTEGER-ONLY model", run_dir="/run", step=40000,
+        commit="abc", component_list="integer-only.json", n_components=3, n_prompts=16,
+        pool_file="pool.npz", prompts="prompts.txt", seq_len=10, labels="0 = `<bos>`",
+        ci_name="original CI", threshold=0.1, ci_definition="the CI.", model_description="all.",
+        first_eval="which chose the candidates", n_columns=5, per_position="t=0: 5",
+        ops="0 = add", precision="fp32", last=9, n_first_only=0, n_second_only=0,
+    )  # fmt: skip
+    texts = dataset_readmes(fields)
+    assert set(texts) == {
+        "README.md",
+        "causal_importances/README.md",
+        "inner_activations/README.md",
+    }
+    assert "`../integer-only.json`" in texts["README.md"]
+    assert "`../../integer-only.json`" in texts["causal_importances/README.md"]
+    assert "ci_on_pos" in texts["causal_importances/README.md"]
+    assert "inner_pos" in texts["inner_activations/README.md"]
+    for text in texts.values():
+        assert "{" not in text.replace("{t}", ""), text

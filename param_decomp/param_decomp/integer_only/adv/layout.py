@@ -15,7 +15,8 @@ it reads the integer-only pipeline's pool, check set and score settings from
     integer-only-adv.json   alive: the integer-only-adv components
     final.json              score: the integer-only-adv model on `Q`
     comparison.tsv          score: the global-mask sweep summary plus the integer-only-adv row
-    datasets/               collect: inner activations and binarized fine-tuned CI
+    datasets/               collect: index.npz, causal_importances/ (binarized fine-tuned CI) and
+                            inner_activations/, each with its README.md
     ab_grids.html           applet: the applet; its data in `ab_grids/`
     logs/                   the pod driver's stage logs
 
@@ -168,7 +169,8 @@ coefficient is the run's at its final training step (`coefficients.json`).
 - `comparison.tsv`: `../integer_only/sweep/summary.tsv`'s rows plus the `{adv_model}` row.
 - `datasets/`: per integer-only-adv component and position where it is ever ON, its inner
   activation in the integer-only-adv model and its binarized integer-only-adv CI over all N
-  prompts; see `datasets/README.md`.
+  prompts; see `datasets/README.md`, which indexes `causal_importances/` and
+  `inner_activations/` (one README each).
 - `ab_grids.html` (data in `ab_grids/`): the (a, b)-grid applet of every integer-only-adv
   component, per operation and position, toggling between the binarized integer-only-adv CI
   and the integer-only-adv model's inner activation.
@@ -176,58 +178,4 @@ coefficient is the run's at its final training step (`coefficients.json`).
 ## Stages
 
 {stages}
-"""
-
-DATASET_README = """\
-# Integer-only-adv components: inner activations and binarized CI
-
-Run `{run_dir}`, checkpoint step {step}, commit `{commit}`. Component list:
-`../integer-only-adv.json` ({n_components} components). A component is a site name (a module
-such as `layers.26.mlp.down_proj`) plus its index within the site's decomposition.
-
-Notation: `N` = {n_prompts} prompts; row `i` (integer, 0 <= i < N) is row `i` of
-`../../integer_only/pool.npz` (line `i` of the prompts file `{prompts}`, counting from 0).
-`t` (integer, 0 <= t < T = {seq_len}) is a token position: {labels}. A component is ON at `t`
-on a prompt when its integer-only-adv CI there exceeds {threshold}: the output head's
-lower-leaky CI of the FINE-TUNED CI function (`../ci_fn/`), capped entrywise by the run's own,
-evaluated on the ORIGINAL model's activations. A component's inner activation is `x V_c`
-(real): the input `x` of its site (a `d_in`-vector) times its input vector `V_c` (column `c` of
-the site's `V`, `c` the component's index); when on, the component writes `(x V_c) U_c` into
-the site's output, `U_c` its output vector.
-
-Only the (position, component) pairs where the component is ON on at least one prompt are
-stored: {n_columns} pairs over the {seq_len} positions ({per_position}). Every other pair is
-never ON. The ON bits stored here come from a second evaluation of the CI function over the
-pool (a separately compiled program, in bf16), which can differ at the threshold from the first
-evaluation (`../max_ci.npz`, which chose the components): {n_first_only} stored pairs are ON
-only in the first evaluation (their stored bits are all 0) and {n_second_only} only here.
-
-## Files
-
-- `index.npz`:
-  - `tokens` (N, T) int32; `op` (N,) int8, index into `ops` ({ops}); `a`, `b` (N,) int64 the
-    integer operands, `r` (N,) int64 the true answer; `position_labels` (T,).
-  - `col_position`, `col_site`, `col_component` (K,): the K = {n_columns} stored pairs, sorted by
-    position, then site name, then component index. Position `t`'s files hold, as columns, the
-    rows with `col_position == t`, in this order.
-  - `col_v_norm` (K,) float32: `||V_c||`, the Euclidean norm of the component's input vector
-    (the applet divides inner activations by it).
-- `inner_pos<t>.npy` (N, K_t) float16, `K_t` (integer) the number of stored pairs at `t`: the
-  inner activation of position `t`'s columns in the INTEGER-ONLY-ADV model: exactly the
-  components of `../integer-only-adv.json` on at every position of every prompt, every other
-  component and the weight delta off, computed in {precision}.
-- `ci_on_pos<t>.npy` (ceil(N/8), K_t) uint8, `ceil(N/8)` = N/8 rounded up: whether each column
-  is ON (binarized integer-only-adv CI), bit-packed along the prompt axis (numpy `packbits`, big
-  bit order).
-
-```python
-import numpy as np
-
-index = np.load("index.npz")
-t = {last}
-cols = np.flatnonzero(index["col_position"] == t)
-j = 0  # the first column of position t: component index["col_component"][cols[j]] of index["col_site"][cols[j]]
-inner = np.load(f"inner_pos{{t}}.npy", mmap_mode="r")[:, j].astype(np.float32)  # (N,)
-on = np.unpackbits(np.load(f"ci_on_pos{{t}}.npy", mmap_mode="r")[:, j], count=len(index["op"])).astype(bool)  # (N,)
-```
 """

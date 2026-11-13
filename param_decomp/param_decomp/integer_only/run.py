@@ -43,7 +43,7 @@ from param_decomp.experiments.lm.resolved import TargetConfig
 from param_decomp.experiments.lm.training import enable_persistent_compilation_cache
 from param_decomp.integer_only import applet as ap
 from param_decomp.integer_only.ci_pass import chunk_max_ci
-from param_decomp.integer_only.collect import DATASET_README, collect_dataset
+from param_decomp.integer_only.collect import collect_dataset, dataset_readmes
 from param_decomp.integer_only.config import IntegerOnlyConfig
 from param_decomp.integer_only.layout import README, STAGES, Layout, StatusFolder, lam_name
 from param_decomp.integer_only.learn import Context, is_finished, learn_mask
@@ -402,15 +402,24 @@ def stage_collect(
         factors, slots = build_factors(restored.components, keep, arch.n_layer)
         prepared, v_norms = prepare_components(placed, restored.components)
 
-    def readme(n_columns: int, per_position: str, n_first_only: int, n_second_only: int) -> str:
-        return DATASET_README.format(
-            run_dir=run_dir, step=config.step, commit=commit(), n_components=slots.n,
-            n_prompts=pool.n, prompts=config.prompts, seq_len=pool.seq_len,
-            labels=labels_text(pool), threshold=config.threshold, n_columns=n_columns,
-            per_position=per_position, ops=", ".join(f"{k} = {o}" for k, o in enumerate(pool.ops)),
+    def readme(
+        n_columns: int, per_position: str, n_first_only: int, n_second_only: int
+    ) -> dict[str, str]:
+        return dataset_readmes(dict(
+            title="Integer-only", model_name="INTEGER-ONLY model", run_dir=run_dir,
+            step=config.step, commit=commit(), component_list="integer-only.json",
+            n_components=slots.n, n_prompts=pool.n, pool_file="pool.npz", prompts=config.prompts,
+            seq_len=pool.seq_len, labels=labels_text(pool), ci_name="original CI",
+            threshold=config.threshold,
+            ci_definition="the output head's lower-leaky causal importance (CI) of the run's own\n"
+            "CI function, evaluated on the ORIGINAL model's activations.",
+            model_description="exactly the components of the component list on at every position\n"
+            "  of every prompt, every other component and the weight delta off.",
+            first_eval="which chose the candidates", n_columns=n_columns, per_position=per_position,
+            ops=", ".join(f"{k} = {o}" for k, o in enumerate(pool.ops)),
             precision=config.collect_precision, last=pool.seq_len - 1,
             n_first_only=n_first_only, n_second_only=n_second_only,
-        )  # fmt: skip
+        ))  # fmt: skip
 
     facts = collect_dataset(
         placed, prepared, v_norms, restored.ci_fn, UNCONSTRAINED, restored.mesh, arch, shared,

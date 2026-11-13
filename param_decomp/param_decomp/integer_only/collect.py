@@ -5,7 +5,8 @@ exceeds the threshold at `t` on some pool prompt, in stage 1's pass or in this s
 over all `N` prompts: (a) its
 inner activation `x V_c` in the INTEGER-ONLY model (exactly the integer-only components on, the
 weight delta off, `model.factored_inner`), float16; (b) its binarized original CI (CI on the
-original model > threshold), bit-packed. Layout in `DATASET_README`. `collect_dataset` writes
+original model > threshold), bit-packed. Layout: `index.npz` and one folder per dataset
+(`CI_DIR`, `INNER_DIR`), each with its README (`dataset_readmes`). `collect_dataset` writes
 it for any (component set, CI fn, constraints): `integer_only.adv` reads its fine-tuned CI fn
 under the ceiling."""
 
@@ -27,6 +28,7 @@ from param_decomp.core.log import logger
 from param_decomp.experiments.lm.load_run import PlacedTransformer
 from param_decomp.integer_only.ci_pass import chunk_ci_columns
 from param_decomp.integer_only.config import Precision
+from param_decomp.integer_only.layout import CI_DIR, INNER_DIR
 from param_decomp.integer_only.model import (
     KIND_ID,
     Arch,
@@ -151,14 +153,14 @@ def collect_dataset(
     ci_batch: int,
     precision: Precision,
     destination: Path,
-    readme: Callable[[int, str, int, int], str],
+    readme: Callable[[int, str, int, int], dict[str, str]],
 ) -> dict[str, object]:
     """Write the dataset of the stored components `slots` (every one on, weight delta off) into
     `destination` (replaced atomically). Pass 1 evaluates `ci_fn` under `constraints` over the
     pool (batches of `ci_batch`) for every stored component's ON bit; the stored pairs are those
     ON there or in the earlier pass `max_ci` (`{site: (T, C)}` max CI). Pass 2 records the inner
     activations in `precision`. `readme(n_columns, per_position, n_first_only, n_second_only)`
-    is the dataset README's text."""
+    gives the README texts by path relative to `destination` (`dataset_readmes`)."""
     assert ci_batch % 8 == 0, f"ci_batch {ci_batch} must be a multiple of 8"
     by_site = slots.components()
     site_cols = {s: jnp.asarray(np.asarray(by_site.get(s, []), np.int32)) for s in sorted(max_ci)}
@@ -194,13 +196,15 @@ def collect_dataset(
     if out.exists():
         shutil.rmtree(out)
     out.mkdir(parents=True)
+    (out / CI_DIR).mkdir()
+    (out / INNER_DIR).mkdir()
     for t, cols in enumerate(per_t):
-        np.save(out / f"ci_on_pos{t}.npy", np.ascontiguousarray(bits[:, t][:, cols]))
+        np.save(out / CI_DIR / f"ci_on_pos{t}.npy", np.ascontiguousarray(bits[:, t][:, cols]))
     n_on = int(np.unpackbits(bits).sum())
     del bits
     # Pass 2, the stored components' model: the inner activations of the stored columns.
     inner_mm = [
-        np.lib.format.open_memmap(out / f"inner_pos{t}.npy", mode="w+", dtype=np.float16,
+        np.lib.format.open_memmap(out / INNER_DIR / f"inner_pos{t}.npy", mode="w+", dtype=np.float16,
                                   shape=(pool.n, c.size))
         for t, c in enumerate(per_t)
     ]  # fmt: skip
@@ -233,14 +237,14 @@ def collect_dataset(
         col_component=slots.index[comp],
         col_v_norm=np.asarray([v_norm[slots.sites[j]][slots.index[j]] for j in comp], np.float32),
     )  # fmt: skip
-    (out / "README.md").write_text(
-        readme(
-            int(pos.size),
-            ", ".join(f"t={t}: {c.size}" for t, c in enumerate(per_t)),
-            n_first_only,
-            n_second_only,
-        )
+    texts = readme(
+        int(pos.size),
+        ", ".join(f"t={t}: {c.size}" for t, c in enumerate(per_t)),
+        n_first_only,
+        n_second_only,
     )
+    for relative, text in texts.items():
+        (out / relative).write_text(text)
     if destination.exists():
         shutil.rmtree(destination)
     out.rename(destination)
@@ -259,55 +263,111 @@ def collect_dataset(
     }
 
 
-DATASET_README = """\
-# Integer-only components: inner activations and binarized CI
+def dataset_readmes(fields: Mapping[str, object]) -> dict[str, str]:
+    """The three README texts of a collection, by path relative to it: the index
+    (`README.md`) and one per dataset folder. `fields` fills `INDEX_README`, `CI_README` and
+    `INNER_README`; their `{root}` is the relative path from each README to the pipeline
+    folder."""
+    return {
+        "README.md": INDEX_README.format(root="..", **fields),
+        f"{CI_DIR}/README.md": CI_README.format(root="../..", **fields),
+        f"{INNER_DIR}/README.md": INNER_README.format(root="../..", **fields),
+    }
 
+
+_COMMON = """\
 Run `{run_dir}`, checkpoint step {step}, commit `{commit}`. Component list:
-`../integer-only.json` ({n_components} components). A component is a site name (a module such
-as `layers.26.mlp.down_proj`) plus its index within the site's decomposition.
+`{root}/{component_list}` ({n_components} components). A component is a site name (a module
+such as `layers.26.mlp.down_proj`) plus its index within the site's decomposition.
 
-Notation: `N` = {n_prompts} prompts; row `i` (integer, 0 <= i < N) is line `i` of the prompts
-file `{prompts}`, counting from 0 (the same rows as `../pool.npz`). `t` (integer,
-0 <= t < T = {seq_len}) is a token position: {labels}. A component is ON at `t` on a prompt when
-its causal importance (CI) there exceeds {threshold}: the output head's lower-leaky CI of the
-run's own CI function, evaluated on the ORIGINAL model's activations. A component's inner
-activation is `x V_c` (real): the input `x` of its site (a `d_in`-vector) times its input vector
-`V_c` (column `c` of the site's `V`, `c` the component's index); when on, the component writes `(x V_c) U_c` into the
-site's output, `U_c` its output vector.
+Notation: `N` = {n_prompts} prompts; row `i` (integer, 0 <= i < N) is row `i` of
+`{root}/{pool_file}` (line `i` of the prompts file `{prompts}` in the repository, counting
+from 0). `t` (integer, 0 <= t < T = {seq_len}) is a token position: {labels}. A component is ON
+at `t` on a prompt when its {ci_name} there exceeds {threshold}: {ci_definition}
 
 Only the (position, component) pairs where the component is ON on at least one prompt are
-stored: {n_columns} pairs over the {seq_len} positions ({per_position}). Every other pair is
-never ON. The ON bits stored here come from a second evaluation of the CI function over the
-pool (a separately compiled program, in bf16), which can differ at the threshold from the first
-evaluation (`../max_ci.npz`, which chose the candidates): a pair ON there can be OFF on every
-prompt here, and the reverse. Both kinds of pairs are stored: {n_first_only} pairs are ON
-only in the first evaluation (their stored bits are all 0) and {n_second_only} only here.
+stored: K = {n_columns} pairs over the {seq_len} positions ({per_position}); `K_t` (integer) is
+the number at position `t`. Every other pair is never ON. Both datasets store the same columns,
+in the order of `{index}`'s column table (`col_position`, `col_site`, `col_component`, sorted by
+position, then site name, then component index): position `t`'s file holds, as columns, the
+rows with `col_position == t`, in that order.
+"""
+
+INDEX_README = (
+    """\
+# {title} components: the collected datasets
+
+"""
+    + _COMMON.replace("{index}", "index.npz")
+    + """
+## Contents
+
+- `index.npz`, shared by both datasets:
+  - `tokens` (N, T) int32; `op` (N,) int8, index into `ops` ({ops}); `a`, `b` (N,) int64 the
+    integer operands, `r` (N,) int64 the true answer; `position_labels` (T,).
+  - `col_position`, `col_site`, `col_component` (K,): the stored pairs.
+  - `col_v_norm` (K,) float32: `||V_c||`, the Euclidean norm of the component's input vector
+    (the applet divides inner activations by it).
+- `causal_importances/`: whether each stored pair is ON on each prompt (its README).
+- `inner_activations/`: each stored pair's inner activation in the {model_name} on each
+  prompt (its README).
+"""
+)
+
+CI_README = (
+    """\
+# {title} components: binarized causal importances
+
+"""
+    + _COMMON.replace("{index}", "../index.npz")
+    + """
+The ON bits come from a second evaluation of the CI function over the pool (a separately
+compiled program, in bf16), which can differ at the threshold from the first evaluation
+(`{root}/max_ci.npz`, {first_eval}): {n_first_only} stored pairs are ON only in the first
+evaluation (their stored bits are all 0) and {n_second_only} only here.
 
 ## Files
 
-- `index.npz`:
-  - `tokens` (N, T) int32; `op` (N,) int8, index into `ops` ({ops}); `a`, `b` (N,) int64 the
-    integer operands, `r` (N,) int64 the true answer; `position_labels` (T,).
-  - `col_position`, `col_site`, `col_component` (K,): the K = {n_columns} stored pairs, sorted by
-    position, then site name, then component index. Position `t`'s files hold, as columns, the
-    rows with `col_position == t`, in this order.
-  - `col_v_norm` (K,) float32: `||V_c||`, the Euclidean norm of the component's input vector
-    (the applet divides inner activations by it).
-- `inner_pos<t>.npy` (N, K_t) float16: the inner activation of position `t`'s K_t columns in the
-  INTEGER-ONLY model: exactly the components of `../integer-only.json` on at every position of
-  every prompt, every other component and the weight delta off, computed in {precision}.
 - `ci_on_pos<t>.npy` (ceil(N/8), K_t) uint8, `ceil(N/8)` = N/8 rounded up: whether each column
-  is ON (binarized original CI), bit-packed along the prompt axis (numpy `packbits`, big bit
+  is ON ({ci_name} > {threshold}), bit-packed along the prompt axis (numpy `packbits`, big bit
   order).
 
 ```python
 import numpy as np
 
-index = np.load("index.npz")
+index = np.load("../index.npz")
 t = {last}
 cols = np.flatnonzero(index["col_position"] == t)
-j = 0  # the first column of position t: component index["col_component"][cols[j]] of index["col_site"][cols[j]]
-inner = np.load(f"inner_pos{{t}}.npy", mmap_mode="r")[:, j].astype(np.float32)  # (N,)
+j = 0  # position t's first column: component index["col_component"][cols[j]] of index["col_site"][cols[j]]
 on = np.unpackbits(np.load(f"ci_on_pos{{t}}.npy", mmap_mode="r")[:, j], count=len(index["op"])).astype(bool)  # (N,)
 ```
 """
+)
+
+INNER_README = (
+    """\
+# {title} components: inner activations
+
+"""
+    + _COMMON.replace("{index}", "../index.npz")
+    + """
+A component's inner activation is `x V_c` (real): the input `x` of its site (a `d_in`-vector)
+times its input vector `V_c` (column `c` of the site's `V`, `c` the component's index); when on,
+the component writes `(x V_c) U_c` into the site's output, `U_c` its output vector.
+
+## Files
+
+- `inner_pos<t>.npy` (N, K_t) float16: the inner activation of position `t`'s columns in the
+  {model_name}: {model_description} Computed in {precision}.
+
+```python
+import numpy as np
+
+index = np.load("../index.npz")
+t = {last}
+cols = np.flatnonzero(index["col_position"] == t)
+j = 0  # position t's first column: component index["col_component"][cols[j]] of index["col_site"][cols[j]]
+inner = np.load(f"inner_pos{{t}}.npy", mmap_mode="r")[:, j].astype(np.float32)  # (N,)
+```
+"""
+)

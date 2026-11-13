@@ -574,7 +574,7 @@ def test_collection_stores_only_ever_on_pairs(toy: Toy, tmp_path: Path) -> None:
         facts = collect_dataset(
             placed, prepared, v_norms, moved, constraints, mesh, arch, shared, factors, slots,
             pool, max_ci, threshold, 8, "fp32", tmp_path / "datasets",
-            lambda *args: f"readme {args}",
+            lambda *args: {name: f"readme {args}" for name in ("README.md", "causal_importances/README.md", "inner_activations/README.md")},  # fmt: skip
         )  # fmt: skip
     index = np.load(tmp_path / "datasets" / "index.npz")
     on = ci > threshold  # (N, T, n) in slot order
@@ -588,7 +588,7 @@ def test_collection_stores_only_ever_on_pairs(toy: Toy, tmp_path: Path) -> None:
     assert got == want and facts["n_columns"] == len(want)
     for t in range(T):
         sel = np.flatnonzero(index["col_position"] == t)
-        packed = np.load(tmp_path / "datasets" / f"ci_on_pos{t}.npy")
+        packed = np.load(tmp_path / "datasets" / "causal_importances" / f"ci_on_pos{t}.npy")
         for k, col in enumerate(sel):
             j = next(
                 m
@@ -597,4 +597,6 @@ def test_collection_stores_only_ever_on_pairs(toy: Toy, tmp_path: Path) -> None:
                 and slots.index[m] == index["col_component"][col]
             )
             np.testing.assert_array_equal(unpack_column(packed[:, k], N_PROMPTS), on[:, t, j])
-    assert (tmp_path / "datasets" / "README.md").read_text().startswith("readme")
+    for name in ("README.md", "causal_importances/README.md", "inner_activations/README.md"):
+        assert (tmp_path / "datasets" / name).read_text().startswith("readme")
+    assert len(list((tmp_path / "datasets" / "inner_activations").glob("inner_pos*.npy"))) == T
