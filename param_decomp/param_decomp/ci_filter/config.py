@@ -130,13 +130,13 @@ class MergedPPGDRecon(BaseConfig):
     """The decomposition's own `MergedStochasticSubsetPPGDReconLoss` (SPEC S34), scored by the
     filter's objective. Per step and batch element, `adv_fraction` of the rows take the
     persistent adversary's sources routed through every site, the rest fresh `U[0,1]` sources
-    routed per a uniform-k site subset; masks are `ci + (1 - ci) * source` and the WEIGHT
-    DELTA IS ON (its mask is the source's delta channel). The adversary keeps one source per
-    (batch slot, position, component + delta), Adam-ascended `n_warmup_steps` times per step
-    against the all-adversarial forward with the CI detached, then once more from the main
-    backward. Defaults are addsub-all-layers-4xh100-05's target-pass values, except
-    `n_warmup_steps` (-05: 2): the arithmetic pool repeats, so the final ascent alone may keep
-    the adversary current."""
+    routed per a uniform-k site subset (an unrouted site runs the target weight); masks are
+    `ci + (1 - ci) * source`, and the weight delta follows `weight_delta`. The adversary keeps
+    one source per (adversary row, position, component + delta), Adam-ascended
+    `n_warmup_steps` times per step against the all-adversarial forward with the CI detached,
+    then once more from the main backward. Defaults are addsub-all-layers-4xh100-05's
+    target-pass values, except `n_warmup_steps` (-05: 2): the arithmetic pool repeats, so the
+    final ascent alone may keep the adversary current."""
 
     kind: Literal["merged_stochastic_ppgd"] = "merged_stochastic_ppgd"
     coeff: PositiveFloat = 1.5
@@ -145,6 +145,11 @@ class MergedPPGDRecon(BaseConfig):
     optimizer: AdamPGDConfig = AdamPGDConfig(
         beta1=0.5, beta2=0.99, eps=1.0e-8, lr_schedule=_ramp(0.01, 0.0125)
     )
+    weight_delta: Literal["on", "off"] = "on"
+    """`on` (the decomposition's own term): every routed site adds `d * x (W - V U)^T`, with
+    the delta mask `d` the source's delta channel (persistent rows) or fresh `U[0,1]`. `off`:
+    `d = 0` at every routed site, in the warmups and the main forward alike, so the adversary's
+    delta channel gets no gradient."""
 
     @model_validator(mode="after")
     def validate_adv_fraction(self) -> Self:
@@ -217,13 +222,14 @@ class CIFilterConfig(BaseConfig):
     """Fine-tune the output-role CI fn of a FROZEN decomposition against a narrower output
     objective, so components that objective does not need are switched off.
 
-    Every filter runs under the two constraints (the only filtering mechanism kept):
+    Two constraints (the only filtering mechanism kept); the ceiling always applies, the prune
+    unless `prune` is false:
 
     - **prune** — before the first step, every component whose STARTING CI (under the start's own
       constraints) never exceeds `alive_threshold` at any position of any pool prompt is removed:
       its CI is forced to 0 and its U and V are zeroed, so it cannot come back, and with the
       weight delta on its weight lies in the delta `W - UV` as if deleted. Removal is inherited
-      by filters initialized from this one (`alive/kept.npz`).
+      by filters initialized from this one (`alive/kept.npz`, absent when `prune` is false).
     - **ceiling** — the CI every consumer reads (training masks, imp-min, evaluations, alive list,
       grid) is the entrywise minimum of the trained CI fn's and the STARTING CI's, so the narrower
       objective can only switch components off. The starting CI is the decomposition's for
@@ -263,6 +269,9 @@ class CIFilterConfig(BaseConfig):
     betas: tuple[float, float] = (0.9, 0.999)
     grad_clip_norm: PositiveFloat | None = None
 
+    prune: bool = True
+    """Remove the components dead on the pool under the starting CI before the first step (the
+    prune above); false keeps every component the start keeps (none removed here)."""
     alive_threshold: Probability = 0.01
     """A component is alive iff its output CI exceeds this at any position of any prompt;
     the same cut rounds CI to binary masks in the evaluation."""

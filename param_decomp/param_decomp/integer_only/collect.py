@@ -5,16 +5,27 @@ exceeds the threshold at `t` on some pool prompt, in stage 1's pass or in this s
 over all `N` prompts: (a) its
 inner activation `x V_c` in the INTEGER-ONLY model (exactly the integer-only components on, the
 weight delta off, `model.factored_inner`), float16; (b) its binarized original CI (CI on the
-original model > threshold), bit-packed. Layout in `DATASET_README`."""
+original model > threshold), bit-packed. Layout in `DATASET_README`. `collect_dataset` writes
+it for any (component set, CI fn, constraints): `integer_only.adv` reads its fine-tuned CI fn
+under the ceiling."""
 
+import shutil
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 
 import equinox as eqx
+import jax
 import jax.numpy as jnp
 import numpy as np
+from jax.sharding import PartitionSpec as P
 from jaxtyping import Array, Float, Int
 
+from param_decomp.ci_filter.step import CIConstraints, FilterCIFn, Prepared, index_batches
+from param_decomp.core.log import logger
+from param_decomp.experiments.lm.load_run import PlacedTransformer
+from param_decomp.integer_only.ci_pass import chunk_ci_columns
 from param_decomp.integer_only.config import Precision
 from param_decomp.integer_only.model import (
     KIND_ID,
@@ -25,6 +36,7 @@ from param_decomp.integer_only.model import (
     Slots,
     factored_inner,
 )
+from param_decomp.integer_only.pool import PromptPool
 from param_decomp.targets.transformer import KIND_ORDER
 
 FP16_MAX = 65504.0
@@ -120,6 +132,131 @@ def pack_rows(bits: np.ndarray) -> np.ndarray:
 def unpack_column(packed: np.ndarray, n_prompts: int) -> np.ndarray:
     """One column of a packed `ci_on_pos<t>.npy` (`(ceil(N/8),)` uint8) -> `(N,)` bool."""
     return np.unpackbits(packed, count=n_prompts).astype(bool)
+
+
+def collect_dataset(
+    placed: PlacedTransformer,
+    prepared: Prepared,
+    v_norms: Mapping[str, Array],
+    ci_fn: FilterCIFn,
+    constraints: CIConstraints,
+    mesh: jax.sharding.Mesh,
+    arch: Arch,
+    shared: Shared,
+    factors: Factors,
+    slots: Slots,
+    pool: PromptPool,
+    max_ci: Mapping[str, np.ndarray],
+    threshold: float,
+    ci_batch: int,
+    precision: Precision,
+    destination: Path,
+    readme: Callable[[int, str, int, int], str],
+) -> dict[str, object]:
+    """Write the dataset of the stored components `slots` (every one on, weight delta off) into
+    `destination` (replaced atomically). Pass 1 evaluates `ci_fn` under `constraints` over the
+    pool (batches of `ci_batch`) for every stored component's ON bit; the stored pairs are those
+    ON there or in the earlier pass `max_ci` (`{site: (T, C)}` max CI). Pass 2 records the inner
+    activations in `precision`. `readme(n_columns, per_position, n_first_only, n_second_only)`
+    is the dataset README's text."""
+    assert ci_batch % 8 == 0, f"ci_batch {ci_batch} must be a multiple of 8"
+    by_site = slots.components()
+    site_cols = {s: jnp.asarray(np.asarray(by_site.get(s, []), np.int32)) for s in sorted(max_ci)}
+    n_packed = -(-pool.n // 8)
+    # Pass 1, the CI: every stored component's ON bit at every position, packed along prompts,
+    # `(ceil(N/8), T, n)` uint8 in host memory.
+    bits = np.zeros((n_packed, pool.seq_len, slots.n), np.uint8)
+    t0 = time.time()
+    batches = index_batches(pool.n, ci_batch)
+    with jax.set_mesh(mesh):
+        tokens_all = jax.sharding.reshard(jnp.asarray(pool.tokens), P())
+        for i, (idx, real) in enumerate(batches):
+            ci = np.asarray(
+                chunk_ci_columns(
+                    placed, prepared, ci_fn, constraints, tokens_all, jnp.asarray(idx), site_cols
+                )
+            )
+            on = ci > threshold
+            on[real:] = False
+            start = int(idx[0])
+            n_rows = -(-real // 8)
+            bits[start // 8 : start // 8 + n_rows] = pack_rows(on)[:n_rows]
+            if i % 50 == 0 or i == len(batches) - 1:
+                logger.info(f"collect CI: batch {i + 1}/{len(batches)} ({time.time() - t0:.0f}s)")
+    seconds_ci = time.time() - t0
+    on_here = ever_on_bits(bits)
+    on_first = ever_on_max_ci(slots, max_ci, threshold, pool.seq_len)
+    columns = columns_of(on_here | on_first)
+    per_t = [columns.at(t) for t in range(pool.seq_len)]
+    n_first_only = int((on_first & ~on_here).sum())
+    n_second_only = int((on_here & ~on_first).sum())
+    out = destination.with_name(destination.name + ".partial")
+    if out.exists():
+        shutil.rmtree(out)
+    out.mkdir(parents=True)
+    for t, cols in enumerate(per_t):
+        np.save(out / f"ci_on_pos{t}.npy", np.ascontiguousarray(bits[:, t][:, cols]))
+    n_on = int(np.unpackbits(bits).sum())
+    del bits
+    # Pass 2, the stored components' model: the inner activations of the stored columns.
+    inner_mm = [
+        np.lib.format.open_memmap(out / f"inner_pos{t}.npy", mode="w+", dtype=np.float16,
+                                  shape=(pool.n, c.size))
+        for t, c in enumerate(per_t)
+    ]  # fmt: skip
+    on_mask = slots.mask(np.ones(slots.n, bool), arch.n_layer)
+    inner_columns = make_inner_columns(slots)
+    inner_absmax = 0.0
+    t1 = time.time()
+    for i, (idx, real) in enumerate(batches):
+        inner = np.asarray(
+            inner_columns(arch, shared, factors, on_mask, jnp.asarray(pool.tokens[idx]), precision)
+        )
+        start = int(idx[0])
+        for t, cols in enumerate(per_t):
+            values = inner[:real, t][:, cols]
+            if values.size:
+                inner_absmax = max(inner_absmax, float(np.abs(values).max()))
+            inner_mm[t][start : start + real] = values.astype(np.float16)
+        assert inner_absmax < FP16_MAX, f"inner overflows float16 ({inner_absmax})"
+        if i % 50 == 0 or i == len(batches) - 1:
+            logger.info(f"collect inner: batch {i + 1}/{len(batches)} ({time.time() - t1:.0f}s)")
+    for mm in inner_mm:
+        mm.flush()
+    del inner_mm
+    pos, comp = columns.position, columns.component
+    v_norm = {s: np.asarray(v) for s, v in v_norms.items()}
+    np.savez(
+        out / "index.npz", tokens=pool.tokens, op=pool.op, ops=np.asarray(pool.ops), a=pool.a,
+        b=pool.b, r=pool.r, position_labels=np.asarray(pool.position_labels),
+        col_position=pos, col_site=np.asarray([slots.sites[j] for j in comp]),
+        col_component=slots.index[comp],
+        col_v_norm=np.asarray([v_norm[slots.sites[j]][slots.index[j]] for j in comp], np.float32),
+    )  # fmt: skip
+    (out / "README.md").write_text(
+        readme(
+            int(pos.size),
+            ", ".join(f"t={t}: {c.size}" for t, c in enumerate(per_t)),
+            n_first_only,
+            n_second_only,
+        )
+    )
+    if destination.exists():
+        shutil.rmtree(destination)
+    out.rename(destination)
+    never_on = np.setdiff1d(np.arange(slots.n), columns.component)
+    return {
+        "n_columns": int(pos.size),
+        "columns_per_position": [int(c.size) for c in per_t],
+        "n_on_events": n_on,
+        "integer_only_without_column": [f"{slots.sites[j]}:{slots.index[j]}" for j in never_on],
+        "pairs_on_only_in_stage_1": n_first_only,
+        "pairs_on_only_here": n_second_only,
+        "integer_only_never_on_here": int((~on_here.any(axis=0)).sum()),
+        "inner_absmax": inner_absmax,
+        "seconds_ci_pass": round(seconds_ci, 1),
+        "seconds_inner_pass": round(time.time() - t1, 1),
+    }
 
 
 DATASET_README = """\

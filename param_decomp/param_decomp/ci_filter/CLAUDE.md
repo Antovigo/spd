@@ -17,8 +17,9 @@ switch off per prompt. Target stream only: no non-target pass, no hidden-activat
   accumulation (on device or host), the Adam update, the pool evaluation (continuous CI,
   rounded CI, alive-set and all-on global masks), the end-of-run fresh-PGD recon eval.
 - `ppgd.py` — the alternative recon, the decomposition's own merged stochastic-subset
-  persistent-PGD term (SPEC S34, weight delta ON) scored by the filter objective: the
-  persistent adversary, its warmup ascents, the main microbatch gradient and the final ascent.
+  persistent-PGD term (SPEC S34; weight delta ON by default, `weight_delta: off` sets `d = 0`)
+  scored by the filter objective: the persistent adversary (`R` rows, batch element `j` reading
+  row `j mod R`), its warmup ascents, the main microbatch gradient and the final ascent.
 - `attribution.py` + `scripts/run_attribution.py` — helpers vs interferers on the TRUE answer:
   the first-order screen (`-sum_t m * d log p(correct) / d m`, every component in one backward)
   and the causal single-component ablation of the extremes. POSITIVE = ablating it raises the
@@ -54,18 +55,19 @@ switch off per prompt. Target stream only: no non-target pass, no hidden-activat
   `microbatch_size`, run referenced by `{kind: dir}`) are launch-local, not committed.
 
 Semantics: `recon` is either `ci_masked` (deterministic masks = the lower-leaky CI, weight delta
-OFF) or `merged_stochastic_ppgd` (the decomposition's own adversarial term, weight delta ON; the
-H100 path — a 1x L40 only fits `ci_masked` at microbatch 256 with the host-held gradient sum).
+OFF) or `merged_stochastic_ppgd` (the decomposition's own adversarial term, weight delta ON
+unless `weight_delta: off`; the H100 path — a 1x L40 only fits `ci_masked` at microbatch 256 with the host-held gradient sum).
 The objective is scored at the LAST position only while CI (and the imp-min) covers every
 position; the evaluations always use deterministic masks with the delta off. Imp-min is the decomposition's Geman-McClure term on the
 upper-leaky CI with its frequency penalty at a FIXED `a'` (microbatch-invariant). A component
 is alive iff its output CI exceeds `alive_threshold` at any position of any pool prompt; the
 same cut defines the rounded masks. Constraints (`step.CIConstraints`, threaded explicitly after
-`ci_fn` in every jit, `UNCONSTRAINED` = none) bound every CI read (`step.output_ci`). Every filter runs under both — they are the only
-filtering mechanism, with no switch: the **ceiling** makes the CI the entrywise minimum of the
+`ci_fn` in every jit, `UNCONSTRAINED` = none) bound every CI read (`step.output_ci`). They are the
+only filtering mechanism: the **ceiling** (always on) makes the CI the entrywise minimum of the
 trained fn's and each frozen ceiling fn's (the starting point's CI, chained through
-`init: ci_filter`), and the **prune** gives the components dead on the pool at the start CI 0 and
-zeroed U/V (`remove_components`, saved as `alive/kept.npz`, inherited by later filters).
+`init: ci_filter`), and the **prune** (on unless `prune: false`) gives the components dead on the
+pool at the start CI 0 and zeroed U/V (`remove_components`, saved as `alive/kept.npz`, inherited
+by later filters; no `kept.npz` with the prune off).
 `UNCONSTRAINED` remains for reading the decomposition's OWN CI (`source: run`).
 
 Run: `python -m param_decomp.ci_filter.scripts.run_ci_filter --config <yaml> --data_root <root>

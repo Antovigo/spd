@@ -80,16 +80,24 @@ def write_summary(
 ) -> None:
     """One TSV row per model: its size (kept components; empty for the target, which has no
     mask) and the means of `summary`."""
-    lines = ["\t".join((*SUMMARY_COLUMNS, "chosen"))]
+    lines = [SUMMARY_HEADER]
     for model, (size, summ) in rows.items():
-        values: list[str] = [model, "" if size is None else str(size)]
-        for column in SUMMARY_COLUMNS[2:]:
-            quantity, group = column.rsplit("_", 1)
-            block = summ.get(group)
-            values.append("" if not isinstance(block, dict) else f"{block[quantity]:.6g}")
-        values.append("yes" if model == chosen else "")
-        lines.append("\t".join(values))
+        lines.append(summary_line(model, size, summ, model == chosen))
     path.write_text("\n".join(lines) + "\n")
+
+
+SUMMARY_HEADER = "\t".join((*SUMMARY_COLUMNS, "chosen"))
+
+
+def summary_line(model: str, size: int | None, summ: Mapping[str, object], chosen: bool) -> str:
+    """One `summary.tsv` row (no newline)."""
+    values: list[str] = [model, "" if size is None else str(size)]
+    for column in SUMMARY_COLUMNS[2:]:
+        quantity, group = column.rsplit("_", 1)
+        block = summ.get(group)
+        values.append("" if not isinstance(block, dict) else f"{block[quantity]:.6g}")
+    values.append("yes" if chosen else "")
+    return "\t".join(values)
 
 
 def mask_json(

@@ -16,14 +16,24 @@ Method, settings, stages and output layout: `notes/integer_only/plan.md`.
   the same block equations, and the inner activations `x V` of the masked model.
 - `objective.py` — `q` (renormalized over the integer tokens), `KL_int`, the per-prompt scores
   and the jitted passes (target `log q`, probe, mask gradient).
-- `ci_pass.py` — the run's own CI fn over the pool (output head, lower-leaky, unconstrained):
-  per-batch max and column gathers.
+- `ci_pass.py` — a CI fn over the pool (output head, lower-leaky, under given constraints:
+  `UNCONSTRAINED` for the run's own CI): per-batch max and column gathers.
 - `learn.py` — the sampled straight-through learner for one λ (resumable `state.npz`).
 - `pick.py` — scoring on `Q`, the λ rule, the `integer-only.json` schema.
 - `collect.py` — the dataset (ever-on columns per position, fp16 inner, bit-packed CI) and its
-  README text.
-- `applet.py` — `(a, b)` slices for `ci_filter/grids_app.html` from the dataset.
+  README text; `collect_dataset` writes it for any component set, CI fn and constraints.
+- `applet.py` — `(a, b)` slices for `ci_filter/grids_app.html` from the dataset
+  (`write_applet`, view labels per pipeline).
 - `layout.py` — the output layout (module docstring) and the top-level README text.
 - `run.py` — the CLI: one subcommand per stage, done/failed markers in `status/`.
+- `adv/` — the integer-only-adv CI filter (`notes/integer_only/plan_adv.md`): the run's CI fn
+  fine-tuned (components frozen, ceiling on, prune off) on this pool against `KL_int` under the
+  run's merged persistent-PGD term with the weight delta off, every coefficient the run's at its
+  final step. `config.py` (`IntegerOnlyAdvConfig`), `coefficients.py` (final-step resolution,
+  the `CIFilterConfig` it trains under), `adversary.py` (the run's target-stream adversary from
+  its training checkpoint), `train.py` (the resumable loop), `layout.py` (`$RUN/integer_only_adv/`
+  and its README texts), `run.py` (stages `train`, `alive`, `score`, `collect`, `applet`; reads
+  `$RUN/integer_only/`'s pool, `Q` and score settings).
 
-The pod driver is `notes/integer_only/pod/run.sh` (stage 3 runs one process per λ, one GPU each).
+The pod driver is `notes/integer_only/pod/run.sh` (stage 3 runs one process per λ, one GPU each);
+it then calls `run_adv.sh`, the adv stages on all GPUs.

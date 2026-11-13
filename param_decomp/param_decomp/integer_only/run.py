@@ -14,7 +14,6 @@ writes `status/<stage>.done` (facts) or `status/<stage>.failed` (the error)."""
 
 import argparse
 import json
-import shutil
 import subprocess
 import time
 import traceback
@@ -29,6 +28,7 @@ from jax.sharding import PartitionSpec as P
 
 from param_decomp.ci_filter.pool import load_tokenizer
 from param_decomp.ci_filter.step import (
+    UNCONSTRAINED,
     all_logits,
     index_batches,
     lm_batch,
@@ -42,18 +42,10 @@ from param_decomp.experiments.lm.load_run import RestoredRun, restore_jax_run
 from param_decomp.experiments.lm.resolved import TargetConfig
 from param_decomp.experiments.lm.training import enable_persistent_compilation_cache
 from param_decomp.integer_only import applet as ap
-from param_decomp.integer_only.ci_pass import chunk_ci_columns, chunk_max_ci
-from param_decomp.integer_only.collect import (
-    DATASET_README,
-    FP16_MAX,
-    columns_of,
-    ever_on_bits,
-    ever_on_max_ci,
-    make_inner_columns,
-    pack_rows,
-)
+from param_decomp.integer_only.ci_pass import chunk_max_ci
+from param_decomp.integer_only.collect import DATASET_README, collect_dataset
 from param_decomp.integer_only.config import IntegerOnlyConfig
-from param_decomp.integer_only.layout import README, STAGES, Layout, lam_name
+from param_decomp.integer_only.layout import README, STAGES, Layout, StatusFolder, lam_name
 from param_decomp.integer_only.learn import Context, is_finished, learn_mask
 from param_decomp.integer_only.model import (
     Arch,
@@ -163,8 +155,9 @@ def stage_candidates(
         batches = index_batches(pool.n, config.ci_batch)
         for i, (idx, real) in enumerate(batches):
             got = chunk_max_ci(
-                placed, prepared, restored.ci_fn, tokens_all, jnp.asarray(idx), jnp.asarray(real)
-            )
+                placed, prepared, restored.ci_fn, UNCONSTRAINED, tokens_all, jnp.asarray(idx),
+                jnp.asarray(real),
+            )  # fmt: skip
             for site, value in got.items():
                 v = np.asarray(value)
                 running[site] = np.maximum(running[site], v) if site in running else v
@@ -395,7 +388,6 @@ class NoQualifyingLambda(RuntimeError):
 def stage_collect(
     config: IntegerOnlyConfig, layout: Layout, run_dir: Path, data_root: Path
 ) -> dict[str, object]:
-    assert config.ci_batch % 8 == 0, f"ci_batch {config.ci_batch} must be a multiple of 8"
     pool = load_pool(layout, config)
     restored = restore(run_dir, config, data_root)
     model = restored.placed.model
@@ -409,106 +401,23 @@ def stage_collect(
         arch, shared, _dense = build_target(model)
         factors, slots = build_factors(restored.components, keep, arch.n_layer)
         prepared, v_norms = prepare_components(placed, restored.components)
-    by_site = slots.components()
-    site_cols = {s: jnp.asarray(np.asarray(by_site.get(s, []), np.int32)) for s in sorted(sizes)}
-    n_packed = -(-pool.n // 8)
-    # Pass 1, the original CI: every integer-only component's ON bit at every position, packed
-    # along prompts, `(ceil(N/8), T, n)` uint8 in host memory.
-    bits = np.zeros((n_packed, pool.seq_len, slots.n), np.uint8)
-    t0 = time.time()
-    batches = index_batches(pool.n, config.ci_batch)
-    with jax.set_mesh(restored.mesh):
-        tokens_all = jax.sharding.reshard(jnp.asarray(pool.tokens), P())
-        for i, (idx, real) in enumerate(batches):
-            ci = np.asarray(
-                chunk_ci_columns(placed, prepared, restored.ci_fn, tokens_all, jnp.asarray(idx), site_cols)
-            )  # fmt: skip
-            on = ci > config.threshold
-            on[real:] = False
-            start = int(idx[0])
-            n_rows = -(-real // 8)
-            bits[start // 8 : start // 8 + n_rows] = pack_rows(on)[:n_rows]
-            if i % 50 == 0 or i == len(batches) - 1:
-                logger.info(f"collect CI: batch {i + 1}/{len(batches)} ({time.time() - t0:.0f}s)")
-    seconds_ci = time.time() - t0
-    on_here = ever_on_bits(bits)
-    on_first = ever_on_max_ci(slots, max_ci, config.threshold, pool.seq_len)
-    columns = columns_of(on_here | on_first)
-    per_t = [columns.at(t) for t in range(pool.seq_len)]
-    n_first_only = int((on_first & ~on_here).sum())
-    n_second_only = int((on_here & ~on_first).sum())
-    out = layout.datasets.with_name(layout.datasets.name + ".partial")
-    if out.exists():
-        shutil.rmtree(out)
-    out.mkdir(parents=True)
-    for t, cols in enumerate(per_t):
-        np.save(out / f"ci_on_pos{t}.npy", np.ascontiguousarray(bits[:, t][:, cols]))
-    n_on = int(np.unpackbits(bits).sum())
-    del bits
-    # Pass 2, the integer-only model: the inner activations of the stored columns.
-    inner_mm = [
-        np.lib.format.open_memmap(out / f"inner_pos{t}.npy", mode="w+", dtype=np.float16,
-                                  shape=(pool.n, c.size))
-        for t, c in enumerate(per_t)
-    ]  # fmt: skip
-    on_mask = slots.mask(np.ones(slots.n, bool), arch.n_layer)
-    inner_columns = make_inner_columns(slots)
-    inner_absmax = 0.0
-    t1 = time.time()
-    for i, (idx, real) in enumerate(batches):
-        inner = np.asarray(
-            inner_columns(arch, shared, factors, on_mask, jnp.asarray(pool.tokens[idx]),
-                          config.collect_precision)
-        )  # fmt: skip
-        start = int(idx[0])
-        for t, cols in enumerate(per_t):
-            values = inner[:real, t][:, cols]
-            if values.size:
-                inner_absmax = max(inner_absmax, float(np.abs(values).max()))
-            inner_mm[t][start : start + real] = values.astype(np.float16)
-        assert inner_absmax < FP16_MAX, f"inner overflows float16 ({inner_absmax})"
-        if i % 50 == 0 or i == len(batches) - 1:
-            logger.info(f"collect inner: batch {i + 1}/{len(batches)} ({time.time() - t1:.0f}s)")
-    for mm in inner_mm:
-        mm.flush()
-    del inner_mm
-    pos, comp = columns.position, columns.component
-    v_norm = {s: np.asarray(v) for s, v in v_norms.items()}
-    np.savez(
-        out / "index.npz", tokens=pool.tokens, op=pool.op, ops=np.asarray(pool.ops), a=pool.a,
-        b=pool.b, r=pool.r, position_labels=np.asarray(pool.position_labels),
-        col_position=pos, col_site=np.asarray([slots.sites[j] for j in comp]),
-        col_component=slots.index[comp],
-        col_v_norm=np.asarray([v_norm[slots.sites[j]][slots.index[j]] for j in comp], np.float32),
-    )  # fmt: skip
-    (out / "README.md").write_text(
-        DATASET_README.format(
+
+    def readme(n_columns: int, per_position: str, n_first_only: int, n_second_only: int) -> str:
+        return DATASET_README.format(
             run_dir=run_dir, step=config.step, commit=commit(), n_components=slots.n,
             n_prompts=pool.n, prompts=config.prompts, seq_len=pool.seq_len,
-            labels=labels_text(pool), threshold=config.threshold, n_columns=int(pos.size),
-            per_position=", ".join(f"t={t}: {c.size}" for t, c in enumerate(per_t)),
-            ops=", ".join(f"{k} = {o}" for k, o in enumerate(pool.ops)),
+            labels=labels_text(pool), threshold=config.threshold, n_columns=n_columns,
+            per_position=per_position, ops=", ".join(f"{k} = {o}" for k, o in enumerate(pool.ops)),
             precision=config.collect_precision, last=pool.seq_len - 1,
             n_first_only=n_first_only, n_second_only=n_second_only,
-        )
+        )  # fmt: skip
+
+    facts = collect_dataset(
+        placed, prepared, v_norms, restored.ci_fn, UNCONSTRAINED, restored.mesh, arch, shared,
+        factors, slots, pool, max_ci, config.threshold, config.ci_batch,
+        config.collect_precision, layout.datasets, readme,
     )  # fmt: skip
-    if layout.datasets.exists():
-        shutil.rmtree(layout.datasets)
-    out.rename(layout.datasets)
-    never_on = np.setdiff1d(np.arange(slots.n), columns.component)
-    return {
-        "n_integer_only": slots.n,
-        "n_columns": int(pos.size),
-        "columns_per_position": [int(c.size) for c in per_t],
-        "n_on_events": n_on,
-        "integer_only_without_column": [f"{slots.sites[j]}:{slots.index[j]}" for j in never_on],
-        "pairs_on_only_in_stage_1": n_first_only,
-        "pairs_on_only_here": n_second_only,
-        "integer_only_never_on_here": int((~on_here.any(axis=0)).sum()),
-        "inner_absmax": inner_absmax,
-        "seconds_ci_pass": round(seconds_ci, 1),
-        "seconds_inner_pass": round(time.time() - t1, 1),
-    }
+    return {"n_integer_only": slots.n} | facts
 
 
 def labels_text(pool: PromptPool) -> str:
@@ -519,45 +428,13 @@ def stage_applet(
     config: IntegerOnlyConfig, layout: Layout, run_dir: Path, data_root: Path
 ) -> dict[str, object]:
     del run_dir, data_root
-    d = layout.datasets
     pool = load_pool(layout, config)
-    index = dict(np.load(d / "index.npz"))
-    n, ops, labels = pool.n, pool.ops, pool.position_labels
-    assert np.array_equal(index["op"], pool.op), "the dataset is not this pool's"
     sizes = {site: int(v.shape[1]) for site, v in np.load(layout.max_ci).items()}
-    out = layout.applet_data.with_name(layout.applet_data.name + ".partial")
-    if out.exists():
-        shutil.rmtree(out)
-    t0 = time.time()
-    counts: dict[str, int] = {}
-    for t in range(len(labels)):
-        cols = np.flatnonzero(index["col_position"] == t)
-        inner_all = np.load(d / f"inner_pos{t}.npy").astype(np.float32)
-        inner_all /= np.maximum(index["col_v_norm"][cols], 1e-12)[None, :]
-        packed = np.load(d / f"ci_on_pos{t}.npy")
-        on_all = np.unpackbits(packed, axis=0, count=n).astype(bool)
-        sites = index["col_site"][cols]
-        for k, op in enumerate(ops):
-            rows = np.flatnonzero(pool.op == k)
-            grid, cell = ap.operation_grid(pool.a[rows], pool.b[rows], op)
-            on_op, inner_op = on_all[rows], inner_all[rows]
-            site_columns = {}
-            for site in np.unique(sites):
-                sel = np.flatnonzero(sites == site)
-                ids = index["col_component"][cols[sel]]
-                site_columns[str(site)] = (ids, on_op[:, sel], inner_op[:, sel])
-            counts[f"{op}_pos{t}"] = ap.write_operation_slice(
-                out, op, t, len(labels), config.step, grid, cell, site_columns, sizes
-            )
-        logger.info(f"applet: position {t} ({time.time() - t0:.0f}s)")
-    ap.write_manifest(
-        out, f"integer-only components, step {config.step}", ops, labels, config.threshold
-    )
-    if layout.applet_data.exists():
-        shutil.rmtree(layout.applet_data)
-    out.rename(layout.applet_data)
-    layout.applet_page.write_text(ap.applet_page(layout.applet_data.name))
-    return {"grids_per_slice": counts, "seconds": round(time.time() - t0, 1)}
+    return ap.write_applet(
+        layout.datasets, pool, sizes, config.step, config.threshold,
+        f"integer-only components, step {config.step}", ap.VIEW_LABELS, layout.applet_data,
+        layout.applet_page,
+    )  # fmt: skip
 
 
 # ----------------------------------- driver -----------------------------------
@@ -613,7 +490,7 @@ def peak_device_gib() -> list[float | None]:
     return out
 
 
-def run_stage(layout: Layout, marker: str, fn: Callable[[], dict[str, object]]) -> None:
+def run_stage(layout: StatusFolder, marker: str, fn: Callable[[], dict[str, object]]) -> None:
     if layout.done(marker).exists():
         logger.info(f"{marker}: already done ({layout.done(marker)})")
         return

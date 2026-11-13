@@ -20,8 +20,20 @@
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 STAGES = ("candidates", "problem", "learn", "pick", "collect", "applet")
+
+
+class StatusFolder(Protocol):
+    """A pipeline folder with stage markers: `status/<marker>.done` and `.failed`."""
+
+    @property
+    def status(self) -> Path: ...
+
+    def done(self, marker: str) -> Path: ...
+
+    def failed(self, marker: str) -> Path: ...
 
 
 def lam_name(lam: float) -> str:

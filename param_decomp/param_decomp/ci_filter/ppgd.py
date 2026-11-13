@@ -3,14 +3,18 @@ S14′, S24), scored by the CI filter's objective (`MergedPPGDRecon`).
 
 Built from core's own kernels — `init_persistent_sources`, `sources_adam_ascend_project`,
 `UniformKRouting`, `source_masking`, `mixed_persistent_stochastic_masking` — with the filter's
-frozen components (only the CI fn trains). The persistent sources hold one row per batch slot
-(the axis after each stack's stack axis); microbatches read consecutive row slices, and every
-Adam ascent updates the whole bundle once from the concatenated slice gradients, so the
-trajectory does not depend on the microbatch split beyond float reassociation."""
+frozen components (only the CI fn trains). The persistent sources hold `R` rows (the axis after
+each stack's stack axis; `R` an integer >= 1): batch element `j` of a step (0-based, in batch
+order) reads row `j mod R`, so with `R` = the batch size every element owns one row (the
+decomposition's own `bsc` layout) and with fewer rows each row serves every `R`-th element.
+Microbatches read their elements' rows, and every Adam ascent updates the whole bundle once
+from the slice gradients summed per row (concatenated when the slices tile `0..R-1` in order),
+so the trajectory does not depend on the microbatch split beyond float reassociation.
+`MergedPPGDRecon.weight_delta` sets whether routed sites add the masked weight delta."""
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import cast
+from typing import Literal, cast
 
 import equinox as eqx
 import jax
@@ -49,6 +53,7 @@ from param_decomp.core.masking import (
     mixed_persistent_stochastic_masking,
     source_masking,
 )
+from param_decomp.core.model import MaterializedMasking, SourceMasking
 from param_decomp.core.recon import UniformKRouting
 from param_decomp.core.runtime_schedule import scheduled_value_at
 from param_decomp.experiments.lm.load_run import PlacedTransformer
@@ -82,14 +87,67 @@ def init_adversary(
     return Adversary(sources=sources, opt_state=init_sources_adam_state(sources))
 
 
-def _rows(sources: SourceStacks, start: int, stop: int) -> SourceStacks:
-    return jax.tree.map(lambda x: jax.lax.slice_in_dim(x, start, stop, axis=ROW_AXIS), sources)
+def n_rows(sources: SourceStacks) -> int:
+    """`R`, the bundle's number of adversary rows."""
+    (rows,) = {leaf.shape[ROW_AXIS] for leaf in jax.tree.leaves(sources)}
+    return int(rows)
+
+
+def row_ids(start: int, size: int, rows: int) -> np.ndarray:
+    """The adversary rows of batch elements `start .. start + size - 1`: element `j` reads row
+    `j mod rows`."""
+    return (start + np.arange(size)) % rows
+
+
+def _rows(sources: SourceStacks, ids: np.ndarray) -> SourceStacks:
+    """The bundle's rows `ids`, in order (a slice when they are consecutive)."""
+    lo = int(ids[0])
+    if np.array_equal(ids, np.arange(lo, lo + ids.size)):
+        return jax.tree.map(
+            lambda x: jax.lax.slice_in_dim(x, lo, lo + ids.size, axis=ROW_AXIS), sources
+        )
+    return jax.tree.map(lambda x: jnp.take(x, jnp.asarray(ids), axis=ROW_AXIS), sources)
 
 
 def _concat_rows(parts: list[SourceStacks]) -> SourceStacks:
     if len(parts) == 1:
         return parts[0]
     return jax.tree.map(lambda *xs: jnp.concatenate(xs, axis=ROW_AXIS), *parts)
+
+
+@eqx.filter_jit
+def _add_rows(total: SourceStacks, part: SourceStacks, ids: Int[Array, " M"]) -> SourceStacks:
+    """`total[:, ids] += part`, repeated ids accumulating; `part` replicated first."""
+
+    def add(t: Array, g: Array) -> Array:
+        if not jax.sharding.get_abstract_mesh().empty:
+            g = jax.sharding.reshard(g, P())
+        return t.at[:, ids].add(g.astype(t.dtype))
+
+    return jax.tree.map(add, total, part)
+
+
+def sum_rows(parts: list[SourceStacks], ids: list[np.ndarray], like: SourceStacks) -> SourceStacks:
+    """The per-row sum of slice gradients `parts` (slice `k` holding rows `ids[k]`), shaped
+    like the bundle `like`; the plain concatenation when the slices tile `0..R-1` in order."""
+    if np.array_equal(np.concatenate(ids), np.arange(n_rows(like))):
+        return _concat_rows(parts)
+    total = jax.tree.map(jnp.zeros_like, like)
+    for part, part_ids in zip(parts, ids, strict=True):
+        total = _add_rows(total, part, jnp.asarray(part_ids))
+    return total
+
+
+def _masking(masking: SourceMasking, weight_delta: Literal["on", "off"]) -> MaterializedMasking:
+    """The materialized masks, with the weight-delta masks dropped (`d = 0`) when `off`."""
+    materialized = materialize_masking(masking)
+    match weight_delta:
+        case "on":
+            return materialized
+        case "off":
+            return MaterializedMasking(
+                component_masks=materialized.component_masks, weight_delta_masks=None
+            )
 
 
 type WarmupGrads = Callable[
@@ -114,6 +172,7 @@ def make_warmup_grads(config: CIFilterConfig) -> WarmupGrads:
     batch mean's gradient."""
     objective = config.objective
     scale = 1.0 / config.n_microbatches
+    weight_delta = _ppgd(config).weight_delta
 
     @eqx.filter_jit
     def warmup_grads(
@@ -135,7 +194,7 @@ def make_warmup_grads(config: CIFilterConfig) -> WarmupGrads:
         )
 
         def score(sources: SourceStacks) -> Array:
-            masking = materialize_masking(source_masking(lower, sources.per_site()))
+            masking = _masking(source_masking(lower, sources.per_site()), weight_delta)
             masked_last = last_logits(
                 masked_output(placed, prepared, clean.conditioning, masking, remat=config.remat)
             )
@@ -223,7 +282,7 @@ def make_ppgd_micro_grads(config: CIFilterConfig) -> PPGDMicroGrads:
                     placed,
                     prepared,
                     clean.conditioning,
-                    materialize_masking(masking),
+                    _masking(masking, recon.weight_delta),
                     remat=config.remat,
                     routes=merged_routes,
                 )
@@ -315,6 +374,8 @@ class PPGDStep:
         """Warmup ascents, the main gradient over the microbatches, then the final ascent from
         that same backward's source gradients."""
         starts = list(range(0, len(idx), microbatch_size))
+        rows = n_rows(adversary.sources)
+        ids = [row_ids(start, len(idx[start : start + microbatch_size]), rows) for start in starts]
         for _ in range(self.n_warmup):
             parts = [
                 self.warmup_grads(
@@ -326,18 +387,17 @@ class PPGDStep:
                     jnp.asarray(idx[start : start + microbatch_size]),
                     answer_ids,
                     targets,
-                    _rows(adversary.sources, start, start + microbatch_size),
+                    _rows(adversary.sources, part_ids),
                 )
-                for start in starts
+                for start, part_ids in zip(starts, ids, strict=True)
             ]
-            adversary = self.ascend(adversary, _concat_rows(parts), train_frac)
+            adversary = self.ascend(adversary, sum_rows(parts, ids, adversary.sources), train_frac)
 
         source_parts: list[SourceStacks] = []
 
         def micro_call(
             k: int, micro_idx: np.ndarray
         ) -> tuple[Trainable, dict[str, Array], dict[str, Array]]:
-            start = starts[k]
             g, source_g, m, schedules = self.micro_grads(
                 placed,
                 prepared,
@@ -348,7 +408,7 @@ class PPGDStep:
                 answer_ids,
                 targets,
                 train_frac,
-                _rows(adversary.sources, start, start + microbatch_size),
+                _rows(adversary.sources, ids[k]),
                 random.fold_in(key, k),
             )
             source_parts.append(source_g)
@@ -356,5 +416,7 @@ class PPGDStep:
 
         call: MicroCall = micro_call
         grads, metrics, schedules = batch_gradients(call, idx, microbatch_size, on_host)
-        adversary = self.ascend(adversary, _concat_rows(source_parts), train_frac)
+        adversary = self.ascend(
+            adversary, sum_rows(source_parts, ids, adversary.sources), train_frac
+        )
         return grads, metrics, schedules, adversary

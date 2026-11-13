@@ -20,14 +20,23 @@ from param_decomp.ci_filter.step import UNCONSTRAINED, CIConstraints, FilterCIFn
 from param_decomp.core.precision import COMPUTE_DT, cast_floating
 
 
-def save_ci_fn(path: Path, ci_fn: FilterCIFn) -> None:
-    leaves: list[Array] = jax.tree.leaves(eqx.filter(ci_fn, eqx.is_array))
+def save_tree(path: Path, tree: object) -> None:
+    """Save the array leaves of any pytree (a CI fn, an optimizer state, an adversary)."""
+    leaves: list[Array] = jax.tree.leaves(eqx.filter(tree, eqx.is_array))
     with ocp.StandardCheckpointer() as checkpointer:
         checkpointer.save(path.resolve(), {f"{i:05d}": leaf for i, leaf in enumerate(leaves)})
         checkpointer.wait_until_finished()
 
 
+def save_ci_fn(path: Path, ci_fn: FilterCIFn) -> None:
+    save_tree(path, ci_fn)
+
+
 def restore_ci_fn(path: Path, like: FilterCIFn) -> FilterCIFn:
+    return restore_tree(path, like)
+
+
+def restore_tree[Tree](path: Path, like: Tree) -> Tree:
     """`like`'s structure with the saved leaves, placed like `like`'s leaves."""
     arrays, static = eqx.partition(like, eqx.is_array)
     leaves: list[Array]

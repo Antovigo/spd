@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
-# Run ON the pod: the whole integer-only pipeline (notes/integer_only/plan.md), stages 1 to 6.
+# Run ON the pod: the whole integer-only pipeline (notes/integer_only/plan.md), stages 1 to 6,
+# then the integer-only-adv stages (notes/integer_only/plan_adv.md, `run_adv.sh`).
 #     source /workspace/spd/notes/dual_objective/addsub-all-layers/env.sh
 #     /workspace/spd/notes/integer_only/pod/run.sh              # detaches; prints the log path
 #     /workspace/spd/notes/integer_only/pod/run.sh --foreground # same, in this shell
-# Env overrides: RUN_ID (default p-512d73ab), CONFIG (default the addsub-answers-09 config).
+# Env overrides: RUN_ID (default p-512d73ab), CONFIG (default the addsub-answers-09 config),
+# ADV_CONFIG (run_adv.sh's, default the addsub-answers-09-adv config).
 # Each stage writes $RUN/integer_only/status/<stage>.done or .failed; a done stage is skipped,
 # so rerunning this script resumes. Stage 3 runs one process per λ, λ number i on GPU i. The
 # script stops at the first failed stage (a failed `pick` means no λ met the rule: read
-# $RUN/integer_only/sweep/summary.tsv). It never touches the pod's other processes.
+# $RUN/integer_only/sweep/summary.tsv); the adv stages write $RUN/integer_only_adv/status/.
+# The log ends with "=== all stages done" only after both pipelines finish. It never touches
+# the pod's other processes.
 set -euo pipefail
 : "${REPO:?source env.sh first}" "${DATA_ROOT:?source env.sh first}" "${VENV_PY:?source env.sh first}"
 RUN_ID="${RUN_ID:-p-512d73ab}"
@@ -59,4 +63,6 @@ for pid in "${PIDS[@]}"; do wait "$pid" || FAILED=1; done
 stage pick 0
 stage collect 0
 JAX_PLATFORMS=cpu stage applet ""
-echo "=== all stages done $(date -u +%FT%TZ): $RUN/integer_only/README.md"
+# The integer-only-adv stages (plan_adv.md) on all GPUs; status in $RUN/integer_only_adv/status/.
+"$REPO/notes/integer_only/pod/run_adv.sh" || { echo "an integer-only-adv stage failed: see $RUN/integer_only_adv/logs"; exit 1; }
+echo "=== all stages done $(date -u +%FT%TZ): $RUN/integer_only/README.md $RUN/integer_only_adv/README.md"

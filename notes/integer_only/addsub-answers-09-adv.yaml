@@ -1,0 +1,7 @@
+# Integer-only-adv CI filter of addsub-answers-09 (p-512d73ab), final checkpoint (plan:
+# notes/integer_only/plan_adv.md). Every loss coefficient and the adversary's optimizer are the
+# run's at its final step, resolved in code (`integer_only/adv/coefficients.py`); every unlisted
+# setting is the IntegerOnlyAdvConfig default: 2500 steps, batch 4096, CI learning rate 8e-5
+# constant, threshold 0.1, the adversary restored from the run's checkpoint.
+step: 40000
+microbatch: 256  # hardware-only: 64 prompts per H100 on the 4-GPU fsdp mesh
