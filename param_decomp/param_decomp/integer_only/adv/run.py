@@ -132,6 +132,12 @@ def alive_document(
     )
 
 
+def remove_states(layout: AdvLayout) -> None:
+    layout.latest_state.unlink(missing_ok=True)
+    for old in layout.training.glob("state_*"):
+        shutil.rmtree(old)
+
+
 # ----------------------------------- stages -----------------------------------
 
 
@@ -147,6 +153,11 @@ def stage_train(
     layout.coefficients.write_text(json.dumps(coefficients.as_json(), indent=1) + "\n")
     resolved.to_file(layout.filter_config)
     logger.info(f"final-step coefficients: {coefficients.as_json()}")
+    if layout.ci_fn.exists():
+        # Published by an earlier attempt (the rename below is atomic) that stopped before
+        # its done marker: only the cleanup is left.
+        remove_states(layout)
+        return {"ci_fn_published_earlier": True, "coefficients": coefficients.as_json()}
     restored = restore(run_dir, config, data_root, config.placement)
     target = restored.deliverable.target
     assert isinstance(target, TargetConfig)
@@ -185,10 +196,15 @@ def stage_train(
         trained, facts = train(
             config, resolved, layout, placed, prepared, constraints, problem, start
         )
-        save_ci_fn(layout.ci_fn, trained)
-    for old in layout.training.glob("state_*"):
-        shutil.rmtree(old)
-    layout.latest_state.unlink(missing_ok=True)
+        # Publish through a temporary folder (orbax refuses an existing destination), and keep
+        # the resumable state until the CI fn is in place, so a rerun after any interruption
+        # here resumes and publishes again.
+        partial = layout.ci_fn.with_name(layout.ci_fn.name + ".partial")
+        if partial.exists():
+            shutil.rmtree(partial)
+        save_ci_fn(partial, trained)
+        partial.rename(layout.ci_fn)
+    remove_states(layout)
     return facts | {
         "n_train_rows": int(train_rows.size),
         "adversary_init": config.adversary_init,

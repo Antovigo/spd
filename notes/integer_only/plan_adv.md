@@ -168,8 +168,9 @@ other settings (the hardware-only `microbatch`, `accumulate_on_host`, `save_ever
 1. `train`: resolves the coefficients, restores the run and its adversary, runs the 2500 steps
    and writes `ci_fn/`. Every `save_every` (250) steps it saves the CI fn, its Adam state, the
    adversary and the step to `training/state_<k>/` (`training/latest_state.json` names the
-   newest complete one); a rerun resumes there on the same trajectory. The state folders are
-   deleted once `ci_fn/` is written.
+   newest complete one); a rerun resumes there on the same trajectory. `ci_fn/` is written as
+   `ci_fn.partial/` and renamed; the state folders are deleted after the rename, and a rerun
+   that finds `ci_fn/` only deletes them.
 2. `alive`: the integer-only-adv CI over all 240,200 prompts (batches of `ci_batch`): writes
    `max_ci.npz` (per site a `(10, C)` array, the max over prompts) and `integer-only-adv.json`.
 3. `score`: the integer-only-adv model on all of `Q`, exactly as stage 4 of `plan.md` scores
@@ -231,3 +232,44 @@ microbatch 32 and 128, against 3.7 s under `ddp` at microbatch 128: the gathers 
 2 L40s that build under a 2-device mesh ran for over 20 minutes without finishing); `alive`
 runs on the same GPU so its CI pass and `collect`'s are one device's programs, as integer-only
 stages 1 and 5.
+
+## Smoke (L40, 2026-11-13)
+
+On the p-512d73ab step-32000 copy (the step-16000 copy's `training/` item is truncated: 11 GB
+of the 44 GB a full checkpoint stores, its adversary unreadable), with the integer-only smoke's
+pool (`a`, `b` in 0..109, 18,205 prompts, `Q` 2,048 of them) and its `summary.tsv` (made at step
+16000), every stage ran: `train` (20 steps, batch 64, microbatch 32, `zero1`, 2 L40s), then
+`alive`, `score`, `collect` on one L40 and `applet` on the CPU.
+
+- The adversary restored with 96,000 ascents (32,000 steps × (2 warmups + 1)); the filter's
+  first step continued from it (96,003 after step 0).
+- 20 steps: `KL_int` 0.030 at step 0, L0 (components with CI > 0 per token) 1148 → 568.
+- 8,153 integer-only-adv components; the integer-only-adv model on `Q`: `KL_int` 0.0267,
+  `KL_full` 0.0271, `ce_int` 0.0552, accuracy 1.000 (`comparison.tsv`).
+- `collect` stored 15,138 pairs; with `alive` on the same single GPU, 0 pairs were ON in only
+  one of the two CI passes (57 when `alive` had run on 2 GPUs).
+
+Training step time and peak device memory (`peak_device_gib`), `m` (integer) the prompts per
+device per microbatch:
+
+| GPUs | placement | microbatch | `m` | s/step | microbatches/step | peak GiB/device |
+|---|---|---|---|---|---|---|
+| 2 L40 | zero1 | 32 | 16 | 21.9 | 2 | 29.2 |
+| 2 L40 | zero1 | 128 | 64 | 22.7 | 2 | 33.4 |
+| 2 L40 | ddp | 64 | 32 | 2.73 | 2 | 39.3 |
+| 2 L40 | ddp | 128 | 64 | 3.73 | 2 | 41.4 |
+| 2 L40 | ddp | 256 | 128 | out of memory | | |
+| 4 L40 | ddp | 256 | 64 | 10.3 | 2 | 40.6 |
+
+The 4-L40 row is after the microbatch source slice was split over the batch axes; before, the
+same setting ran out of memory, and the process then waited in an NCCL rendezvous instead of
+exiting (no `.failed` marker; the job ran until cancelled).
+
+Pod estimate (extrapolated, not measured on an H100): microbatch 1024 (`m` = 256, 4
+microbatches per step). Memory: 40.6 + 0.0656 × (256 − 64) ≈ 53 GiB from the measured slope,
+plus the held source-gradient slices (≈ 5 GiB per device at 4 microbatches) — under the ~75 GiB
+`XLA_PYTHON_CLIENT_MEM_FRACTION=0.95` leaves. Time: on 2 L40s a ddp microbatch took
+0.87 + 0.0156 `m` seconds; at `m` = 256 that is 4.9 s, and an H100 is 3 to 4 times faster per
+device, so 1.2–1.6 s per microbatch plus the inter-device traffic (3.3 s per microbatch over 4
+L40s' PCIe, much less over NVLink): about 5.5–7 s per step, 4–5 h for 2500 steps. `alive`,
+`score`, `collect` scale with the pool (13.2 × the smoke's): ~5–15 min each on one H100.
