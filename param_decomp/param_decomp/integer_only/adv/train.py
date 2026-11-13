@@ -1,5 +1,6 @@
 """The integer-only-adv fine-tune: the run's CI fn trained against `KL_int` at the last position
-under the run's merged stochastic-subset persistent-PGD term (weight delta off), its components
+under the run's merged stochastic-subset persistent-PGD term (weight delta ablated as in the run's target
+stream), its components
 frozen, every coefficient constant at the run's final-step value (`coefficients.py`).
 
 Each Adam step `k` (integer, `0 <= k < steps`) draws `batch` distinct rows of `P \\ Q`

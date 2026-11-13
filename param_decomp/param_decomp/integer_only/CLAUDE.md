@@ -28,7 +28,7 @@ Method, settings, stages and output layout: `notes/integer_only/plan.md`.
 - `run.py` — the CLI: one subcommand per stage, done/failed markers in `status/`.
 - `adv/` — the integer-only-adv CI filter (`notes/integer_only/plan_adv.md`): the run's CI fn
   fine-tuned (components frozen, ceiling on, prune off) on this pool against `KL_int` under the
-  run's merged persistent-PGD term with the weight delta off, every coefficient the run's at its
+  run's merged persistent-PGD term (weight delta ablated as in the run's target stream), every coefficient the run's at its
   final step. `config.py` (`IntegerOnlyAdvConfig`), `coefficients.py` (final-step resolution,
   the `CIFilterConfig` it trains under), `adversary.py` (the run's target-stream adversary from
   its training checkpoint), `train.py` (the resumable loop), `layout.py` (`$RUN/integer_only_adv/`

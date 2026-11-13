@@ -238,7 +238,7 @@ def test_final_step_coefficients(tmp_path: Path) -> None:
 
     fc = filter_config(c, IntegerOnlyAdvConfig(step=7, steps=5, batch=8, microbatch=4), tmp_path)
     assert fc.prune is False and fc.recon.kind == "merged_stochastic_ppgd"
-    assert fc.recon.weight_delta == "off"
+    assert fc.recon.weight_delta == "on"
     assert fc.imp_min.reference_datapoint_count == batch * T
     for schedule in (fc.lr_schedule, fc.imp_min.coeff, fc.imp_min.gamma, fc.recon.adv_fraction):
         assert schedule.is_constant
@@ -256,7 +256,8 @@ def test_weight_delta_off_in_the_merged_term(toy: Toy, tmp_path: Path) -> None:
     delta sources is exactly zero (on: nonzero), and the full step runs."""
     placed, components, ci_fn, pool = toy
     fc = _filter_config(steps=2, batch=4, micro=2, tmp=tmp_path)
-    on = fc.model_copy(update={"recon": fc.recon.model_copy(update={"weight_delta": "on"})})
+    on = fc
+    off = fc.model_copy(update={"recon": fc.recon.model_copy(update={"weight_delta": "off"})})
     mesh = single_device_mesh()
     problem = _problem(pool, np.arange(N_PROMPTS))
     with jax.set_mesh(mesh):
@@ -269,7 +270,7 @@ def test_weight_delta_off_in_the_merged_term(toy: Toy, tmp_path: Path) -> None:
         assert _masking(masking, "off").weight_delta_masks is None
         assert _masking(masking, "on").weight_delta_masks is not None
         grads = {}
-        for name, config in (("off", fc), ("on", on)):
+        for name, config in (("off", off), ("on", on)):
             grads[name] = make_warmup_grads(config)(
                 placed, prepared, ci_fn, UNCONSTRAINED, problem.tokens_all, idx,
                 problem.answer_ids, problem.targets, adversary.sources,
@@ -278,7 +279,7 @@ def test_weight_delta_off_in_the_merged_term(toy: Toy, tmp_path: Path) -> None:
             np.testing.assert_array_equal(np.asarray(stack.delta), 0.0)
         assert any(float(jnp.abs(s.delta).max()) > 0 for s in grads["on"].stacks.values())
         assert any(float(jnp.abs(s.components).max()) > 0 for s in grads["off"].stacks.values())
-        _, metrics, _, moved = PPGDStep.build(fc)(
+        _, metrics, _, moved = PPGDStep.build(off)(
             placed, prepared, ci_fn, UNCONSTRAINED, problem.tokens_all, np.arange(4, dtype=np.int32),
             problem.answer_ids, problem.targets, jnp.float32(1.0), adversary,
             jax.random.PRNGKey(6), 2, False,

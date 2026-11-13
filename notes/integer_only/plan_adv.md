@@ -68,9 +68,11 @@ Reconstruction: the run's own merged stochastic-subset persistent-PGD term
 the last position. Per step and prompt, with probability `α` (real, the adversarial fraction)
 the prompt is adversarial: every site is routed and its masks use the persistent adversary's
 sources; otherwise its sources are fresh `U[0,1]` draws and a uniform-k subset of sites is
-routed (an unrouted site computes `x W^T`, the target's own output). The WEIGHT DELTA IS OFF
-(`d = 0`) at every routed site, in the warmup ascents and the main forward alike
-(`MergedPPGDRecon.weight_delta: off`). The reference `q_Llama` is the original model's clean
+routed (an unrouted site computes `x W^T`, the target's own output). The weight delta is ablated
+exactly as in the run's target stream: at every routed site its mask is the adversary's persistent
+delta source on an adversarial prompt and a fresh `U[0,1]` draw otherwise, in the warmup ascents
+and the main forward alike (`MergedPPGDRecon.weight_delta: on`; Antoine, 2026-11-13). The
+integer-only-adv model and every score keep the delta off. The reference `q_Llama` is the original model's clean
 forward in the same jit (the run's bf16 weights), not the cached `reference_log_q.npy`.
 
 Per step: `n_w` (integer) warmup ascents of the adversary against the all-adversarial forward
@@ -139,7 +141,7 @@ The run's checkpoint at step 40000 holds the target-stream adversary under
 `adversary_init: run` restores all of it unchanged (`integer_only/adv/adversary.py`), so the
 first filter step continues the run's ascent (Adam bias correction included).
 
-Shapes: the filter's batch (4096) has 32 times the run's rows. Batch element `j` (0-based, in
+Shapes: the default batch (4096) has 32 times the run's rows (the pod's 2048: 16 times). Batch element `j` (0-based, in
 batch order) reads row `j mod 128` (`ci_filter/ppgd.py`), and each row's gradient is the sum
 over its 32 elements. In the run a row is not tied to a prompt either: every step draws a fresh
 batch and row `i` attacks whichever prompt sits at slot `i`. Tiling the rows (instead of 4096
@@ -147,10 +149,9 @@ fresh rows) keeps the trained state and costs 1.9 GB per device (sources and mom
 replicated); 4096 rows would be 61 GB.
 
 Semantics that differ from the run's: (1) the run's adversary ascended the run's own objective
-(full-vocabulary KL with the delta's masks active); here it ascends `KL_int` at the last position
-with the delta off, so its delta channel gets no gradient (its delta sources stay as restored,
-unused) and its component sources start from the run's attack on a different objective; (2)
-each row now attacks 32 prompts per step instead of 1. The restored rows are the closest
+(full-vocabulary KL); here it ascends `KL_int` at the last position, so its component and delta
+sources start from the run's attack on a different objective; (2) each row now attacks
+`batch / 128` prompts per step instead of 1 (16 at the pod's batch 2048). The restored rows are the closest
 available start; `adversary_init: fresh` (U[0,1] sources, zero moments) is the alternative.
 
 ## Stages

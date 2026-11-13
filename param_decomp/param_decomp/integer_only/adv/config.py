@@ -2,7 +2,8 @@
 
 The filter fine-tunes a finished run's CI fn (its components frozen) on the integer-only
 pipeline's prompt pool against `KL_int` at the last position under the run's own merged
-stochastic-subset persistent-PGD term with the weight delta off. Every loss coefficient is the
+stochastic-subset persistent-PGD term, the weight delta ablated as in the run's
+target stream. Every loss coefficient is the
 run's own at its final training step (`coefficients.py`); this config holds only the settings
 the run does not fix."""
 

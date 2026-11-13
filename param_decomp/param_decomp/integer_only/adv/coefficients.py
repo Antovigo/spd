@@ -153,7 +153,8 @@ def filter_config(
 ) -> CIFilterConfig:
     """The `CIFilterConfig` the training step runs: every schedule constant at its final-step
     value, `KL_int` at the last position (the restricted KL over the answer ids the caller
-    passes: the 1000 integer tokens), the merged term with the weight delta OFF, the ceiling on
+    passes: the 1000 integer tokens), the merged term with the weight delta adversarially
+    ablated as in the run's target stream, the ceiling on
     and the prune off. Its `pool` is unused (the pool is the prompts file's)."""
     c = coefficients
     return CIFilterConfig(
@@ -176,7 +177,7 @@ def filter_config(
                 eps=c.source_eps,
                 lr_schedule=ScheduleConfig.constant(c.source_lr),
             ),
-            weight_delta="off",
+            weight_delta="on",
         ),
         imp_min=ImpMinConfig(
             coeff=ScheduleConfig.constant(c.impmin_coeff),

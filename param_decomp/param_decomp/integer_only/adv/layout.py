@@ -141,7 +141,8 @@ the integer-only pipeline's check set (`../integer_only/check_set.npy`).
 
 The fine-tune: {steps} Adam steps of batch {batch} on the pool rows outside `Q`, the components
 frozen, against `KL_int` at the last position under the run's merged stochastic-subset
-persistent-PGD term with the weight delta OFF, plus the run's importance minimality; every
+persistent-PGD term (the weight delta adversarially ablated, as in the run's target
+stream), plus the run's importance minimality; every
 coefficient is the run's at its final training step (`coefficients.json`).
 
 ## Files
