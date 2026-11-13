@@ -131,7 +131,7 @@ hidden pass (its recon, KL rider and imp-min); the non-target pass; the CI-scale
 and the components' optimizer (the components are frozen); the CI fn's learning-rate schedule
 (replaced below).
 
-Schedule (the `IntegerOnlyAdvConfig` default; the addsub-answers-09 pod config overrides it with batch 128 × 16000 steps, one restored adversary row per prompt): 2500 steps, batch 4096, CI learning rate 8e-5 constant (no decay), Adam `β` as the
+Schedule (the `IntegerOnlyAdvConfig` default; the addsub-answers-09 pod config overrides it with batch 128 × 4400 steps (about 1 h at 0.82 s/step), one restored adversary row per prompt): 2500 steps, batch 4096, CI learning rate 8e-5 constant (no decay), Adam `β` as the
 run's, `ε` 1e-8 (the run's AdamW `ε`). Mesh: every visible device (4 H100 on the pod), each
 microbatch split over them, the weights whole on each (`placement: ddp`, below). The batch is
 split into microbatches of `microbatch` prompts (hardware-only; the per-row source gradients and
