@@ -116,25 +116,37 @@ def _concat_rows(parts: list[SourceStacks]) -> SourceStacks:
 
 
 @eqx.filter_jit
-def _add_rows(total: SourceStacks, part: SourceStacks, ids: Int[Array, " M"]) -> SourceStacks:
-    """`total[:, ids] += part`, repeated ids accumulating; `part` replicated first."""
+def _add_folded(total: SourceStacks, part: SourceStacks, offset: int, rows: int) -> SourceStacks:
+    """`total` plus `part`'s rows folded onto the bundle: `part`'s row `i` (`0 <= i < M`) adds
+    to bundle row `(offset + i) mod rows`. A zero pad and a reshaped sum, no scatter (XLA's
+    deterministic scatter serializes); `part` replicated first."""
 
     def add(t: Array, g: Array) -> Array:
         if not jax.sharding.get_abstract_mesh().empty:
             g = jax.sharding.reshard(g, P())
-        return t.at[:, ids].add(g.astype(t.dtype))
+        m = g.shape[ROW_AXIS]
+        n = -(-(offset + m) // rows)
+        pad = [(0, 0)] * g.ndim
+        pad[ROW_AXIS] = (offset, n * rows - offset - m)
+        g = jnp.pad(g.astype(t.dtype), pad)
+        folded = g.reshape(*g.shape[:ROW_AXIS], n, rows, *g.shape[ROW_AXIS + 1 :])
+        return t + folded.sum(axis=ROW_AXIS)
 
     return jax.tree.map(add, total, part)
 
 
 def sum_rows(parts: list[SourceStacks], ids: list[np.ndarray], like: SourceStacks) -> SourceStacks:
-    """The per-row sum of slice gradients `parts` (slice `k` holding rows `ids[k]`), shaped
-    like the bundle `like`; the plain concatenation when the slices tile `0..R-1` in order."""
-    if np.array_equal(np.concatenate(ids), np.arange(n_rows(like))):
+    """The per-row sum of slice gradients `parts` (slice `k` holding rows `ids[k]`, each
+    `row_ids` of a consecutive run of batch elements), shaped like the bundle `like`; the plain
+    concatenation when the slices tile `0..R-1` in order."""
+    rows = n_rows(like)
+    if np.array_equal(np.concatenate(ids), np.arange(rows)):
         return _concat_rows(parts)
     total = jax.tree.map(jnp.zeros_like, like)
     for part, part_ids in zip(parts, ids, strict=True):
-        total = _add_rows(total, part, jnp.asarray(part_ids))
+        offset = int(part_ids[0])
+        assert np.array_equal(part_ids, row_ids(offset, part_ids.size, rows)), part_ids
+        total = _add_folded(total, part, offset, rows)
     return total
 
 

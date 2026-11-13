@@ -229,7 +229,8 @@ class CIFilterConfig(BaseConfig):
       constraints) never exceeds `alive_threshold` at any position of any pool prompt is removed:
       its CI is forced to 0 and its U and V are zeroed, so it cannot come back, and with the
       weight delta on its weight lies in the delta `W - UV` as if deleted. Removal is inherited
-      by filters initialized from this one (`alive/kept.npz`, absent when `prune` is false).
+      by filters initialized from this one (`alive/kept.npz`; with `prune` false it holds the
+      removal inherited from `init: ci_filter`, and is absent when there is none).
     - **ceiling** — the CI every consumer reads (training masks, imp-min, evaluations, alive list,
       grid) is the entrywise minimum of the trained CI fn's and the STARTING CI's, so the narrower
       objective can only switch components off. The starting CI is the decomposition's for

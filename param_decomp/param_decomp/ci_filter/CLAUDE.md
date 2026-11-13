@@ -67,7 +67,7 @@ only filtering mechanism: the **ceiling** (always on) makes the CI the entrywise
 trained fn's and each frozen ceiling fn's (the starting point's CI, chained through
 `init: ci_filter`), and the **prune** (on unless `prune: false`) gives the components dead on the
 pool at the start CI 0 and zeroed U/V (`remove_components`, saved as `alive/kept.npz`, inherited
-by later filters; no `kept.npz` with the prune off).
+by later filters; with the prune off `kept.npz` holds only an inherited removal, if any).
 `UNCONSTRAINED` remains for reading the decomposition's OWN CI (`source: run`).
 
 Run: `python -m param_decomp.ci_filter.scripts.run_ci_filter --config <yaml> --data_root <root>

@@ -293,7 +293,14 @@ def run_ci_filter(config: CIFilterConfig, data_root: Path, filter_id: str) -> Pa
             )
             save_kept(outputs.kept, {site: np.asarray(k) > 0 for site, k in kept.items()})
         else:
-            logger.info("prune off: no component removed")
+            logger.info("prune off: no component removed here")
+            if constraints.kept is not None:
+                # The removal inherited through `init: ci_filter` still holds: save it, so
+                # `trained_ci` reconstructs the constraints this filter trained under.
+                save_kept(
+                    outputs.kept,
+                    {site: np.asarray(k) > 0 for site, k in constraints.kept.items()},
+                )
         del components
         evaluate(0, ci_fn, references=True)
         # The starting CI fn's PGD eval runs up front, so a crash in it surfaces before training.
