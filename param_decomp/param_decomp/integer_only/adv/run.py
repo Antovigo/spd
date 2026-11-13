@@ -166,7 +166,10 @@ def remove_states(layout: AdvLayout) -> None:
 def stage_train(
     config: IntegerOnlyAdvConfig, layout: AdvLayout, io: Layout, run_dir: Path, data_root: Path
 ) -> dict[str, object]:
-    _, pool, check = inputs(io)
+    io_config, pool, check = inputs(io)
+    if config.prune:
+        # The prune reuses stage 1's original-CI maxima: they must be this checkpoint's.
+        assert io_config.step == config.step, (io_config.step, config.step)
     train_rows = np.setdiff1d(pool.problem_rows(), check)
     pd = TargetedPDConfig.model_validate(read_stored_config(product_document(run_dir))["pd"])
     coefficients = resolve_final(pd, pool.seq_len)
