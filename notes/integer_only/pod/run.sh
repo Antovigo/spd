@@ -5,7 +5,8 @@
 #     /workspace/spd/notes/integer_only/pod/run.sh              # detaches; prints the log path
 #     /workspace/spd/notes/integer_only/pod/run.sh --foreground # same, in this shell
 # Env overrides: RUN_ID (default p-512d73ab), CONFIG (default the addsub-answers-09 config),
-# ADV_CONFIG (run_adv.sh's, default the addsub-answers-09-adv config).
+# ADV_CONFIG (run_adv.sh's, default the addsub-answers-09-adv config), RUN_ADV (default 1; 0
+# skips the integer-only-adv stages).
 # Each stage writes $RUN/integer_only/status/<stage>.done or .failed; a done stage is skipped,
 # so rerunning this script resumes. Stage 3 runs one process per λ, λ number i on GPU i. The
 # script stops at the first failed stage (a failed `pick` means no λ met the rule: read
@@ -64,5 +65,9 @@ stage pick 0
 stage collect 0
 JAX_PLATFORMS=cpu stage applet ""
 # The integer-only-adv stages (plan_adv.md) on all GPUs; status in $RUN/integer_only_adv/status/.
-"$REPO/notes/integer_only/pod/run_adv.sh" || { echo "an integer-only-adv stage failed: see $RUN/integer_only_adv/logs"; exit 1; }
+if [ "${RUN_ADV:-1}" = 1 ]; then
+  "$REPO/notes/integer_only/pod/run_adv.sh" || { echo "an integer-only-adv stage failed: see $RUN/integer_only_adv/logs"; exit 1; }
+else
+  echo "=== integer-only-adv skipped (RUN_ADV=${RUN_ADV})"
+fi
 echo "=== all stages done $(date -u +%FT%TZ): $RUN/integer_only/README.md $RUN/integer_only_adv/README.md"

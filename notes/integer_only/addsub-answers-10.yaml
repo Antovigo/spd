@@ -1,0 +1,14 @@
+# Integer-only global mask of addsub-answers-10, final checkpoint. As addsub-answers-09.yaml, with
+# ONE λ (the mask sparsity coefficient): 5.0e-05, the λ the -09 sweep picked (Antoine, 2026-11-15:
+# no sweep). Every unlisted setting is the IntegerOnlyConfig default (plan:
+# notes/integer_only/plan.md). Run from the repository root (`prompts` is relative to it).
+# The pick rule still applies: if this λ's mean KL_int on Q is not below 0.1, `pick` fails and
+# nothing is collected.
+step: 40000
+prompts: param_decomp/param_decomp/experiments/lm/prompts/answer_words_addition_subtraction_0-399.txt
+templates:
+  add: "Answer: {a} plus {b} is "
+  sub: "Answer: {a} minus {b} is "
+lambdas: [5.0e-05]
+reference_kl_int: 0.1
+reference_source: "Antoine, 2026-11-13: fixed bar 0.1 (default was -08's 0.16479748860001564)"
