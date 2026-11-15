@@ -264,7 +264,8 @@ class HiddenPass[S: MaskSourceStrategy](eqx.Module):
 
     `points` is the pass's, not each term's: the pass IS "reconstruct these activations".
     The minimality's penalty config (shape, anneal, frequency block) is the target pass's,
-    shared by construction; only the activity coefficient is this pass's.
+    shared by construction; the activity coefficient is this pass's, and so is the frequency
+    coefficient when `frequency_coeff` overrides it.
 
     Generic over `S` so the non-target stream's hidden pass keeps its narrowing in the TYPE:
     the closed set plus the merged strategy only."""
@@ -307,11 +308,20 @@ class TargetedPDObjective(eqx.Module):
 
 
 def _minimality_term(
-    cfg: ImportanceMinimalityLossConfig, name: str, activity_coeff: LossCoeff
+    cfg: ImportanceMinimalityLossConfig,
+    name: str,
+    activity_coeff: LossCoeff,
+    frequency_coeff: LossCoeff | None = None,
 ) -> MinimalityTerm:
+    """`frequency_coeff` overrides `cfg.frequency.coeff` for this pass only (a hidden pass's
+    `frequency_coeff`); `None` keeps the shared one."""
     assert all(k.frac > 0 for k in cfg.gamma.points), (
         f"gamma knots must all keep frac > 0, got {cfg.gamma.points}: a zero "
         "width collapses the smooth-L0 threshold band the gradient lives on"
+    )
+    assert frequency_coeff is None or cfg.frequency is not None, (
+        f"{name}: a frequency_coeff override needs a `frequency` block on the target "
+        "ImportanceMinimalityLoss"
     )
     return MinimalityTerm(
         name,
@@ -319,7 +329,9 @@ def _minimality_term(
         cfg.gamma,
         cfg.normalize_at_one,
         FrequencyMinimalityTerm(
-            RuntimeSchedule.from_coeff(cfg.frequency.coeff),
+            RuntimeSchedule.from_coeff(
+                cfg.frequency.coeff if frequency_coeff is None else frequency_coeff
+            ),
             cfg.frequency.reference_datapoint_count,
         )
         if cfg.frequency is not None
@@ -513,7 +525,9 @@ def build_targeted_objective(
         )
         assert h_recon, "hidden pass has no recon terms"
         hidden_pass = HiddenPass(
-            minimality=_minimality_term(minimality_config, "hidden/impmin", hidden.impmin_coeff),
+            minimality=_minimality_term(
+                minimality_config, "hidden/impmin", hidden.impmin_coeff, hidden.frequency_coeff
+            ),
             recon=h_recon,
             points=hidden.points,
             normalization=hidden.normalization,
@@ -523,7 +537,10 @@ def build_targeted_objective(
         if nontarget.hidden is not None:
             nontarget_hidden_pass = HiddenPass(
                 minimality=_minimality_term(
-                    minimality_config, "nontarget_hidden/impmin", nontarget.hidden.impmin_coeff
+                    minimality_config,
+                    "nontarget_hidden/impmin",
+                    nontarget.hidden.impmin_coeff,
+                    nontarget.hidden.frequency_coeff,
                 ),
                 recon=build_nontarget_hidden_terms(nontarget.hidden.recon, sites),
                 points=hidden.points,

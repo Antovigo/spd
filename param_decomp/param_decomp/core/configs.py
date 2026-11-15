@@ -887,6 +887,16 @@ class HiddenPassConfig(BaseConfig):
             "authored here."
         ),
     )
+    frequency_coeff: LossCoeff | None = Field(
+        default=None,
+        description=(
+            "OPTIONAL override of this pass's frequency-penalty coefficient. `None` (default) "
+            "uses the target ImportanceMinimalityLoss's `frequency.coeff`, as every pass does; "
+            "set it to scale the output passes' frequency pressure without the hidden one's. "
+            "Requires the target pass to author a `frequency` block (the penalty's reference "
+            "count stays the target's)."
+        ),
+    )
     recon: list[Annotated[HiddenReconLossMetricConfig, Discriminator("type")]] = Field(
         ..., min_length=1
     )
@@ -933,6 +943,10 @@ class NontargetHiddenConfig(BaseConfig):
     Delta pinned fully on, as every non-target forward is."""
 
     impmin_coeff: NonNegativeFloat | ScheduleConfig
+    frequency_coeff: LossCoeff | None = Field(
+        default=None,
+        description="OPTIONAL frequency-coefficient override, as `pd.hidden.frequency_coeff`.",
+    )
     recon: list[Annotated[NontargetHiddenReconLossMetricConfig, Discriminator("type")]] = Field(
         ..., min_length=1
     )

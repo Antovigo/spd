@@ -25,6 +25,7 @@ from param_decomp.core.components import SiteC, init_component_stacks
 from param_decomp.core.configs import (
     AdamWOptimizerConfig,
     BatchHiddenActsNormalization,
+    FrequencyMinimalityConfig,
     HiddenActsNormalization,
     HiddenPassConfig,
     ImportanceMinimalityLossConfig,
@@ -37,7 +38,7 @@ from param_decomp.core.configs import (
 )
 from param_decomp.core.losses import init_frequency_estimator
 from param_decomp.core.model import PlacedModel
-from param_decomp.core.objective import build_targeted_objective
+from param_decomp.core.objective import MinimalityTerm, build_targeted_objective
 from param_decomp.core.run_state import _adamw_optimizer
 from param_decomp.core.schedule import ScheduleConfig
 from param_decomp.core.train import (
@@ -407,6 +408,42 @@ def test_hidden_pass_and_dual_ci_must_agree():
     target_batch, broad = _batches(cfg)
     with pytest.raises(AssertionError, match="head count and the objective's pass roles"):
         step(_model_of(), mismatched, target_batch, broad, jax.random.PRNGKey(7))
+
+
+def test_hidden_frequency_coeff_overrides_only_the_hidden_passes() -> None:
+    """`frequency_coeff` on a hidden pass replaces the target block's frequency coefficient
+    for that pass alone; the two output passes keep the shared one, and a hidden pass without
+    the override keeps it too."""
+    sites = site_specs(
+        TMSConfig(n_features=5, n_hidden=2), (SiteC("linear1", 8), SiteC("linear2", 6))
+    )
+    loss_metrics = (
+        ImportanceMinimalityLossConfig(
+            coeff=3e-3,
+            gamma=ScheduleConfig.constant(1.0),
+            frequency=FrequencyMinimalityConfig(coeff=2e-4, reference_datapoint_count=64),
+        ),
+        StochasticReconLossConfig(coeff=1.0),
+    )
+    hidden, nontarget = _hidden()
+    hidden = hidden.model_copy(update={"frequency_coeff": 1e-4})
+    objective = build_targeted_objective(loss_metrics, nontarget, sites, hidden=hidden)
+    assert objective.hidden is not None and objective.nontarget_hidden is not None
+    frac = jnp.asarray(0.5, jnp.float32)
+
+    def freq(term: MinimalityTerm) -> float:
+        assert term.frequency is not None
+        return float(term.frequency.coeff.at(frac))
+
+    assert freq(objective.target.minimality) == pytest.approx(2e-4)
+    assert freq(objective.nontarget.minimality) == pytest.approx(2e-4)
+    assert freq(objective.hidden.minimality) == pytest.approx(1e-4)
+    assert freq(objective.nontarget_hidden.minimality) == pytest.approx(2e-4)
+    # The activity coefficients are untouched by the override.
+    assert float(objective.hidden.minimality.activity_coeff.at(frac)) == pytest.approx(5e-3)
+
+    with pytest.raises(AssertionError, match="needs a `frequency` block"):
+        build_targeted_objective(_loss_metrics(), nontarget, sites, hidden=hidden)
 
 
 def test_nontarget_hidden_requires_the_target_hidden_pass():
