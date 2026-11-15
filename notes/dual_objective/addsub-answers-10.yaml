@@ -1,11 +1,11 @@
 # addsub-answers-10 (2026-11-15): addsub-answers-09 (p-512d73ab, header below) with the
-# importance-minimality ACTIVITY coefficient of the two OUTPUT-reconstruction passes x 4/3
+# importance-minimality ACTIVITY coefficient of the two OUTPUT-reconstruction passes x 1.5
 # (Antoine, 2026-11-15). Exactly three leaves change from -09:
-#   pd.loss_metrics ImportanceMinimalityLoss coeff.max_val  2.0e-04 -> 2.6666667e-04
-#       (knots unchanged: 4x the final value at step 0, linear to the final 6.6666667e-05 at
+#   pd.loss_metrics ImportanceMinimalityLoss coeff.max_val  2.0e-04 -> 3.0e-04
+#       (knots unchanged: 4x the final value at step 0, linear to the final 7.5e-05 at
 #       step 10000 (0.25 of 40k), then held; -09's final value was 5.0e-05)
-#   nontarget.impmin_coeff.max_val                          8.0e-04 -> 1.0666667e-03
-#       (same knots; final 2.6666667e-04, -09's 2.0e-04)
+#   nontarget.impmin_coeff.max_val                          8.0e-04 -> 1.2e-03
+#       (same knots; final 3.0e-04, -09's 2.0e-04)
 #   run_name
 # UNCHANGED: the two hidden-pass activity coefficients (pd.hidden.impmin_coeff 2.0e-04,
 # nontarget.hidden.impmin_coeff 8.0e-04), and the frequency coefficient (1.0e-04 -> 2.5e-05).
@@ -305,10 +305,10 @@ pd:
     grad_clip_norm: null
   loss_metrics:
     - type: ImportanceMinimalityLoss
-      # 4x the final 6.6666667e-05 at step 0, linear to 6.6666667e-05 at step 10000 (0.25 of
+      # 4x the final 7.5e-05 at step 0, linear to 7.5e-05 at step 10000 (0.25 of
       # 40k), then held — the reference's absolute step count, not its fraction.
       coeff:
-        max_val: 2.6666667e-04  # 2.0e-04 in -09: x 4/3 (Antoine, 2026-11-15)
+        max_val: 3.0e-04  # 2.0e-04 in -09: x 1.5 (Antoine, 2026-11-15)
         points:
           - {at: 0.0, frac: 1.0}
           - {at: 0.25, frac: 0.25}
@@ -460,10 +460,10 @@ nontarget:
   # The broad-stream passes dominate the step (seq 64 vs the pool's 5 tokens); an OOM at
   # dp>1 HANGS instead of raising (rank 0 dies mid-allocation, the others wait on the
   # clique) — the probe ladder runs every shape under `timeout -k` for exactly this reason.
-  # 4x the target output pass's coefficient at every step: 1.0666667e-03 at step 0, linear to
-  # 2.6666667e-04 at step 10000, then held.
+  # 4x the target output pass's coefficient at every step: 1.2e-03 at step 0, linear to
+  # 3.0e-04 at step 10000, then held.
   impmin_coeff:
-    max_val: 1.0666667e-03  # 8.0e-04 in -09: x 4/3 (Antoine, 2026-11-15)
+    max_val: 1.2e-03  # 8.0e-04 in -09: x 1.5 (Antoine, 2026-11-15)
     points:
       - {at: 0.0, frac: 1.0}
       - {at: 0.25, frac: 0.25}
