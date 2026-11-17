@@ -80,6 +80,7 @@
   <span><label>view</label><select id="view"></select></span>
   <span id="sortbox" style="display:none"><label>sort</label><select id="sort">
     <option value="d_ce">dCE (screen), high first</option><option value="ci">mean CI</option></select></span>
+  <span id="periodbox" style="display:none"><label>period</label><select id="period"></select> <span id="periodnote" style="color:var(--muted)"></span></span>
   <span><label>mean CI &ge;</label><input type="range" id="thr" min="0" max="1" step="0.001" style="width:180px">
     <span id="thrval"></span></span>
   <span><label>px/square</label><input type="number" id="px" min="1" max="16" step="1" value="1" style="width:52px"></span>
@@ -113,6 +114,8 @@
 <script src="manifest.js"></script>
 <!-- Optional: present only after a pruning run marked this grid (window.PRUNED). -->
 <script src="pruned.js" onerror="window.PRUNED = null"></script>
+<!-- Optional: a per-component periodicity index (window.PERIODICITY), written by an analysis. -->
+<script src="periodicity.js" onerror="window.PERIODICITY = null"></script>
 <script>
 "use strict";
 const $ = id => document.getElementById(id);
@@ -128,6 +131,62 @@ const selectedKey = () => `${SLICES.ops[+$("op").value]}:${SLICES.positions[+$("
 const positionLabel = p => `${p} (${SLICES.position_labels[p]})`;
 // A pruning run's per-component record (`pruned.js`), else null.
 const pruneInfo = (name, c) => window.PRUNED?.sites?.[name]?.[c] ?? null;
+// Periodicity index (`periodicity.js`): PERIODICITY.positions[key][site][c] = {variable: [tau, ...]}, the
+// exact periods tau (dividing 100) of component c's inner activation in each tested variable (e.g. "a", "b",
+// "a+b", "r") at that slice; [] = tested, none found. key = "<op>:<position>" when the index is per operation
+// (integer_only/periodicity.py), else "<position>" (one index for both ops). periodsOf -> that object, or
+// undefined when the component (or the whole slice) is not indexed. PERIODICITY.constancy[position][site][c] =
+// "constant" (one value on every prompt) or "op_constant" (one value per op); every indexed component was tested
+// at the positions in constancy_positions, and an absent entry there means neither. Menu values: "all", "none"
+// (no period in any variable), "<v>:<tau>", "const:constant", "const:op_constant".
+const posKey = () => String(cur.positions[0]);
+const periodKey = () => {
+  const P = window.PERIODICITY, k = `${cur.ops[0]}:${posKey()}`;
+  return P?.positions?.[k] || P?.variables?.[k] ? k : posKey();
+};
+const periodIndex = () => window.PERIODICITY?.positions?.[periodKey()] ?? null;
+const constTested = () => !!window.PERIODICITY?.constancy_positions?.includes(posKey());
+const constOf = (name, c) => window.PERIODICITY?.constancy?.[posKey()]?.[name]?.[String(c)] ?? null;
+const anyIndex = () => !!periodIndex() || constTested();
+const CONST_LABELS = { constant: "constant", op_constant: "constant per op (one value for +, one for \u2212)" };
+const periodsOf = (name, c) => periodIndex()?.[name]?.[String(c)];
+function periodPass(name, c) {
+  const want = $("period").value;
+  if (want === "all" || !anyIndex()) return true;
+  if (want.startsWith("const:")) return constOf(name, c) === want.slice(6);
+  const ps = periodsOf(name, c);
+  if (ps === undefined) return false;
+  if (want === "none") return Object.values(ps).every(l => l.length === 0);
+  const i = want.lastIndexOf(":"), v = want.slice(0, i), tau = +want.slice(i + 1);
+  return !!ps[v]?.includes(tau);
+}
+function periodTooltip(name, c) {
+  const lines = [];
+  if (periodIndex()) {
+    const ps = periodsOf(name, c);
+    lines.push(ps === undefined ? "period: not indexed"
+      : "period: " + Object.entries(ps).map(([v, l]) => `${v} ${l.length ? l.join(", ") : "none"}`).join("; "));
+  }
+  if (constTested()) lines.push(`constancy: ${CONST_LABELS[constOf(name, c)] ?? "neither"}`);
+  return lines.length ? lines.join("\n") : null;
+}
+// Rebuilt per slice: the tested variables differ (a at the token a, a, b and the answer later, ...). Keeps the
+// current choice when it exists here, else "all".
+function periodMenu() {
+  const P = window.PERIODICITY, p = periodKey(), sel = $("period");
+  let keep = sel.value;
+  if (!keep) try { keep = localStorage.getItem("abgrid-period"); } catch { keep = null; }
+  const vars = P.variables?.[p] ?? [], blocks = P.blocks?.[p] ?? [];
+  const thr = P.const_threshold;
+  sel.innerHTML = '<option value="all">all</option>'
+    + vars.map(v => `<optgroup label="${v}">`
+      + P.taus.map(t => `<option value="${v}:${t}">${v} \u00b7 ${t}</option>`).join("") + "</optgroup>").join("")
+    + (vars.length ? `<option value="none">none found (indexed: blocks ${blocks[0]}-${blocks.at(-1)})</option>` : "")
+    + (constTested() ? `<optgroup label="constancy (one / two values explain \u2265 ${thr} of the energy)">`
+      + Object.entries(CONST_LABELS).map(([k, l]) => `<option value="const:${k}">${l}</option>`).join("")
+      + "</optgroup>" : "");
+  sel.value = [...sel.options].some(o => o.value === keep) ? keep : "all";
+}
 const fmt = (x, d = 4) => (Math.abs(x) >= 1e-3 || x === 0 ? x.toFixed(d) : x.toExponential(1));
 const tip = () => document.getElementById("tip");
 function showTip(ev, text) {
@@ -345,7 +404,7 @@ function visibleComponents() {
         atPos = Math.max(atPos, arr[pi * m.C + c]);
         for (let p = 0; p < nPos; p++) best = Math.max(best, arr[p * m.C + c]);
       }
-      if (atPos >= thr || (thr <= cur.mean_ci_floor && best >= cur.mean_ci_floor))
+      if ((atPos >= thr || (thr <= cur.mean_ci_floor && best >= cur.mean_ci_floor)) && periodPass(m.name, c))
         out.push({
           mi, si, c, name: m.name, meanCi: atPos,
           meanCiOut: data.meanCi[pi * m.C + c],
@@ -402,12 +461,12 @@ function renderGallery() {
       lbl.className = "lbl";
       lbl.textContent = `#${comp.c}`;
       tile.append(cv, lbl);
-      const info = pruneInfo(comp.name, comp.c);
-      if (info) {
-        const text = pruneTooltip(info);
+      const info = pruneInfo(comp.name, comp.c), per = periodTooltip(comp.name, comp.c);
+      if (info || per) {
+        const text = [per, info && pruneTooltip(info)].filter(Boolean).join("\n");
         tile.onmouseenter = tile.onmousemove = ev => showTip(ev, text);
         tile.onmouseleave = hideTip;
-        if (info.pruned) {
+        if (info?.pruned) {
           const mark = document.createElement("span");
           mark.className = "pruned";
           mark.textContent = "✕";
@@ -597,6 +656,13 @@ function setPayload(key, payload) {
   viewSel.innerHTML = views.map(v => `<option value="${v}">${VIEW_OPTIONS[v]}</option>`).join("");
   viewSel.value = views.includes(keepView) ? keepView : window.ALIVE_MODE ? "inner_alive" : views[0];
   $("count").textContent = "";
+  // The index covers some slices only (e.g. the operands); elsewhere the menu is off and shows all.
+  if (window.PERIODICITY) periodMenu();
+  $("period").disabled = !anyIndex();
+  $("periodnote").textContent = anyIndex() ? "" : `(indexed at ${[...new Set([
+    ...Object.keys(window.PERIODICITY?.positions ?? {}).map(k => k.split(":").at(-1)),
+    ...(window.PERIODICITY?.constancy_positions ?? [])])]
+    .sort((x, y) => x - y).map(p => positionLabel(+p)).join(", ")} only)`;
   render();
   loadAliveSlice();
 }
@@ -621,6 +687,14 @@ if (SLICES) {
   $("thr").oninput = render;
   $("sort").onchange = render;
   if (window.PRUNED) $("sortbox").style.display = "";
+  if (window.PERIODICITY) {
+    // Any-of: a component with several periods (or variables) shows under each of them.
+    $("periodbox").style.display = "";
+    $("period").onchange = () => {
+      try { localStorage.setItem("abgrid-period", $("period").value); } catch { /* storage blocked */ }
+      render();
+    };
+  }
   $("px").oninput = render;
   $("thr").value = 0;
   loadSelected();

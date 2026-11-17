@@ -24,6 +24,10 @@ Method, settings, stages and output layout: `notes/integer_only/plan.md`.
   README text; `collect_dataset` writes it for any component set, CI fn and constraints.
 - `applet.py` — `(a, b)` slices for `ci_filter/grids_app.html` from the dataset
   (`write_applet`, view labels per pipeline).
+- `periodicity.py` — per (operation, position, variable a / b / answer) period labels and per
+  position constancy labels of a collected dataset's inner activations (addsub-08's tests);
+  writes `datasets/periodicity/` and the applet's `periodicity.js` (its period menu). Standalone
+  CLI (`--run_dir`), not a stage.
 - `layout.py` — the output layout (module docstring) and the top-level README text.
 - `run.py` — the CLI: one subcommand per stage, done/failed markers in `status/`.
 - `adv/` — the integer-only-adv CI filter (`notes/integer_only/plan_adv.md`): the run's CI fn
